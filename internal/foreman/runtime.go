@@ -141,6 +141,9 @@ func (rt *Runtime) PauseRun(runID string) error {
 	entry := rt.active[runID]
 	rt.mu.Unlock()
 	if entry == nil {
+		if status := rt.store.RunStatus(runID); status != "" && status != "running" {
+			return fmt.Errorf("run is already %s", status)
+		}
 		return errors.New("run is not active")
 	}
 	if entry.control == nil {

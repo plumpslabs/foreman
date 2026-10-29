@@ -71,16 +71,28 @@ def load_tool(module_name, class_name):
         return None
 
 
-def project_overview(root, max_entries=400):
-    """Shallow file listing so the agent starts with a map of the workspace."""
+def project_overview(root, max_entries=150):
+    """Shallow file listing so the agent starts with a map of the workspace.
+
+    Kept deliberately lean: large or binary files are skipped and the listing
+    is capped so the run prompt stays small (huge file maps inflate every
+    request's cached input tokens).
+    """
     skip_dirs = {".git", "node_modules", ".venv", "venv", "__pycache__",
                  "dist", "build", "target", ".foreman", ".idea", ".vscode"}
+    max_bytes = 256 * 1024
     entries = []
     for dirpath, dirnames, filenames in os.walk(root):
         dirnames[:] = [d for d in dirnames if d not in skip_dirs and not d.startswith(".")]
         rel = os.path.relpath(dirpath, root)
         for name in sorted(filenames):
             if name.startswith(".") and name not in (".env.example",):
+                continue
+            full = os.path.join(dirpath, name)
+            try:
+                if os.path.getsize(full) > max_bytes:
+                    continue
+            except OSError:
                 continue
             path = name if rel == "." else os.path.join(rel, name)
             entries.append(path)

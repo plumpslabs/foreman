@@ -189,8 +189,9 @@ export function App() {
   const pauseRun = async (runId) => {
     try {
       await api(`/api/runs/${encodeURIComponent(runId)}/pause`, { method: 'POST', body: '{}' });
-      notify('Pause requested — the agent will stop at a safe point');
+      notify('Pause diminta — agent akan berhenti di titik aman');
       await refresh();
+      setTimeout(() => refresh(), 1500);
     } catch (error) {
       notify(error.message);
     }

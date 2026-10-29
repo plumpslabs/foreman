@@ -244,6 +244,18 @@ func (s *Store) Snapshot() WorkspaceState {
 	return copy
 }
 
+// RunStatus returns the current status of a run, or "" if the run is unknown.
+func (s *Store) RunStatus(runID string) string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for _, run := range s.state.Runs {
+		if run.ID == runID {
+			return run.Status
+		}
+	}
+	return ""
+}
+
 func (s *Store) CreateRoom(name, goal string, teamIDs []string) (Room, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
