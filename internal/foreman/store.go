@@ -256,6 +256,67 @@ func (s *Store) RunStatus(runID string) string {
 	return ""
 }
 
+// HasRunningRunForTask reports whether a run is currently in flight for a task.
+func (s *Store) HasRunningRunForTask(taskID string) bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for _, run := range s.state.Runs {
+		if run.TaskID == taskID && run.Status == "running" {
+			return true
+		}
+	}
+	return false
+}
+
+// RoomRecentContext renders the most recent room chat and answered questions as
+// compact context so a chat run remembers what was said even across messages.
+func (s *Store) RoomRecentContext(roomID string) string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	var room *Room
+	for i := range s.state.Rooms {
+		if s.state.Rooms[i].ID == roomID {
+			room = &s.state.Rooms[i]
+			break
+		}
+	}
+	if room == nil {
+		return ""
+	}
+	var b strings.Builder
+	taken := 0
+	for i := len(room.Messages) - 1; i >= 0 && taken < 10; i-- {
+		m := room.Messages[i]
+		author := "User"
+		if m.Role == "agent" {
+			author = m.AgentName
+			if author == "" {
+				author = "Agent"
+			}
+		}
+		content := m.Content
+		if r := []rune(content); len(r) > 500 {
+			content = string(r[:500]) + "…"
+		}
+		if content == "" {
+			continue
+		}
+		fmt.Fprintf(&b, "**%s:** %s\n\n", author, content)
+		taken++
+	}
+	for _, q := range room.Questions {
+		if q.Answer == "" {
+			continue
+		}
+		fmt.Fprintf(&b, "**Question:** %s\n**Answer:** %s\n\n", q.Prompt, q.Answer)
+	}
+	out := strings.TrimSpace(b.String())
+	if r := []rune(out); len(r) > 6000 {
+		out = string(r[:6000]) + "\n…"
+	}
+	return out
+}
+
 func (s *Store) CreateRoom(name, goal string, teamIDs []string) (Room, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()

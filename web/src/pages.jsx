@@ -113,7 +113,7 @@ function TemplateCard({ template, onUse }) {
       <div class="chip-row" style="margin-bottom:14px">
         {(template.agents || []).map((a) => <span class="chip">{esc(a.name)}</span>)}
       </div>
-      <button class="btn" style="width:100%;margin-top:auto" onClick={onUse}>
+      <button class="btn" style="width:100%;margin-top:auto" onClick={() => onUse(template)}>
         <Icon name="plus" size={14} />Use this template
       </button>
     </article>
@@ -134,7 +134,7 @@ function ActivityItem({ icon, text, time }) {
 
 /* ---------- Pages ---------- */
 
-export function HomePage({ state, openRoom, setModal, onTeamCreate, navigate }) {
+export function HomePage({ state, openRoom, setModal, onTeamCreate, onUseTemplate, navigate }) {
   const { rooms, templates, tasks, skills } = state;
   const completedTasks = tasks.filter((t) => t.status === 'done').length;
   return (
@@ -176,7 +176,7 @@ export function HomePage({ state, openRoom, setModal, onTeamCreate, navigate }) 
         </div>
       </div>
       <div class="template-grid">
-        {templates.map((t) => <TemplateCard key={t.id} template={t} onUse={onTeamCreate} />)}
+        {templates.map((t) => <TemplateCard key={t.id} template={t} onUse={onUseTemplate} />)}
       </div>
     </>
   );
@@ -1033,7 +1033,7 @@ function Board({ roomId, tasks, runTask, setModal }) {
   );
 }
 
-export function TeamsPage({ state, openTeam, onTeamCreate }) {
+export function TeamsPage({ state, openTeam, onTeamCreate, onUseTemplate }) {
   const { teams, templates } = state;
   return (
     <>
@@ -1086,24 +1086,7 @@ export function TeamsPage({ state, openTeam, onTeamCreate }) {
         </div>
       </div>
       <div class="grid" style="grid-template-columns:repeat(auto-fill,minmax(280px,1fr));">
-        {templates.map((t) => (
-          <article class="team-card">
-            <div class="team-card-top"><div class="team-icon"><Icon name="users" size={19} /></div></div>
-            <div class="team-name">{esc(t.name)}</div>
-            <div class="team-desc">{esc(t.purpose)}</div>
-            <div class="meta-text" style="margin-bottom:9px">
-              Main agent: <b>{esc(t.mainAgent)}</b> · {(t.agents || []).length} roles
-            </div>
-            <div style="display:flex;gap:5px;flex-wrap:wrap">
-              {(t.agents || []).map((a) => (
-                <span class="tag">{esc(a.name)}</span>
-              ))}
-            </div>
-            <button class="btn" style="margin-top:14px;width:100%" onClick={onTeamCreate}>
-              <Icon name="plus" size={14} />Use this template
-            </button>
-          </article>
-        ))}
+        {templates.map((t) => <TemplateCard key={t.id} template={t} onUse={onUseTemplate} />)}
       </div>
     </>
   );

@@ -127,9 +127,11 @@ func (s *Store) RoomMainAgentName(roomID string) string {
 	return ""
 }
 
-// CreateChatTask records a room chat message as a hidden task so a run can be
-// started for it. The task is excluded from the Kanban and task progress views.
-func (s *Store) CreateChatTask(roomID, content string) (Task, error) {
+// GetOrCreateChatThread returns the room's hidden chat task, creating it on
+// first use. Later messages reuse the same thread so the conversation keeps its
+// memory (the persisted OpenHands conversation resumes) instead of starting
+// fresh per message. The mentioned agent is resolved across ALL invited teams.
+func (s *Store) GetOrCreateChatThread(roomID, content string) (Task, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -146,18 +148,34 @@ func (s *Store) CreateChatTask(roomID, content string) (Task, error) {
 	if len(room.TeamIDs) == 0 {
 		return Task{}, errors.New("invite a team to this room before chatting with an agent")
 	}
+
+	// Resolve the mention across every invited team; fall back to the first
+	// team's main agent.
 	var team *Team
-	for i := range s.state.Teams {
-		if s.state.Teams[i].ID == room.TeamIDs[0] {
-			team = &s.state.Teams[i]
+	var agentName, prompt string
+	for _, teamID := range room.TeamIDs {
+		for i := range s.state.Teams {
+			if s.state.Teams[i].ID != teamID {
+				continue
+			}
+			tm := &s.state.Teams[i]
+			if team == nil {
+				team = tm
+			}
+			if name, rest := parseChatMention(content, tm); name != "" {
+				team = tm
+				agentName = name
+				prompt = rest
+				break
+			}
+		}
+		if agentName != "" {
 			break
 		}
 	}
 	if team == nil {
 		return Task{}, errors.New("the invited team no longer exists")
 	}
-
-	agentName, prompt := parseChatMention(content, team)
 	if agentName == "" {
 		agentName = team.MainAgent
 	}
@@ -165,11 +183,26 @@ func (s *Store) CreateChatTask(roomID, content string) (Task, error) {
 	if prompt == "" {
 		prompt = strings.TrimSpace(content)
 	}
+
+	// Reuse the existing (non-running) hidden thread so history is preserved.
+	for i := range s.state.Tasks {
+		t := &s.state.Tasks[i]
+		if t.RoomID == roomID && t.Hidden && t.Status != "running" {
+			previous := s.state.Tasks[i].Description
+			t.Description = prompt
+			t.UpdatedAt = time.Now().UTC()
+			if err := s.save(); err != nil {
+				s.state.Tasks[i].Description = previous
+				return Task{}, err
+			}
+			return *t, nil
+		}
+	}
+
 	title := prompt
 	if len([]rune(title)) > 80 {
 		title = string([]rune(title)[:80]) + "…"
 	}
-
 	task := Task{
 		ID:           uuid.NewString(),
 		RoomID:       roomID,
@@ -222,12 +255,16 @@ func (s *Store) AppendAgentReply(roomID, agentName, content string) error {
 	return fmt.Errorf("unknown room id %q", roomID)
 }
 
-// StartChatRun creates a hidden chat task for the message and starts a run for
-// the mentioned agent (or the team's main agent by default).
+// StartChatRun reuses the room's chat thread (for memory) and starts a run for
+// the mentioned agent (or the team's main agent by default). If a chat run is
+// already active for the room, it refuses so two prompts cannot interleave.
 func (rt *Runtime) StartChatRun(parent context.Context, roomID, content string) (AgentRun, error) {
-	task, err := rt.store.CreateChatTask(roomID, content)
+	task, err := rt.store.GetOrCreateChatThread(roomID, content)
 	if err != nil {
 		return AgentRun{}, err
+	}
+	if rt.store.HasRunningRunForTask(task.ID) {
+		return AgentRun{}, errors.New("agent masih sibuk dengan pesan sebelumnya — tunggu sampai selesai, atau pause dulu")
 	}
 	return rt.StartTask(parent, task.ID)
 }

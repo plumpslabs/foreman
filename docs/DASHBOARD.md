@@ -117,11 +117,14 @@ gain a mode plus a file tree.
 - **Live working strip** — above the input, only agents with an active run are shown as pulsing
   chips with a status label (reasoning / acting / working); no idle agents are listed. While a chat
   run is active the room auto-polls so the agent's reply appears in the chat without manual reloads.
-- **Send = run** — a user message is stored in chat **and** starts an agent run (a hidden task
-  spawned per message; invisible in the Kanban and task progress). The agent's reply is appended back
-  into the chat **under the responding agent's name** when the run finishes, and questions from the
-  agent appear as decision cards. If the room has no invited team (or no configured provider), the
-  message is still stored and a warning is returned to the sender. If the OpenHands SDK is missing,
+- **Send = run** — a user message is stored in chat **and** starts an agent run. Chat runs share a
+  single per-room hidden thread (invisible in Kanban), so the conversation keeps its memory: each
+  new message resumes the persisted OpenHands conversation and is given the recent room chat plus
+  answered questions as context. Mentions resolve across **all** invited teams; without a mention,
+  the room's primary team main agent is used. If a chat run is already active, the new message is
+  stored but a warning tells you the agent is busy, so prompts cannot interleave. Questions from the
+  agent appear as decision cards, and replies land under the responding agent's name. Short small
+  talk is answered locally (disable via `disableQuickReplies` in Settings). If the OpenHands SDK is missing,
   a banner offers a one-click install (`POST /api/engine/install` runs pip in the engine's Python;
   `GET /api/engine/status` probes whether the SDK is importable). No restart is required — the bridge
   spawns a fresh Python for every run.

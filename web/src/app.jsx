@@ -197,10 +197,25 @@ export function App() {
     }
   };
 
+  const importTeamTemplate = async (template) => {
+    try {
+      const team = await api('/api/teams/import', {
+        method: 'POST',
+        body: JSON.stringify({ templateId: template.id, name: template.name }),
+      });
+      await refresh();
+      notify(`Team "${template.name}" diimpor — ${(template.agents || []).length} agent`);
+      openTeam(team.id);
+    } catch (error) {
+      notify(error.message);
+    }
+  };
+
   const pageProps = {
     state: current, notify, refresh, setModal, navigate,
     openRoom, openAgent, openTeam, openSkill, openTeamCreate,
     runTask, deleteSkill, cancelRun, pauseRun, deleteRoom,
+    importTeamTemplate,
   };
 
   const pages = {

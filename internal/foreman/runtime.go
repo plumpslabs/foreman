@@ -171,6 +171,11 @@ func (rt *Runtime) execute(ctx context.Context, control *RunControl, run AgentRu
 	}
 
 	prompt := buildRunPrompt(room, task, team, skillsContext(team, task, rt.store.Snapshot().Skills))
+	if task.Hidden {
+		if recent := rt.store.RoomRecentContext(room.ID); recent != "" {
+			prompt += "\n\n## Recent room conversation\n\n" + recent
+		}
+	}
 	agentToolIDs := agentToolIDs(team, task)
 	snapshot := rt.store.Snapshot()
 	req := EngineRequest{

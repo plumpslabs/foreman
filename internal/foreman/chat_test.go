@@ -29,6 +29,52 @@ func TestClassifyChatMessage(t *testing.T) {
 	}
 }
 
+func TestChatThreadMultiTeamMentionAndReuse(t *testing.T) {
+	store, err := OpenStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	quick, err := store.ImportTeam("quick-fix", "Quick")
+	if err != nil {
+		t.Fatal(err)
+	}
+	everyday, err := store.ImportTeam("everyday", "Everyday")
+	if err != nil {
+		t.Fatal(err)
+	}
+	room, err := store.CreateRoom("R", "g", []string{quick.ID, everyday.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Mention resolves across teams: Vera belongs to the everyday template.
+	task1, err := store.GetOrCreateChatThread(room.ID, "@Vera review diffs")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if task1.AgentName != "Vera" || task1.TeamID != everyday.ID {
+		t.Fatalf("mention not resolved across teams: %#v", task1)
+	}
+
+	// Later messages reuse the same hidden thread so memory persists.
+	task2, err := store.GetOrCreateChatThread(room.ID, "lanjutkan reviewnya")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if task2.ID != task1.ID {
+		t.Fatalf("expected thread reuse (%s != %s)", task1.ID, task2.ID)
+	}
+	hidden := 0
+	for _, tk := range store.Snapshot().Tasks {
+		if tk.Hidden {
+			hidden++
+		}
+	}
+	if hidden != 1 {
+		t.Fatalf("expected exactly one hidden chat thread, got %d", hidden)
+	}
+}
+
 func TestParseChatMentionLongestMatchWins(t *testing.T) {
 	team := &Team{
 		MainAgent: "Atlas",
