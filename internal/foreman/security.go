@@ -66,11 +66,16 @@ func validateProviderDestination(ctx context.Context, raw string) error {
 	return nil
 }
 
+// credentialsPath is the global credential file (next to the global profile).
+func (s *Store) credentialsPath() string {
+	return filepath.Join(filepath.Dir(s.globalPath), "credentials.json")
+}
+
 func (s *Store) saveProviderCredential(projectPath, providerID, secret string) error {
-	if err := os.MkdirAll(filepath.Join(projectPath, ".foreman"), 0700); err != nil {
+	path := s.credentialsPath()
+	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
 		return err
 	}
-	path := filepath.Join(projectPath, ".foreman", "credentials.json")
 	credentials := map[string]string{}
 	if data, err := os.ReadFile(path); err == nil {
 		if err := json.Unmarshal(data, &credentials); err != nil {
@@ -119,10 +124,15 @@ func (s *Store) deleteProviderCredential(projectPath, providerID string) error {
 }
 
 func (s *Store) loadProviderCredential(projectPath, providerID string) (string, error) {
-	path := filepath.Join(projectPath, ".foreman", "credentials.json")
+	path := s.credentialsPath()
 	data, err := os.ReadFile(path)
 	if errors.Is(err, os.ErrNotExist) {
-		return "", nil
+		// Legacy: try the project-local credential file.
+		legacy := filepath.Join(projectPath, ".foreman", "credentials.json")
+		data, err = os.ReadFile(legacy)
+		if errors.Is(err, os.ErrNotExist) {
+			return "", nil
+		}
 	}
 	if err != nil {
 		return "", err

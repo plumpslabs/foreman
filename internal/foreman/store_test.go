@@ -7,6 +7,27 @@ import (
 	"testing"
 )
 
+// TestMain isolates the user-level global profile so package tests never touch
+// the real ~/.foreman/global.json.
+func TestMain(m *testing.M) {
+	tmp, err := os.MkdirTemp("", "foreman-global-*")
+	if err != nil {
+		panic(err)
+	}
+	os.Setenv("FOREMAN_GLOBAL_PATH", filepath.Join(tmp, "global.json"))
+	code := m.Run()
+	os.RemoveAll(tmp)
+	os.Exit(code)
+}
+
+// openStoreForTest opens a store with an isolated global profile so tests never
+// share (or clobber) each other's global collections.
+func openStoreForTest(t *testing.T, project string) (*Store, error) {
+	t.Helper()
+	t.Setenv("FOREMAN_GLOBAL_PATH", filepath.Join(t.TempDir(), "global.json"))
+	return OpenStore(project)
+}
+
 func TestTeamWithRunningRunsBlocksKick(t *testing.T) {
 	state := &WorkspaceState{
 		Rooms: []Room{{ID: "r1", TeamIDs: []string{"t1"}}},
@@ -50,7 +71,7 @@ func TestDefaultTemplatesIncludeEveryday(t *testing.T) {
 
 func TestOpenStoreSeedsAndPersistsWorkspace(t *testing.T) {
 	project := t.TempDir()
-	store, err := OpenStore(project)
+	store, err := openStoreForTest(t, project)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -79,7 +100,7 @@ func TestOpenStoreSeedsAndPersistsWorkspace(t *testing.T) {
 		t.Fatalf("room team IDs were not deduplicated: %#v", room.TeamIDs)
 	}
 
-	reopened, err := OpenStore(project)
+	reopened, err := openStoreForTest(t, project)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -94,7 +115,7 @@ func TestOpenStoreSeedsAndPersistsWorkspace(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	reloaded, err := OpenStore(project)
+	reloaded, err := openStoreForTest(t, project)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -104,7 +125,7 @@ func TestOpenStoreSeedsAndPersistsWorkspace(t *testing.T) {
 }
 
 func TestImportedTeamIsIndependentFromTemplate(t *testing.T) {
-	store, err := OpenStore(t.TempDir())
+	store, err := openStoreForTest(t, t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -121,7 +142,7 @@ func TestImportedTeamIsIndependentFromTemplate(t *testing.T) {
 }
 
 func TestCreateRoomRejectsUnknownTeamAndEmptyName(t *testing.T) {
-	store, err := OpenStore(t.TempDir())
+	store, err := openStoreForTest(t, t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -152,13 +173,13 @@ func TestCreateRoomRejectsUnknownTeamAndEmptyName(t *testing.T) {
 
 func TestOpenStoreRejectsDifferentProjectAndUnsupportedSchema(t *testing.T) {
 	project := t.TempDir()
-	store, err := OpenStore(project)
+	store, err := openStoreForTest(t, project)
 	if err != nil {
 		t.Fatal(err)
 	}
 	_ = store
 	other := t.TempDir()
-	if _, err := OpenStore(other); err != nil {
+	if _, err := openStoreForTest(t, other); err != nil {
 		t.Fatalf("separate empty project should initialize: %v", err)
 	}
 
@@ -176,13 +197,13 @@ func TestOpenStoreRejectsDifferentProjectAndUnsupportedSchema(t *testing.T) {
 	if err := os.WriteFile(path, data, 0600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := OpenStore(project); err == nil {
+	if _, err := openStoreForTest(t, project); err == nil {
 		t.Fatal("expected unsupported schema to fail")
 	}
 }
 
 func TestAgentLibraryCRUD(t *testing.T) {
-	store, err := OpenStore(t.TempDir())
+	store, err := openStoreForTest(t, t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -230,7 +251,7 @@ func TestAgentLibraryCRUD(t *testing.T) {
 }
 
 func TestSkillBundleStoresFilesAndMode(t *testing.T) {
-	store, err := OpenStore(t.TempDir())
+	store, err := openStoreForTest(t, t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -268,6 +289,9 @@ func TestSkillBundleStoresFilesAndMode(t *testing.T) {
 }
 
 func TestSchemaV2MigratesToAgentLibrary(t *testing.T) {
+	// Use a fresh global profile so the legacy migration seeds it (and is not
+	// overlaid by another test's shared global).
+	t.Setenv("FOREMAN_GLOBAL_PATH", filepath.Join(t.TempDir(), "global.json"))
 	project := t.TempDir()
 	legacy := WorkspaceState{
 		SchemaVersion: 2,
@@ -296,7 +320,7 @@ func TestSchemaV2MigratesToAgentLibrary(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	store, err := OpenStore(project)
+	store, err := openStoreForTest(t, project)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -310,7 +334,7 @@ func TestSchemaV2MigratesToAgentLibrary(t *testing.T) {
 }
 
 func TestProviderLifecycleAndCredentialRetention(t *testing.T) {
-	store, err := OpenStore(t.TempDir())
+	store, err := openStoreForTest(t, t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -367,7 +391,7 @@ func TestProviderLifecycleAndCredentialRetention(t *testing.T) {
 }
 
 func TestRoomTeamUpdatesAndQuestions(t *testing.T) {
-	store, err := OpenStore(t.TempDir())
+	store, err := openStoreForTest(t, t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}

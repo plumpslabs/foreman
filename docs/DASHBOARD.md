@@ -93,6 +93,19 @@ gain a mode plus a file tree.
 - **Engineering Lead**, **Architect**, **Implementer**, **Independent Reviewer** (deep-engineering)
 - **Quick Coordinator**, **Implementer** (quick-fix)
 
+## Global vs per-project
+
+Foreman separates user-level data from project data:
+
+- **Global** (shared across all projects, `~/.foreman/global.json` or
+  `$FOREMAN_GLOBAL_PATH`): team templates, the agent library, teams, skills,
+  providers (with credentials stored beside it), and workspace settings. Set
+  these up once; every project you open starts with them.
+- **Per-project** (`.foreman/workspace.json`): rooms, tasks, and runs. Each
+  project has its own rooms even though it shares agents/teams/skills/providers.
+- Credentials migrated automatically: new writes go to the global credential
+  file; reads still fall back to the legacy project-local file.
+
 ## Room interaction
 
 - **Routing** — the dashboard uses hash routes (`#/rooms/:id`, `#/agents/:id`, …) so a refresh

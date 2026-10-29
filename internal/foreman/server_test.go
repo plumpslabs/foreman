@@ -15,7 +15,7 @@ import (
 func newTestServer(t *testing.T) (*Server, string) {
 	t.Helper()
 	project := t.TempDir()
-	store, err := OpenStore(project)
+	store, err := openStoreForTest(t, project)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -397,7 +397,7 @@ func TestOpenStoreRequiresDirectory(t *testing.T) {
 		t.Fatal(err)
 	}
 	file.Close()
-	if _, err := OpenStore(file.Name()); err == nil {
+	if _, err := openStoreForTest(t, file.Name()); err == nil {
 		t.Fatal("expected non-directory project path to fail")
 	}
 }

@@ -30,7 +30,7 @@ func TestClassifyChatMessage(t *testing.T) {
 }
 
 func TestChatThreadMultiTeamMentionAndReuse(t *testing.T) {
-	store, err := OpenStore(t.TempDir())
+	store, err := openStoreForTest(t, t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}

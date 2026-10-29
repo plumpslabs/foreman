@@ -15,9 +15,23 @@ import (
 )
 
 type Store struct {
-	mu    sync.RWMutex
-	path  string
-	state WorkspaceState
+	mu         sync.RWMutex
+	path       string
+	globalPath string
+	state      WorkspaceState
+}
+
+// GlobalProfile holds user-level collections shared across all projects. They
+// live in ~/.foreman/global.json (or $FOREMAN_GLOBAL_PATH): templates, the
+// agent library, teams, skills, providers (with credentials beside it), and
+// workspace settings. Only rooms (and their tasks/runs) are per-project.
+type GlobalProfile struct {
+	Templates []TeamTemplate   `json:"templates"`
+	Agents    []Agent          `json:"agents"`
+	Teams     []Team           `json:"teams"`
+	Skills    []Skill          `json:"skills"`
+	Providers []ProviderConfig `json:"providers"`
+	Settings  Settings         `json:"settings"`
 }
 
 func OpenStore(projectPath string) (*Store, error) {
@@ -35,6 +49,7 @@ func OpenStore(projectPath string) (*Store, error) {
 
 	path := filepath.Join(abs, ".foreman", "workspace.json")
 	s := &Store{path: path}
+	s.globalPath = s.resolveGlobalPath(abs)
 	data, err := os.ReadFile(path)
 	if err == nil {
 		if err := json.Unmarshal(data, &s.state); err != nil {
@@ -48,33 +63,101 @@ func OpenStore(projectPath string) (*Store, error) {
 			return nil, err
 		}
 		if migrated {
-			if err := s.save(); err != nil {
+			// Project-only write; the global profile is handled by loadGlobal.
+			if err := writeJSONAtomic(s.path, s.state); err != nil {
 				return nil, err
 			}
 		}
-		return s, nil
-	}
-	if !errors.Is(err, os.ErrNotExist) {
+	} else if !errors.Is(err, os.ErrNotExist) {
 		return nil, fmt.Errorf("open Foreman workspace: %w", err)
+	} else {
+		s.state = WorkspaceState{
+			SchemaVersion: SchemaVersion,
+			ProjectPath:   abs,
+			Rooms:         []Room{},
+			Teams:         []Team{},
+			Agents:        seedAgents(),
+			Templates:     DefaultTemplates(),
+			Providers:     []ProviderConfig{},
+			Tasks:         []Task{},
+			Runs:          []AgentRun{},
+			Skills:        seedSkills(),
+			Settings:      normalizeSettings(Settings{}),
+		}
+		// Write the project file only; the shared global profile is overlaid
+		// (or seeded) by loadGlobal below. Saving global here would clobber the
+		// user's existing global collections with empty defaults.
+		if err := writeJSONAtomic(s.path, s.state); err != nil {
+			return nil, err
+		}
 	}
-
-	s.state = WorkspaceState{
-		SchemaVersion: SchemaVersion,
-		ProjectPath:   abs,
-		Rooms:         []Room{},
-		Teams:         []Team{},
-		Agents:        seedAgents(),
-		Templates:     DefaultTemplates(),
-		Providers:     []ProviderConfig{},
-		Tasks:         []Task{},
-		Runs:          []AgentRun{},
-		Skills:        seedSkills(),
-		Settings:      normalizeSettings(Settings{}),
+	// Overlay user-level collections from the global profile so agents, teams,
+	// skills, and providers are shared across projects.
+	if err := s.loadGlobal(); err != nil {
+		return nil, err
 	}
+	// Persist the overlaid state (project + global) so it is durable.
 	if err := s.save(); err != nil {
 		return nil, err
 	}
 	return s, nil
+}
+
+// resolveGlobalPath returns the path of the user-level global profile.
+func (s *Store) resolveGlobalPath(absProject string) string {
+	if p := strings.TrimSpace(os.Getenv("FOREMAN_GLOBAL_PATH")); p != "" {
+		return p
+	}
+	if home, err := os.UserHomeDir(); err == nil && home != "" {
+		return filepath.Join(home, ".foreman", "global.json")
+	}
+	return filepath.Join(absProject, ".foreman", "global.json")
+}
+
+func (s *Store) profile() GlobalProfile {
+	return GlobalProfile{
+		Templates: s.state.Templates,
+		Agents:    s.state.Agents,
+		Teams:     s.state.Teams,
+		Skills:    s.state.Skills,
+		Providers: s.state.Providers,
+		Settings:  s.state.Settings,
+	}
+}
+
+func (s *Store) applyProfile(p GlobalProfile) {
+	if len(p.Templates) > 0 || len(p.Agents) > 0 || len(p.Teams) > 0 || len(p.Skills) > 0 || len(p.Providers) > 0 {
+		s.state.Templates = p.Templates
+		s.state.Agents = p.Agents
+		s.state.Teams = p.Teams
+		s.state.Skills = p.Skills
+		s.state.Providers = p.Providers
+	}
+	if p.Settings.Theme != "" || p.Settings.EffortMode != "" || p.Settings.MaxConcurrentRuns != 0 {
+		s.state.Settings = normalizeSettings(p.Settings)
+	}
+}
+
+// loadGlobal reads the user-level profile, or seeds it from the current
+// workspace on first run so existing collections become global automatically.
+func (s *Store) loadGlobal() error {
+	data, err := os.ReadFile(s.globalPath)
+	if err == nil {
+		var p GlobalProfile
+		if err := json.Unmarshal(data, &p); err != nil {
+			return fmt.Errorf("read Foreman global profile: %w", err)
+		}
+		s.applyProfile(p)
+		return nil
+	}
+	if !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("open Foreman global profile: %w", err)
+	}
+	return s.saveGlobal()
+}
+
+func (s *Store) saveGlobal() error {
+	return writeJSONAtomic(s.globalPath, s.profile())
 }
 
 // migrate upgrades an on-disk workspace to the current schema. It returns true
@@ -1512,16 +1595,24 @@ func (s *Store) FinishRun(run AgentRun) error {
 }
 
 func (s *Store) save() error {
-	if err := os.MkdirAll(filepath.Dir(s.path), 0700); err != nil {
+	if err := writeJSONAtomic(s.path, s.state); err != nil {
+		return err
+	}
+	return s.saveGlobal()
+}
+
+// writeJSONAtomic writes v to path via a temp file + rename, 0600.
+func writeJSONAtomic(path string, v any) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
 		return fmt.Errorf("create Foreman data directory: %w", err)
 	}
-	data, err := json.MarshalIndent(s.state, "", "  ")
+	data, err := json.MarshalIndent(v, "", "  ")
 	if err != nil {
-		return fmt.Errorf("encode Foreman workspace: %w", err)
+		return fmt.Errorf("encode Foreman data: %w", err)
 	}
-	tmp, err := os.CreateTemp(filepath.Dir(s.path), ".workspace-*.tmp")
+	tmp, err := os.CreateTemp(filepath.Dir(path), ".foreman-*.tmp")
 	if err != nil {
-		return fmt.Errorf("create temporary workspace file: %w", err)
+		return fmt.Errorf("create temporary data file: %w", err)
 	}
 	tmpName := tmp.Name()
 	defer os.Remove(tmpName)
@@ -1531,17 +1622,17 @@ func (s *Store) save() error {
 	}
 	if _, err := tmp.Write(data); err != nil {
 		tmp.Close()
-		return fmt.Errorf("write workspace: %w", err)
+		return fmt.Errorf("write data: %w", err)
 	}
 	if err := tmp.Sync(); err != nil {
 		tmp.Close()
-		return fmt.Errorf("sync workspace: %w", err)
+		return fmt.Errorf("sync data: %w", err)
 	}
 	if err := tmp.Close(); err != nil {
-		return fmt.Errorf("close workspace: %w", err)
+		return fmt.Errorf("close data: %w", err)
 	}
-	if err := os.Rename(tmpName, s.path); err != nil {
-		return fmt.Errorf("persist workspace: %w", err)
+	if err := os.Rename(tmpName, path); err != nil {
+		return fmt.Errorf("persist data: %w", err)
 	}
 	return nil
 }
