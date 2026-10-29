@@ -1,5 +1,5 @@
 // Smoke test: load the built dashboard bundle in jsdom with a mocked API and
-// assert that the Preact app actually renders workspace content.
+// assert that the Preact app renders workspace content and the page flows work.
 import { readFileSync, readdirSync } from 'node:fs';
 import { JSDOM } from 'jsdom';
 
@@ -13,27 +13,23 @@ if (!jsFile) {
 }
 
 const workspace = {
-  schemaVersion: 2,
+  schemaVersion: 3,
   projectPath: '/tmp/demo',
   rooms: [{ id: 'r1', name: 'Smoke Room', goal: 'g', teamIds: ['t1'], status: 'planning', messages: [], createdAt: new Date().toISOString() }],
-  teams: [{ id: 't1', templateId: 'quick-fix', name: 'Smoke Team', purpose: 'p', mainAgent: 'M', agents: [{ name: 'M', role: 'r' }], instructions: 'i', createdAt: new Date().toISOString() }],
+  teams: [{ id: 't1', templateId: 'quick-fix', name: 'Smoke Team', purpose: 'p', mainAgent: 'M', agents: [{ id: 'ta1', name: 'M', role: 'r', instructions: '# hi' }], instructions: 'i', createdAt: new Date().toISOString() }],
   templates: [{ id: 'quick-fix', version: 1, name: 'Quick Fix', purpose: 'p', mainAgent: 'M', agents: [{ name: 'M', role: 'r' }], instructions: 'i' }],
-  providers: [],
+  providers: [{ id: 'tokenharbor', name: 'TokenHarbor', protocol: 'openai-compatible', baseUrl: 'https://tokenharbor.ai/v1', models: ['deepseek-v4.1-flash:free', 'claude-sonnet-5'], defaultModel: 'deepseek-v4.1-flash:free', hasApiKey: true, enabled: true }],
   tasks: [{ id: 'k1', roomId: 'r1', title: 'Smoke Task', description: 'd', status: 'todo', priority: 'normal', effort: 'medium', dependencies: [], approved: false, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() }],
   runs: [],
-  skills: [{ id: 's1', name: 'Docs', description: 'd', version: 1, instructions: '# Docs', mode: 'passive', enabled: false, files: [{ path: 'SKILL.md', content: '# Docs' }] }],
-  agents: [{ id: 'a1', name: 'Scout', role: 'Researcher', description: 'd', instructions: '# Scout', tools: ['read'], skills: [], requireReview: false }],
+  skills: [{ id: 's1', name: 'Docs', description: 'd', version: 1, instructions: '# Docs', mode: 'passive', enabled: false, files: [{ path: 'SKILL.md', content: '# Docs' }, { path: 'references/steps.md', content: 'step 1' }] }],
+  agents: [{ id: 'a1', name: 'Scout', role: 'Researcher', description: 'd', instructions: '# Scout\n\n## Responsibilities\n\n- Inspect', tools: ['file_editor'], skills: [], requireReview: false }],
   settings: { theme: 'dark', effortMode: 'automatic', defaultEffort: 'medium', maxConcurrentRuns: 1, maxWorkersPerTask: 1, maxDelegationDepth: 0, maxRetries: 0, maxExecutionSeconds: 600, budgetUsd: 0, requireRunApproval: false, allowProjectCommands: false },
 };
 
 const dom = new JSDOM(html, { url: 'http://localhost:8080/?project=%2Ftmp%2Fdemo', runScripts: 'outside-only', pretendToBeVisual: true });
 const { window } = dom;
 
-window.fetch = async () => ({
-  ok: true,
-  status: 200,
-  json: async () => workspace,
-});
+window.fetch = async () => ({ ok: true, status: 200, json: async () => workspace });
 window.matchMedia = window.matchMedia || (() => ({ matches: false, addListener() {}, removeListener() {} }));
 
 const bundle = readFileSync(new URL(jsFile, dist), 'utf8');
@@ -44,76 +40,104 @@ try {
   process.exit(1);
 }
 
-// Allow Preact effects/fetch to flush.
-await new Promise((resolve) => setTimeout(resolve, 50));
+const flush = () => new Promise((resolve) => setTimeout(resolve, 50));
+const click = (el) => el && el.dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+const byText = (selector, text) => [...window.document.querySelectorAll(selector)]
+  .find((el) => el.textContent.trim().startsWith(text));
 
-const body = window.document.body.innerHTML;
+await flush();
+
 const failures = [];
+const body = window.document.body.innerHTML;
 if (!body.includes('foreman.')) failures.push('brand missing');
 if (!body.includes('Make the work visible.')) failures.push('home headline missing');
-if (!body.includes('Smoke Room')) failures.push('room list not rendered from workspace state');
+if (!body.includes('Smoke Room')) failures.push('room list not rendered');
 if (!body.includes('Overview')) failures.push('navigation missing');
 if (!body.includes('/tmp/demo')) failures.push('project path missing');
 if (!/<svg/.test(body)) failures.push('icons are not rendering as SVG');
 if (/&lt;i[^>]*data-lucide/.test(body)) failures.push('icon markup leaked as escaped text');
-if (window.document.querySelectorAll('.nav .nav-btn').length < 7) {
-  failures.push('sidebar nav buttons are missing the nav-btn class');
+if (window.document.querySelectorAll('.nav .nav-btn').length < 7) failures.push('sidebar nav buttons missing');
+
+// Room detail, then back to the list (regression: used to show "Room not found").
+click(window.document.querySelector('.room-row.clickable'));
+await flush();
+let view = window.document.body.innerHTML;
+for (const label of ['Chat', 'Kanban', 'Plan', 'Changes', 'Task progress', 'Execution policy', 'Room team']) {
+  if (!view.includes(label)) failures.push(`room detail missing "${label}"`);
 }
-
-// Open the room and assert the room-centric layout: tabs + right rail.
-const roomRow = window.document.querySelector('.room-row.clickable');
-if (!roomRow) {
-  failures.push('room row not clickable');
+const back = window.document.querySelector('[aria-label="Back to rooms"]');
+if (!back) {
+  failures.push('room back button missing');
 } else {
-  roomRow.dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
-  await new Promise((resolve) => setTimeout(resolve, 50));
-  const detail = window.document.body.innerHTML;
-  for (const label of ['Chat', 'Kanban', 'Plan', 'Changes', 'Task progress', 'Execution policy', 'Room team']) {
-    if (!detail.includes(label)) failures.push(`room detail missing "${label}"`);
-  }
-}
-
-// Agent library: navigate, open a profile, and open the create-agent modal.
-const navButton = (label) => [...window.document.querySelectorAll('.nav-btn')]
-  .find((button) => button.textContent.trim() === label);
-const click = (el) => el && el.dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
-const flush = () => new Promise((resolve) => setTimeout(resolve, 50));
-
-const agentsNav = navButton('Agent library');
-if (!agentsNav) {
-  failures.push('agent library nav missing');
-} else {
-  click(agentsNav);
+  click(back);
   await flush();
-  let html = window.document.body.innerHTML;
-  if (!html.includes('Scout')) failures.push('agent library did not render agent profiles');
-  const agentRow = window.document.querySelector('.content .room-row.clickable');
-  if (!agentRow) {
-    failures.push('agent profile row is not clickable');
-  } else {
-    click(agentRow);
-    await flush();
-    html = window.document.body.innerHTML;
-    if (!html.includes('Agent profile')) failures.push('agent detail modal did not open');
-    if (!html.includes('Instructions (markdown)')) failures.push('agent editor is missing markdown instructions');
-    if (!html.includes('Allowed tools')) failures.push('agent editor is missing tool permissions');
-    if (!html.includes('Skills')) failures.push('agent editor is missing skill assignment');
-  }
+  view = window.document.body.innerHTML;
+  if (view.includes('Room not found')) failures.push('room back still lands on "Room not found"');
+  if (!view.includes('How rooms work')) failures.push('room back did not return to the room list');
 }
 
-const skillsNav = navButton('Skills');
-if (!skillsNav) {
-  failures.push('skills nav missing');
+// Agent detail page with tabs + markdown preview.
+click(byText('.nav-btn', 'Agent library'));
+await flush();
+click(window.document.querySelector('.content .room-row.clickable'));
+await flush();
+view = window.document.body.innerHTML;
+for (const label of ['Overview', 'Instructions', 'Permissions', 'Skills']) {
+  if (!view.includes(label)) failures.push(`agent detail tab missing "${label}"`);
+}
+
+click(byText('.detail-tab', 'Instructions'));
+await flush();
+if (!window.document.body.innerHTML.includes('Load starter template')) failures.push('agent instructions starter missing');
+const previewToggle = byText('.seg-btn', 'Preview');
+if (!previewToggle) {
+  failures.push('markdown preview toggle missing');
 } else {
-  click(skillsNav);
+  click(previewToggle);
   await flush();
-  const html = window.document.body.innerHTML;
-  if (!html.includes('Import folder or .md')) failures.push('skill import action missing');
-  if (!html.includes('Docs')) failures.push('skill list did not render');
+  const preview = window.document.querySelector('.md-preview');
+  if (!preview || !preview.querySelector('.md-h')) failures.push('markdown preview is not rendered as formatted HTML');
+}
+
+click(byText('.detail-tab', 'Permissions'));
+await flush();
+view = window.document.body.innerHTML;
+for (const label of ['File editor', 'Terminal', 'Glob', 'Grep', 'Browser', 'Sub-agents']) {
+  if (!view.includes(label)) failures.push(`tool catalog missing "${label}"`);
+}
+
+// Skill detail page with a directory tree.
+click(byText('.nav-btn', 'Skills'));
+await flush();
+click(window.document.querySelector('.skill-row'));
+await flush();
+view = window.document.body.innerHTML;
+if (!view.includes('Files')) failures.push('skill file manager missing');
+if (!view.includes('references')) failures.push('skill directory tree missing nested folder');
+if (!byText('.tree-file', 'SKILL.md')) failures.push('skill tree missing SKILL.md');
+
+// Settings: provider presets, configured row, and the add-provider modal.
+click(byText('.nav-btn', 'Settings'));
+await flush();
+view = window.document.body.innerHTML;
+for (const label of ['Connect a provider', 'TokenHarbor', 'OpenCode Zen', 'DeepSeek', 'MiniMax', 'Anthropic (Claude)', 'OpenAI (GPT)', 'Custom provider']) {
+  if (!view.includes(label)) failures.push(`settings providers missing "${label}"`);
+}
+if (!view.includes('deepseek-v4.1-flash:free · default')) failures.push('configured provider default model not shown');
+const addProvider = byText('.btn', 'Add provider');
+if (!addProvider) {
+  failures.push('add provider button missing');
+} else {
+  click(addProvider);
+  await flush();
+  view = window.document.body.innerHTML;
+  for (const label of ['Models (one per line', 'Discover models', 'Test connection']) {
+    if (!view.includes(label)) failures.push(`provider modal missing "${label}"`);
+  }
 }
 
 if (failures.length) {
   console.error('smoke FAILED:', failures.join('; '));
   process.exit(1);
 }
-console.log('smoke OK: dashboard rendered workspace state from mocked API');
+console.log('smoke OK: dashboard flows render room detail, agent editor, and skill tree');

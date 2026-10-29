@@ -76,10 +76,13 @@ Preact SPA in `web/`, built by Vite into `internal/foreman/web/dist` and embedde
   task progress, live activity, and execution policy
 - Kanban is scoped per room (no global Kanban page)
 Pages: Home, Rooms, Teams, Agents, Skills, Runs, Settings, plus the RoomDetailHost.
-The agent library and skill bundles have full editors (markdown instructions, tool permissions,
-skill assignment, folder/`.md` import with nested files, active/passive mode).
+Agent, team, and skill details are full pages with tabs (not modals). The agent editor covers
+markdown instructions (with formatted preview), tool permissions across the OpenHands catalog,
+and skill assignment. Skills use a file-manager layout with nested folders. Settings is tabbed:
+provider presets (TokenHarbor, OpenCode, DeepSeek, MiniMax, Anthropic, OpenAI, custom) with
+model discovery and connection tests, execution policy, and appearance.
 `npm run smoke` renders the built bundle in jsdom against a mocked API and opens the room, agent,
-and skill surfaces.
+skill, and provider surfaces.
 The layout, navigation map, and room interaction model are documented in
 [`docs/DASHBOARD.md`](DASHBOARD.md).
 

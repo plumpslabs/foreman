@@ -53,9 +53,11 @@ Open `http://127.0.0.1:8080/?project=<project-dir>` — the UI is room-centric:
 - **Rooms** — every room is an isolated work session with its own goal, invited teams, chat, and tasks
 - **Room detail** — toolbar, tabs (Chat · Kanban · Plan · Changes), and a right rail showing room team, task progress, live activity, and execution policy
 - **Kanban** lives *inside* each room, not as a global menu item — tasks are scoped to the room they belong to
-- **Agent library** — reusable profiles with markdown instructions, model/provider, allowed tools, skills, and review policy
+- **Agent library** — reusable profiles with markdown instructions, model/provider, allowed tools, skills, and review policy; opened as a full page with tabs
 - **Skills** — markdown bundles (folder or `.md` import) with nested files; switch between *active* (injected) and *passive* (reference)
 - **Teams** — your imported teams first; open a team to edit its name, purpose, markdown instructions, main agent, and inspect every agent on it
+- **Settings** — tabbed: provider presets (TokenHarbor, OpenCode Zen/Go, DeepSeek, MiniMax, Anthropic, OpenAI, custom), execution policy, and appearance
+- **Markdown preview** — instructions and chat render formatted markdown, not raw text
 
 ## Architecture
 
@@ -85,10 +87,14 @@ python3 -m pip install openhands-sdk openhands-tools   # Python 3.12+ required
 
 ## Provider setup
 
-Settings → Providers accepts any OpenAI-compatible endpoint (Ollama, vLLM, gateways) or an
-Anthropic endpoint: base URL, model IDs, API key. Keys are stored separately in
-`.foreman/credentials.json` (mode 0600) and never returned by the API. The connection test makes
-a real request to the endpoint.
+Settings → Providers ships presets for **TokenHarbor**, **OpenCode Zen**, **OpenCode Go**,
+**DeepSeek**, **MiniMax**, **Anthropic (Claude)**, **OpenAI (GPT)**, and a **custom** endpoint.
+Each provider stores a base URL, protocol, API key, and one or more model IDs — the first model is
+the default. The provider editor can **discover models** from the endpoint and **test the
+connection** with a real request. Keys are stored separately in `.foreman/credentials.json`
+(mode 0600) and never returned by the API.
+
+An agent can pin its own provider and model; otherwise runs use the first enabled provider.
 
 ## Dashboard development
 

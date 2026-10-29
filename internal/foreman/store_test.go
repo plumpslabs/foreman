@@ -267,3 +267,60 @@ func TestSchemaV2MigratesToAgentLibrary(t *testing.T) {
 		t.Fatalf("legacy team agents were not imported into the library: %#v", state.Agents)
 	}
 }
+
+func TestProviderLifecycleAndCredentialRetention(t *testing.T) {
+	store, err := OpenStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	config := ProviderConfig{
+		ID: "tokenharbor", Name: "TokenHarbor", Protocol: "openai-compatible",
+		BaseURL: "https://tokenharbor.ai/v1", Models: []string{"deepseek-v4.1-flash:free", "claude-sonnet-5"},
+		DefaultModel: "deepseek-v4.1-flash:free", Enabled: true,
+	}
+	first, err := store.SaveProvider(config, "thk_test_key")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !first.HasAPIKey {
+		t.Fatal("provider should report a saved key")
+	}
+	// Saving without a new key must keep the stored credential.
+	second, err := store.SaveProvider(config, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !second.HasAPIKey {
+		t.Fatal("blank key save should retain the existing credential")
+	}
+	secret, err := store.loadProviderCredential(store.Snapshot().ProjectPath, "tokenharbor")
+	if err != nil || secret != "thk_test_key" {
+		t.Fatalf("credential was not retained: %q %v", secret, err)
+	}
+
+	agent, err := store.SaveAgent(Agent{Name: "Scout", Role: "r", ProviderID: "tokenharbor"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if agent.ProviderID != "tokenharbor" {
+		t.Fatalf("agent provider = %q", agent.ProviderID)
+	}
+	if err := store.DeleteProvider("tokenharbor"); err != nil {
+		t.Fatal(err)
+	}
+	state := store.Snapshot()
+	if len(state.Providers) != 0 {
+		t.Fatalf("providers after delete = %d", len(state.Providers))
+	}
+	for _, item := range state.Agents {
+		if item.ProviderID == "tokenharbor" {
+			t.Fatal("agent still references the deleted provider")
+		}
+	}
+	if secret, _ := store.loadProviderCredential(state.ProjectPath, "tokenharbor"); secret != "" {
+		t.Fatal("credential was not removed with the provider")
+	}
+	if err := store.DeleteProvider("missing"); err == nil {
+		t.Fatal("deleting an unknown provider must fail")
+	}
+}

@@ -50,6 +50,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/runs/{runID}/cancel", s.cancelRun)
 	mux.HandleFunc("POST /api/providers", s.saveProvider)
 	mux.HandleFunc("POST /api/providers/test", s.testProvider)
+	mux.HandleFunc("POST /api/providers/discover", s.discoverModels)
+	mux.HandleFunc("DELETE /api/providers/{providerID}", s.deleteProvider)
 	mux.HandleFunc("PUT /api/settings", s.updateSettings)
 	mux.HandleFunc("POST /api/skills", s.saveSkill)
 	mux.HandleFunc("DELETE /api/skills/{skillID}", s.deleteSkill)
@@ -310,11 +312,66 @@ func (s *Server) testProvider(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusUnprocessableEntity, err.Error())
 		return
 	}
-	if err := testProvider(r.Context(), req.Config, req.APIKey); err != nil {
+	secret := s.resolveProviderSecret(req.Config.ID, req.APIKey)
+	if err := testProvider(r.Context(), req.Config, secret); err != nil {
 		writeError(w, http.StatusBadGateway, err.Error())
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "connected", "model": req.Config.DefaultModel})
+}
+
+func (s *Server) discoverModels(w http.ResponseWriter, r *http.Request) {
+	if err := s.verifyProject(r.URL.Query().Get("project")); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	var req struct {
+		Config ProviderConfig `json:"config"`
+		APIKey string         `json:"apiKey"`
+	}
+	if err := decodeJSON(w, r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if req.Config.Protocol != "openai-compatible" && req.Config.Protocol != "anthropic" {
+		writeError(w, http.StatusUnprocessableEntity, "protocol must be openai-compatible or anthropic")
+		return
+	}
+	secret := s.resolveProviderSecret(req.Config.ID, req.APIKey)
+	models, err := listProviderModels(r.Context(), req.Config, secret)
+	if err != nil {
+		writeError(w, http.StatusBadGateway, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"models": models})
+}
+
+func (s *Server) deleteProvider(w http.ResponseWriter, r *http.Request) {
+	if err := s.verifyProject(r.URL.Query().Get("project")); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if err := s.store.DeleteProvider(r.PathValue("providerID")); err != nil {
+		writeError(w, http.StatusUnprocessableEntity, err.Error())
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// resolveProviderSecret prefers a freshly typed key, then falls back to the
+// credential already stored for an existing provider.
+func (s *Server) resolveProviderSecret(providerID, typed string) string {
+	if strings.TrimSpace(typed) != "" {
+		return typed
+	}
+	if providerID == "" {
+		return ""
+	}
+	secret, err := s.store.loadProviderCredential(s.root, providerID)
+	if err != nil {
+		return ""
+	}
+	return secret
 }
 
 func (s *Server) updateSettings(w http.ResponseWriter, r *http.Request) {

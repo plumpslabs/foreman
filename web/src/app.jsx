@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'preact/hooks';
 import { api, loadWorkspace } from './api.js';
 import { HomePage, RoomsPage, RoomDetailHost, TeamsPage, AgentsPage, SkillsPage, RunsPage, SettingsPage } from './pages.jsx';
+import { AgentDetailPage, TeamDetailPage, TeamCreatePage, SkillDetailPage } from './detail.jsx';
 import { ModalHost } from './modals.jsx';
 import { Icon } from './icons.jsx';
 
@@ -14,10 +15,19 @@ const NAV_PRIMARY = [
 ];
 const NAV_SECONDARY = [['settings', 'Settings', 'settings-2']];
 
+const PARENT_PAGE = {
+  'room-detail': 'rooms',
+  'agent-detail': 'agents',
+  'team-detail': 'teams',
+  'team-create': 'teams',
+  'skill-detail': 'skills',
+};
+
 const emptyState = {
   projectPath: '',
   rooms: [],
   teams: [],
+  agents: [],
   templates: [],
   providers: [],
   tasks: [],
@@ -29,7 +39,7 @@ const emptyState = {
 export function App() {
   const [state, setState] = useState(null);
   const [page, setPage] = useState('home');
-  const [activeRoomId, setActiveRoomId] = useState('');
+  const [selectedId, setSelectedId] = useState('');
   const [modal, setModal] = useState(null);
   const [toast, setToast] = useState('');
   const toastTimer = useRef(0);
@@ -56,15 +66,16 @@ export function App() {
   const themeClass = settings.theme === 'light' ? 'theme-light' : '';
 
   const navigate = (next) => {
-    setActiveRoomId('');
+    setSelectedId('');
     setPage(next);
     setSidebarOpen(false);
   };
 
-  const openRoom = (roomId) => {
-    setActiveRoomId(roomId);
-    setPage('room-detail');
-  };
+  const openRoom = (id) => { setSelectedId(id); setPage('room-detail'); };
+  const openAgent = (id) => { setSelectedId(id); setPage('agent-detail'); };
+  const openTeam = (id) => { setSelectedId(id); setPage('team-detail'); };
+  const openSkill = (id) => { setSelectedId(id); setPage('skill-detail'); };
+  const openTeamCreate = () => { setSelectedId(''); setPage('team-create'); };
 
   const runTask = async (taskId, button) => {
     if (button) button.disabled = true;
@@ -89,28 +100,6 @@ export function App() {
     }
   };
 
-  const saveSkill = async (skill, message) => {
-    try {
-      await api('/api/skills', { method: 'POST', body: JSON.stringify(skill) });
-      await refresh();
-      if (message) notify(message);
-      return true;
-    } catch (error) {
-      notify(error.message);
-      return false;
-    }
-  };
-
-  const deleteAgent = async (agentId) => {
-    try {
-      await api(`/api/agents/${encodeURIComponent(agentId)}`, { method: 'DELETE' });
-      await refresh();
-      notify('Agent deleted');
-    } catch (error) {
-      notify(error.message);
-    }
-  };
-
   const cancelRun = async (runId) => {
     try {
       await api(`/api/runs/${encodeURIComponent(runId)}/cancel`, { method: 'POST', body: '{}' });
@@ -122,8 +111,9 @@ export function App() {
   };
 
   const pageProps = {
-    state: current, notify, refresh, openRoom, setModal,
-    runTask, deleteSkill, saveSkill, deleteAgent, cancelRun, activeRoomId, setActiveRoomId,
+    state: current, notify, refresh, setModal, navigate,
+    openRoom, openAgent, openTeam, openSkill, openTeamCreate,
+    runTask, deleteSkill, cancelRun,
   };
 
   const pages = {
@@ -136,16 +126,63 @@ export function App() {
     settings: <SettingsPage {...pageProps} />,
   };
 
+  const activeRoom = current.rooms.find((room) => room.id === selectedId);
+  const activeAgent = (current.agents || []).find((agent) => agent.id === selectedId);
+  const activeTeam = current.teams.find((team) => team.id === selectedId);
+  const activeSkill = (current.skills || []).find((skill) => skill.id === selectedId);
+
+  const parent = PARENT_PAGE[page] || page;
+  const pageLabel = parent === 'home' ? 'Overview'
+    : (NAV_PRIMARY.concat(NAV_SECONDARY).find(([key]) => key === parent) || ['home', 'Overview'])[1];
+
   const renderNav = (items) => items.map(([key, label, icon]) => (
-    <button class={`nav-btn ${page === key ? 'active' : ''}`} onClick={() => navigate(key)}>
+    <button class={`nav-btn ${parent === key ? 'active' : ''}`} onClick={() => navigate(key)}>
       <Icon name={icon} />
       <span class="nav-label-text">{label}</span>
     </button>
   ));
 
-  const activeRoom = current.rooms.find((room) => room.id === activeRoomId);
-  const pageLabel = page === 'room-detail' ? (activeRoom ? activeRoom.name : 'Room') :
-    (NAV_PRIMARY.concat(NAV_SECONDARY).find(([key]) => key === page) || ['home'])[1];
+  const renderContent = () => {
+    if (state === null) return <div class="empty">Loading workspace…</div>;
+    switch (page) {
+      case 'room-detail':
+        return activeRoom
+          ? <RoomDetailHost room={activeRoom} {...pageProps} onBack={() => navigate('rooms')} />
+          : <RoomsPage {...pageProps} />;
+      case 'agent-detail':
+        return <AgentDetailPage key={`agent-${selectedId || 'new'}`} agentId={selectedId} {...pageProps} onBack={() => navigate('agents')} />;
+      case 'team-detail':
+        return activeTeam
+          ? <TeamDetailPage key={`team-${selectedId}`} teamId={selectedId} {...pageProps} onBack={() => navigate('teams')} />
+          : <TeamsPage {...pageProps} />;
+      case 'team-create':
+        return (
+          <TeamCreatePage
+            {...pageProps}
+            onBack={() => navigate('teams')}
+            onCreated={(id) => openTeam(id)}
+          />
+        );
+      case 'skill-detail':
+        return (
+          <SkillDetailPage
+            key={`skill-${selectedId || 'new'}`}
+            skillId={selectedId}
+            {...pageProps}
+            onBack={() => navigate('skills')}
+          />
+        );
+      default:
+        return pages[page] || pages.home;
+    }
+  };
+
+  const breadcrumbLabel = page === 'room-detail' && activeRoom ? activeRoom.name
+    : page === 'agent-detail' ? (activeAgent ? activeAgent.name : 'New agent')
+      : page === 'team-detail' && activeTeam ? activeTeam.name
+        : page === 'team-create' ? 'Create team'
+          : page === 'skill-detail' ? (activeSkill ? activeSkill.name : 'New skill')
+            : pageLabel;
 
   return (
     <div class={`app ${themeClass}`}>
@@ -182,9 +219,9 @@ export function App() {
             </button>
             <div class="breadcrumb">
               <Icon name="layout-dashboard" />
-              <span>Workspace</span>
+              <span>{pageLabel}</span>
               <Icon name="chevron-right" size={13} />
-              <b>{pageLabel}</b>
+              <b>{breadcrumbLabel}</b>
             </div>
           </div>
           <div class="top-actions">
@@ -194,16 +231,11 @@ export function App() {
             <div class="avatar">MW</div>
           </div>
         </header>
-        <div class={`content ${page === 'room-detail' ? 'flush' : ''}`}>
-          {state === null
-            ? <div class="empty">Loading workspace…</div>
-            : page === 'room-detail'
-              ? activeRoom ? <RoomDetailHost room={activeRoom} {...pageProps} /> : <div class="empty">Room not found</div>
-              : pages[page]}
+        <div class={`content ${['room-detail', 'agent-detail', 'team-detail', 'team-create', 'skill-detail'].includes(page) ? 'flush' : ''}`}>
+          {renderContent()}
         </div>
       </main>
-      <ModalHost modal={modal} setModal={setModal} state={current} notify={notify} refresh={refresh}
-        saveSkill={saveSkill} deleteSkill={deleteSkill} deleteAgent={deleteAgent} />
+      <ModalHost modal={modal} setModal={setModal} state={current} notify={notify} refresh={refresh} deleteSkill={deleteSkill} />
       <div class={`toast ${toast ? 'show' : ''}`} role="status">{toast}</div>
     </div>
   );

@@ -1020,13 +1020,42 @@ func (s *Store) PrepareTaskRun(taskID string) (Task, Room, *Team, ProviderConfig
 		}
 	}
 	var config *ProviderConfig
+	agentModel := ""
 	if team != nil {
+		target := task.AgentName
+		if target == "" {
+			target = team.MainAgent
+		}
 		for _, agent := range team.Agents {
-			if (task.AgentName == "" || task.AgentName == agent.Name) && agent.ProviderID != "" {
+			if agent.Name != target {
+				continue
+			}
+			agentModel = strings.TrimSpace(agent.Model)
+			if agent.ProviderID == "" {
+				break
+			}
+			for i := range s.state.Providers {
+				if s.state.Providers[i].ID == agent.ProviderID && s.state.Providers[i].Enabled {
+					copy := s.state.Providers[i]
+					config = &copy
+					break
+				}
+			}
+			break
+		}
+		// Fall back to any agent on the team that names an enabled provider.
+		if config == nil {
+			for _, agent := range team.Agents {
+				if agent.ProviderID == "" {
+					continue
+				}
 				for i := range s.state.Providers {
 					if s.state.Providers[i].ID == agent.ProviderID && s.state.Providers[i].Enabled {
 						copy := s.state.Providers[i]
 						config = &copy
+						if agentModel == "" {
+							agentModel = strings.TrimSpace(agent.Model)
+						}
 						break
 					}
 				}
@@ -1047,6 +1076,10 @@ func (s *Store) PrepareTaskRun(taskID string) (Task, Room, *Team, ProviderConfig
 	}
 	if config == nil {
 		return Task{}, Room{}, nil, ProviderConfig{}, "", Settings{}, errors.New("no enabled provider is configured")
+	}
+	// An agent may pin a model that differs from the provider default.
+	if agentModel != "" {
+		config.DefaultModel = agentModel
 	}
 	secret, err := s.loadProviderCredential(s.state.ProjectPath, config.ID)
 	if err != nil {

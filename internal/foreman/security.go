@@ -114,6 +114,10 @@ func (s *Store) saveProviderCredential(projectPath, providerID, secret string) e
 	return nil
 }
 
+func (s *Store) deleteProviderCredential(projectPath, providerID string) error {
+	return s.saveProviderCredential(projectPath, providerID, "")
+}
+
 func (s *Store) loadProviderCredential(projectPath, providerID string) (string, error) {
 	path := filepath.Join(projectPath, ".foreman", "credentials.json")
 	data, err := os.ReadFile(path)
@@ -141,13 +145,63 @@ func (s *Store) SaveProvider(config ProviderConfig, secret string) (ProviderConf
 		if err := s.saveProviderCredential(s.Snapshot().ProjectPath, config.ID, secret); err != nil {
 			return ProviderConfig{}, err
 		}
+		s.SetProviderSecretFlag(config.ID, true)
+		config.HasAPIKey = true
+	} else {
+		// Preserve an existing credential when the user leaves the key blank.
+		stored, err := s.loadProviderCredential(s.Snapshot().ProjectPath, config.ID)
+		config.HasAPIKey = err == nil && stored != ""
 	}
-	s.SetProviderSecretFlag(config.ID, secret != "")
-	config.HasAPIKey = secret != ""
 	if config.ID == "" {
 		config.ID = uuid.NewString()
 	}
 	return config, nil
+}
+
+// DeleteProvider removes a provider, its saved credential, and any references
+// from agent profiles and team rosters.
+func (s *Store) DeleteProvider(id string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	previous := s.state.Providers
+	filtered := make([]ProviderConfig, 0, len(previous))
+	found := false
+	for _, provider := range previous {
+		if provider.ID == id {
+			found = true
+			continue
+		}
+		filtered = append(filtered, provider)
+	}
+	if !found {
+		return fmt.Errorf("unknown provider id %q", id)
+	}
+	previousAgents := s.state.Agents
+	previousTeams := s.state.Teams
+	s.state.Providers = filtered
+	s.state.Agents = append([]Agent(nil), previousAgents...)
+	for i := range s.state.Agents {
+		if s.state.Agents[i].ProviderID == id {
+			s.state.Agents[i].ProviderID = ""
+		}
+	}
+	s.state.Teams = append([]Team(nil), previousTeams...)
+	for i := range s.state.Teams {
+		s.state.Teams[i].Agents = append([]Agent(nil), previousTeams[i].Agents...)
+		for j := range s.state.Teams[i].Agents {
+			if s.state.Teams[i].Agents[j].ProviderID == id {
+				s.state.Teams[i].Agents[j].ProviderID = ""
+			}
+		}
+	}
+	if err := s.save(); err != nil {
+		s.state.Providers = previous
+		s.state.Agents = previousAgents
+		s.state.Teams = previousTeams
+		return err
+	}
+	_ = s.deleteProviderCredential(s.state.ProjectPath, id)
+	return nil
 }
 
 func (s *Store) ProvidersForAPI() []ProviderConfig {
@@ -166,34 +220,113 @@ func testProvider(ctx context.Context, config ProviderConfig, secret string) err
 		return err
 	}
 	if config.Protocol == "anthropic" {
-		u := strings.TrimRight(config.BaseURL, "/") + "/v1/messages"
-		req, err := http.NewRequestWithContext(ctx, http.MethodPost, u, strings.NewReader(`{"model":"`+strings.ReplaceAll(config.DefaultModel, `"`, `\"`)+`","max_tokens":1,"messages":[{"role":"user","content":"ping"}]}`))
-		if err != nil {
-			return err
-		}
-		req.Header.Set("content-type", "application/json")
-		req.Header.Set("x-api-key", secret)
-		req.Header.Set("anthropic-version", "2023-06-01")
-		resp, err := (&http.Client{Timeout: 8 * time.Second}).Do(req)
-		if err != nil {
-			return errors.New("provider connection failed; check the endpoint, network, and credentials")
-		}
-		defer resp.Body.Close()
-		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-			return fmt.Errorf("provider returned HTTP %d", resp.StatusCode)
-		}
-		return nil
+		return anthropicPing(ctx, config, secret)
 	}
-	models, err := fetchOpenAIModels(ctx, config.BaseURL, secret)
+	models, listErr := fetchOpenAIModels(ctx, config.BaseURL, secret)
+	if listErr == nil {
+		for _, model := range models {
+			if model == config.DefaultModel {
+				return nil
+			}
+		}
+	}
+	// Some gateways do not expose /models. Fall back to a minimal chat request.
+	if pingErr := openAIChatPing(ctx, config, secret); pingErr != nil {
+		if listErr == nil {
+			return fmt.Errorf("connected, but model %q was neither listed nor accepted: %v", config.DefaultModel, pingErr)
+		}
+		return errors.New("provider connection failed; check the endpoint, network, and credentials")
+	}
+	return nil
+}
+
+func anthropicPing(ctx context.Context, config ProviderConfig, secret string) error {
+	payload := fmt.Sprintf(`{"model":%q,"max_tokens":1,"messages":[{"role":"user","content":"ping"}]}`, config.DefaultModel)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(config.BaseURL, "/")+"/v1/messages", strings.NewReader(payload))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("content-type", "application/json")
+	req.Header.Set("x-api-key", secret)
+	req.Header.Set("anthropic-version", "2023-06-01")
+	resp, err := (&http.Client{Timeout: 8 * time.Second}).Do(req)
 	if err != nil {
 		return errors.New("provider connection failed; check the endpoint, network, and credentials")
 	}
-	for _, model := range models {
-		if model == config.DefaultModel {
-			return nil
-		}
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+		return errors.New("provider rejected the API key")
 	}
-	return fmt.Errorf("connection succeeded, but model %q was not returned by /models", config.DefaultModel)
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return fmt.Errorf("provider returned HTTP %d", resp.StatusCode)
+	}
+	return nil
+}
+
+func openAIChatPing(ctx context.Context, config ProviderConfig, secret string) error {
+	payload := fmt.Sprintf(`{"model":%q,"max_tokens":1,"messages":[{"role":"user","content":"ping"}]}`, config.DefaultModel)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(config.BaseURL, "/")+"/chat/completions", strings.NewReader(payload))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("content-type", "application/json")
+	if secret != "" {
+		req.Header.Set("Authorization", "Bearer "+secret)
+	}
+	resp, err := (&http.Client{Timeout: 8 * time.Second}).Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+		return errors.New("provider rejected the API key")
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return fmt.Errorf("provider returned HTTP %d", resp.StatusCode)
+	}
+	return nil
+}
+
+// listProviderModels returns the model IDs a provider advertises for the given
+// configuration. Used by the dashboard's "discover models" action.
+func listProviderModels(ctx context.Context, config ProviderConfig, secret string) ([]string, error) {
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	if err := validateProviderDestination(ctx, config.BaseURL); err != nil {
+		return nil, err
+	}
+	if config.Protocol == "anthropic" {
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(config.BaseURL, "/")+"/v1/models", nil)
+		if err != nil {
+			return nil, err
+		}
+		req.Header.Set("x-api-key", secret)
+		req.Header.Set("anthropic-version", "2023-06-01")
+		resp, err := (&http.Client{Timeout: 10 * time.Second}).Do(req)
+		if err != nil {
+			return nil, err
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			return nil, fmt.Errorf("provider returned HTTP %d", resp.StatusCode)
+		}
+		var payload struct {
+			Data []struct {
+				ID string `json:"id"`
+			} `json:"data"`
+		}
+		if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+			return nil, err
+		}
+		models := make([]string, 0, len(payload.Data))
+		for _, item := range payload.Data {
+			if item.ID != "" {
+				models = append(models, item.ID)
+			}
+		}
+		return models, nil
+	}
+	return fetchOpenAIModels(ctx, config.BaseURL, secret)
 }
 
 // fetchOpenAIModels lists model IDs from an OpenAI-compatible GET /models

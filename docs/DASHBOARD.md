@@ -103,6 +103,16 @@ gain a mode plus a file tree.
 | Create / edit agent | Workspace owner | unique name, skill and provider references must exist |
 | Create / import skill | Workspace owner | relative paths only, 256 KiB per file, 1 MiB per bundle |
 | Switch skill mode | Workspace owner | active = context injection, passive = reference only |
+| Manage providers | Workspace owner | URL must pass the SSRF guard; keys stay local |
+
+## Providers
+
+Presets ship for TokenHarbor, OpenCode Zen/Go, DeepSeek, MiniMax, Anthropic, and OpenAI, plus a
+custom endpoint. A provider holds a base URL, protocol, key, and a list of models; the first model
+is the default. The editor can discover models (`/models`) and test a real request. Deleting a
+provider clears agent/team references and removes its credential.
+
+An agent's `providerId` + `model` override the workspace default for runs of that agent.
 
 Skills are stored metadata; the runtime bridge does not yet inject them into a run (the active/passive
 mode is persisted so injection can be wired without another migration).
