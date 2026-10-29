@@ -99,6 +99,7 @@ function RoomRow({ room, onOpen, runs, onDelete }) {
 }
 
 function TemplateCard({ template, onUse }) {
+  const [busy, setBusy] = useState(false);
   return (
     <article class="team-card template-card">
       <div class="team-card-top">
@@ -113,8 +114,17 @@ function TemplateCard({ template, onUse }) {
       <div class="chip-row" style="margin-bottom:14px">
         {(template.agents || []).map((a) => <span class="chip">{esc(a.name)}</span>)}
       </div>
-      <button class="btn" style="width:100%;margin-top:auto" onClick={() => onUse(template)}>
-        <Icon name="plus" size={14} />Use this template
+      <button class="btn" style="width:100%;margin-top:auto" disabled={busy}
+        onClick={async () => {
+          setBusy(true);
+          try {
+            await onUse(template);
+          } finally {
+            setBusy(false);
+          }
+        }}>
+        {busy ? <span class="btn-spin"><Icon name="refresh" size={14} /></span> : <Icon name="plus" size={14} />}
+        {busy ? 'Mengimpor…' : 'Use this template'}
       </button>
     </article>
   );
@@ -1092,7 +1102,7 @@ export function TeamsPage({ state, openTeam, onTeamCreate, onUseTemplate }) {
   );
 }
 
-export function AgentsPage({ state, openAgent }) {
+export function AgentsPage({ state, openAgent, deleteAgent }) {
   const agents = state.agents || [];
   return (
     <>
@@ -1124,6 +1134,13 @@ export function AgentsPage({ state, openAgent }) {
                   <span class="meta-text">{(a.tools || []).length} tools · {(a.skills || []).length} skills · {esc(a.model || 'auto model')}</span>
                 </div>
               </div>
+              {deleteAgent && (
+                <button class="icon-btn row-delete" title="Hapus agent" aria-label={`Hapus agent ${a.name}`}
+                  onClick={(e) => { e.stopPropagation(); deleteAgent(a); }}
+                  onKeyDown={(e) => e.stopPropagation()}>
+                  <Icon name="trash" size={14} />
+                </button>
+              )}
               <span class="row-action"><Icon name="chevron-right" size={14} />Open</span>
             </article>
           ))

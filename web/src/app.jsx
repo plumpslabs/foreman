@@ -164,6 +164,17 @@ export function App() {
     }
   };
 
+  const deleteAgent = async (agent) => {
+    if (!confirm(`Hapus agent "${agent.name}" dari library global?\nTeam yang sudah memakainya tetap menyimpan salinannya.`)) return;
+    try {
+      await api(`/api/agents/${encodeURIComponent(agent.id)}`, { method: 'DELETE' });
+      await refresh();
+      notify('Agent dihapus dari library global');
+    } catch (error) {
+      notify(error.message);
+    }
+  };
+
   const deleteRoom = async (roomId) => {
     const room = current.rooms.find((r) => r.id === roomId);
     if (!confirm(`Delete room "${room?.name || roomId}" and all of its tasks and runs?\nThis cannot be undone.`)) return;
@@ -215,7 +226,7 @@ export function App() {
     state: current, notify, refresh, setModal, navigate,
     openRoom, openAgent, openTeam, openSkill, openTeamCreate,
     runTask, deleteSkill, cancelRun, pauseRun, deleteRoom,
-    importTeamTemplate,
+    importTeamTemplate, deleteAgent,
   };
 
   const pages = {
