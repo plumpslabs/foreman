@@ -334,6 +334,8 @@ select { cursor: pointer; }
   border-radius: 7px; padding: 5px 9px; background: var(--panel2); white-space: nowrap;
 }
 .room-row:hover .row-action { color: var(--accent); border-color: #33432a; }
+.row-delete { color: var(--muted); opacity: .65; align-self: center; flex-shrink: 0; }
+.row-delete:hover { opacity: 1; color: var(--red); }
 
 /* ---------- Skills list ---------- */
 .skill-row {
@@ -521,6 +523,42 @@ select { cursor: pointer; }
 .agent-pick-role { font-size: 11px; color: var(--muted); line-height: 1.35; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .agent-pick-meta { font-size: 10.5px; color: var(--muted); }
 .mini-link { background: none; border: 0; color: var(--blue); cursor: pointer; font-size: 11px; padding: 0; font-family: inherit; }
+
+/* Model picker combobox */
+.model-picker { position: relative; }
+.model-trigger {
+  display: flex; align-items: center; gap: 8px; width: 100%; text-align: left;
+  background: #0d1014; border: 1px solid #343b46; border-radius: 9px; color: var(--text);
+  padding: 8px 10px; font-size: 13px; cursor: pointer; font-family: inherit;
+}
+.model-trigger:hover { border-color: #505b6b; }
+.model-badge { font-weight: 650; color: #c5e89b; background: #192116; border: 1px solid #33432a; border-radius: 6px; padding: 2px 8px; font-size: 12px; max-width: 60%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.model-source { font-size: 11px; color: var(--muted); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; }
+.model-caret { color: var(--muted); display: grid; }
+.model-caret svg { transition: transform .12s ease; }
+.model-caret.open svg { transform: rotate(180deg); }
+.model-pop {
+  position: absolute; z-index: 40; top: calc(100% + 4px); left: 0; right: 0;
+  background: #111419; border: 1px solid var(--line); border-radius: 10px;
+  box-shadow: 0 12px 30px rgba(0, 0, 0, .45); padding: 8px; max-height: 280px; display: flex; flex-direction: column;
+}
+.model-search { background: #0d1014; border: 1px solid #343b46; border-radius: 8px; color: var(--text); padding: 7px 10px; font-size: 12px; margin-bottom: 6px; }
+.model-groups { overflow: auto; display: flex; flex-direction: column; gap: 4px; }
+.model-option { display: flex; align-items: center; gap: 8px; background: transparent; border: 0; border-radius: 7px; color: var(--text); padding: 7px 9px; font-size: 12px; cursor: pointer; font-family: inherit; text-align: left; }
+.model-option:hover { background: #192116; }
+.model-option.custom { color: var(--accent); }
+.model-opt-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.model-opt-src { margin-left: auto; font-size: 10.5px; color: var(--muted); flex-shrink: 0; }
+
+/* Room team rail: member badges */
+.team-rail { margin-bottom: 10px; }
+.member-badges { display: flex; flex-wrap: wrap; gap: 4px; margin: 4px 0 0 44px; }
+.member-badge {
+  display: inline-flex; align-items: center; font-size: 10.5px; color: #c0c6d0;
+  border: 1px solid var(--line); background: var(--panel2); border-radius: 999px; padding: 2px 8px;
+  max-width: 140px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.member-badge.main { border-color: #33432a; background: #192116; color: #c5e89b; }
 
 /* ---------- Template picker ---------- */
 .template-pick { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 10px; margin-top: 10px; }
@@ -751,6 +789,8 @@ select.mini-select { appearance: none; -webkit-appearance: none; padding-right: 
 .live-on .live-dot { animation: livePulse 1.2s ease-in-out infinite; }
 .live-dim { opacity: .55; color: var(--muted); }
 .live-dim .live-dot { background: var(--orange); animation: none; }
+.live-idle { opacity: .8; color: var(--muted); }
+.live-idle .live-dot { background: var(--muted); animation: none; }
 .live-dot.idle { background: var(--muted); animation: none; }
 @keyframes livePulse {
   0%, 100% { box-shadow: 0 0 0 0 rgba(90, 200, 120, .45); }

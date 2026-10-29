@@ -5,6 +5,12 @@ import { Markdown } from './markdown.jsx';
 import { DiffView, parseDiff } from './diff.jsx';
 
 const esc = (s) => String(s ?? '');
+const fmtTokens = (n) => (Number(n) > 0 ? Number(n).toLocaleString() : '—');
+const fmtMoney = (n) => {
+  const v = Number(n);
+  if (!v) return '—';
+  return '$' + v.toFixed(2).replace(/\.00$/, '');
+};
 const timeAgo = (iso) => {
   const d = new Date(iso);
   const s = Math.floor((Date.now() - d.getTime()) / 1000);
@@ -52,7 +58,7 @@ function roomRuntimeStatus(room, runs) {
   return 'idle';
 }
 
-function RoomRow({ room, onOpen, runs }) {
+function RoomRow({ room, onOpen, runs, onDelete }) {
   const statusTag = {
     planning: 'muted', running: 'blue', review: 'orange', cancelled: 'red', completed: 'green',
   }[room.status] || 'muted';
@@ -80,6 +86,13 @@ function RoomRow({ room, onOpen, runs }) {
           <span class="meta-text">{teamCount} team{teamCount === 1 ? '' : 's'} · {timeAgo(room.createdAt)}</span>
         </div>
       </div>
+      {onDelete && (
+        <button class="icon-btn row-delete" title="Delete room" aria-label={`Delete room ${room.name}`}
+          onClick={(e) => { e.stopPropagation(); onDelete(room.id); }}
+          onKeyDown={(e) => e.stopPropagation()}>
+          <Icon name="trash" size={14} />
+        </button>
+      )}
       <span class="row-action"><Icon name="chevron-right" size={14} />Open</span>
     </article>
   );
@@ -169,7 +182,7 @@ export function HomePage({ state, openRoom, setModal, onTeamCreate, navigate }) 
   );
 }
 
-export function RoomsPage({ state, openRoom, setModal }) {
+export function RoomsPage({ state, openRoom, setModal, deleteRoom }) {
   const { rooms } = state;
   return (
     <>
@@ -183,7 +196,7 @@ export function RoomsPage({ state, openRoom, setModal }) {
       </div>
       <div class="list">
         {rooms.length
-          ? rooms.map((r) => <RoomRow key={r.id} room={r} onOpen={openRoom} runs={state.runs} />)
+          ? rooms.map((r) => <RoomRow key={r.id} room={r} onOpen={openRoom} runs={state.runs} onDelete={deleteRoom} />)
           : <div class="empty">No rooms yet. Create one to define a goal and invite teams.</div>}
       </div>
       <div class="panel" style="margin-top:24px">
@@ -452,21 +465,22 @@ export function RoomDetailHost({ room, state, notify, setModal, runTask, refresh
                 ))}
               </div>
 
-              {(runningRuns.length || pausedRuns.length) && (
+              {composeAgents.length ? (
                 <div class="live-agents">
-                  <span class="live-label"><Icon name="activity" size={12} />Live</span>
-                  {runningRuns.map((run) => (
-                    <span class="live-agent live-on" key={run.id} title={`${esc(agentNameForRun(run))} · ${esc(run.model)}`}>
-                      <span class="live-dot" />{esc(agentNameForRun(run))}
-                    </span>
-                  ))}
-                  {pausedRuns.map((run) => (
-                    <span class="live-agent live-dim" key={run.id} title={`${esc(agentNameForRun(run))} paused`}>
-                      <span class="live-dot" />{esc(agentNameForRun(run))} paused
-                    </span>
-                  ))}
+                  <span class="live-label"><Icon name="activity" size={12} />Agents</span>
+                  {composeAgents.map(([name]) => {
+                    const isOn = runningRuns.some((run) => agentNameForRun(run) === name);
+                    const isPaused = !isOn && pausedRuns.some((run) => agentNameForRun(run) === name);
+                    const cls = isOn ? 'live-on' : isPaused ? 'live-dim' : 'live-idle';
+                    return (
+                      <span class={`live-agent ${cls}`} key={name}
+                        title={isOn ? `${esc(name)} is running now` : isPaused ? `${esc(name)} paused` : esc(name)}>
+                        <span class="live-dot" />{esc(name)}
+                      </span>
+                    );
+                  })}
                 </div>
-              )}
+              ) : null}
 
               <form class="chat-compose" onSubmit={send}>
                 <div class="compose-shell">
@@ -579,15 +593,25 @@ export function RoomDetailHost({ room, state, notify, setModal, runTask, refresh
             </div>
             {teams.length
               ? teams.map((t) => (
-                <div class="agent-line">
-                  <div class="agent-avatar green" style="border-radius:6px">{avatarInitials(t.mainAgent)}</div>
-                  <div class="agent-info">
-                    <div class="agent-name">{esc(t.name)}</div>
-                    <div class="agent-role">Main: {esc(t.mainAgent)}</div>
+                <div class="team-rail" key={t.id}>
+                  <div class="agent-line">
+                    <div class="agent-avatar green" style="border-radius:6px">{avatarInitials(t.mainAgent)}</div>
+                    <div class="agent-info">
+                      <div class="agent-name">{esc(t.name)}</div>
+                      <div class="agent-role">Main: {esc(t.mainAgent)}</div>
+                    </div>
+                    <button class="icon-btn" title="Remove team" onClick={() => kickTeam(t.id)}>
+                      <Icon name="x" size={13} />
+                    </button>
                   </div>
-                  <button class="icon-btn" title="Remove team" onClick={() => kickTeam(t.id)}>
-                    <Icon name="x" size={13} />
-                  </button>
+                  <div class="member-badges">
+                    {(t.agents || []).map((a) => (
+                      <span class={`member-badge ${a.name === t.mainAgent ? 'main' : ''}`} key={a.name}
+                        title={a.name === t.mainAgent ? `${esc(a.name)} (main agent)` : esc(a.name)}>
+                        {esc(a.name)}
+                      </span>
+                    ))}
+                  </div>
                 </div>
               ))
               : <div class="muted" style="font-size:11px;padding:4px 0">No teams invited yet.</div>}
@@ -616,13 +640,13 @@ export function RoomDetailHost({ room, state, notify, setModal, runTask, refresh
             ) : null}
             {lastRun && (
               <div class="section-note" style="margin-top:8px">
-                Last: {esc(lastRun.status)} · {lastRun.tokens || 0} tokens
+                Last: {esc(lastRun.status)} · {fmtTokens(lastRun.tokens)} tokens
               </div>
             )}
           </div>
 
           <div class="rail-section">
-            <div class="rail-title">Task progress <span style="margin-left:auto;font-weight:400;color:var(--muted)">{done} / {total}</span></div>
+            <div class="rail-title">Task progress <span style="margin-left:auto;font-weight:400;color:var(--muted)">{total ? `${done} / ${total}` : 'no tasks'}</span></div>
             <div class="progress-track"><div class="progress-fill" style={`width:${pct}%`} /></div>
             <div style="margin-top:9px">
               {roomTasks.filter((t) => t.status !== 'done').slice(0, 4).map((t) => (
@@ -966,7 +990,7 @@ export function RunsPage({ state, cancelRun, pauseRun }) {
                   <div class="room-sub">{esc(task ? task.title : 'Unknown task')} · {esc(run.result || run.error || 'Run executing…')}</div>
                   <div class="room-foot">
                     <span class="tag">{esc(run.provider)}</span>
-                    <span class="meta-text">Started {new Date(run.startedAt).toLocaleString()} · {esc(run.tokens || 0)} tokens · ${Number(run.costUsd || 0).toFixed(4)}</span>
+                    <span class="meta-text">Started {new Date(run.startedAt).toLocaleString()} · {fmtTokens(run.tokens)} tokens · cost {fmtMoney(run.costUsd)}</span>
                   </div>
                 </div>
                 {run.status === 'running' && (

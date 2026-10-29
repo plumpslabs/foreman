@@ -50,9 +50,10 @@
 - **Agent profiles** are standalone records (`state.agents`). Creating or editing a profile sets
   the name, role, description, markdown instructions, provider/model override, effort, allowed
   tools, attached skills, and review requirement.
-- **Provider-bound model picker** — when a provider is selected, the model field becomes a dropdown
-  of that provider's configured models (first = default). The picked model is shown as a badge;
-  models outside the provider's list are kept as explicit custom overrides.
+- **Provider-bound model picker** — the model field is a searchable combobox: the trigger shows the
+  picked model as a badge with its source provider; clicking opens a searchable list of every
+  configured provider's models, and picking a model from another provider switches the provider
+  automatically. Custom models can be typed in via the search box.
 - **Teams keep their own agent copies.** Editing a library profile does not rewrite an imported
   team; edit the team to change its roster. Team agents are added via a picker modal that lists
   library agents (excluding ones already on the team), and each roster row can be promoted to
@@ -96,6 +97,8 @@ gain a mode plus a file tree.
 
 - **Routing** — the dashboard uses hash routes (`#/rooms/:id`, `#/agents/:id`, …) so a refresh
   returns to the same page.
+- **Delete room** — the rooms list has a trash action (confirm dialog); deleting removes the room,
+  its tasks, and its runs atomically (`DELETE /api/rooms/{id}`).
 - **Runtime status** — rooms show Running/Paused/Idle from their runs. A running room exposes
   *Pause run* (a graceful SIGTERM to the bridge, which persists the conversation and stops at the
   next step boundary; the task stays `in_progress`). A room whose last run is paused, failed,
@@ -110,8 +113,10 @@ gain a mode plus a file tree.
 - **Chat compose** — Enter sends, Shift+Enter adds a newline, and sends are queued so you can type
   while an earlier message is still in flight (no spam/double submit). The agent selector lists
   every agent across the invited teams; routing is via `@agent` mention.
-- **Live agents strip** — above the input, room agents currently running show as pulsing chips
-  (dimmed when paused), so it is always clear who is working.
+- **Live agents strip** — above the input, every invited agent shows as a chip with a status dot:
+  pulsing while running, dimmed when paused, muted when idle.
+- **Room rail members** — each invited team in the right rail lists its member badges (main agent
+  highlighted).
 - **Invited-team card** — the chat shows a centered card naming each invited team and its members.
 - **Changes** — unified diffs from a room's runs render red/green with collapsible files.
 

@@ -281,6 +281,53 @@ func (s *Store) CreateRoom(name, goal string, teamIDs []string) (Room, error) {
 	return r, nil
 }
 
+// DeleteRoom removes a room together with its tasks and runs. Runs for tasks
+// inside the room are removed too so the room's history disappears atomically.
+func (s *Store) DeleteRoom(id string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	previousRooms := s.state.Rooms
+	previousTasks := s.state.Tasks
+	previousRuns := s.state.Runs
+
+	filtered := make([]Room, 0, len(previousRooms))
+	found := false
+	for _, room := range previousRooms {
+		if room.ID == id {
+			found = true
+			continue
+		}
+		filtered = append(filtered, room)
+	}
+	if !found {
+		return fmt.Errorf("unknown room id %q", id)
+	}
+
+	tasks := make([]Task, 0, len(previousTasks))
+	for _, task := range previousTasks {
+		if task.RoomID != id {
+			tasks = append(tasks, task)
+		}
+	}
+	runs := make([]AgentRun, 0, len(previousRuns))
+	for _, run := range previousRuns {
+		if run.RoomID != id {
+			runs = append(runs, run)
+		}
+	}
+
+	s.state.Rooms = filtered
+	s.state.Tasks = tasks
+	s.state.Runs = runs
+	if err := s.save(); err != nil {
+		s.state.Rooms = previousRooms
+		s.state.Tasks = previousTasks
+		s.state.Runs = previousRuns
+		return err
+	}
+	return nil
+}
+
 func (s *Store) AppendRoomMessage(roomID, role, content string) (ChatMessage, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()

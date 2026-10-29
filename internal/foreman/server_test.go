@@ -56,6 +56,81 @@ func TestDashboardServesEmbeddedUIAndWorkspaceAPI(t *testing.T) {
 	}
 }
 
+func TestDeleteRoomRemovesItsTasksAndRuns(t *testing.T) {
+	server, project := newTestServer(t)
+	handler := server.Handler()
+	base := "?project=" + url.QueryEscape(project)
+
+	roomBody := bytes.NewBufferString(`{"name":"Temp Room","goal":"g"}`)
+	roomReq := httptest.NewRequest(http.MethodPost, "/api/rooms"+base, roomBody)
+	roomReq.Header.Set("Content-Type", "application/json")
+	roomReq.RemoteAddr = "127.0.0.1:1234"
+	roomReq.Host = "127.0.0.1:8080"
+	roomRes := httptest.NewRecorder()
+	handler.ServeHTTP(roomRes, roomReq)
+	if roomRes.Code != http.StatusCreated {
+		t.Fatalf("create room status = %d: %s", roomRes.Code, roomRes.Body.String())
+	}
+	var room Room
+	if err := json.Unmarshal(roomRes.Body.Bytes(), &room); err != nil {
+		t.Fatal(err)
+	}
+
+	taskBody := bytes.NewBufferString(fmt.Sprintf(`{"title":"seed","roomId":%q}`, room.ID))
+	taskReq := httptest.NewRequest(http.MethodPost, "/api/rooms/"+room.ID+"/tasks"+base, taskBody)
+	taskReq.Header.Set("Content-Type", "application/json")
+	taskReq.RemoteAddr = "127.0.0.1:1234"
+	taskReq.Host = "127.0.0.1:8080"
+	taskRes := httptest.NewRecorder()
+	handler.ServeHTTP(taskRes, taskReq)
+	if taskRes.Code != http.StatusCreated {
+		t.Fatalf("create task status = %d: %s", taskRes.Code, taskRes.Body.String())
+	}
+	var task Task
+	if err := json.Unmarshal(taskRes.Body.Bytes(), &task); err != nil {
+		t.Fatal(err)
+	}
+
+	delReq := httptest.NewRequest(http.MethodDelete, "/api/rooms/"+room.ID+base, nil)
+	delReq.RemoteAddr = "127.0.0.1:1234"
+	delReq.Host = "127.0.0.1:8080"
+	delRes := httptest.NewRecorder()
+	handler.ServeHTTP(delRes, delReq)
+	if delRes.Code != http.StatusNoContent {
+		t.Fatalf("delete room status = %d: %s", delRes.Code, delRes.Body.String())
+	}
+
+	getReq := httptest.NewRequest(http.MethodGet, "/api/workspace"+base, nil)
+	getReq.RemoteAddr = "127.0.0.1:1234"
+	getReq.Host = "127.0.0.1:8080"
+	getRes := httptest.NewRecorder()
+	handler.ServeHTTP(getRes, getReq)
+	var state WorkspaceState
+	if err := json.Unmarshal(getRes.Body.Bytes(), &state); err != nil {
+		t.Fatal(err)
+	}
+	for _, r := range state.Rooms {
+		if r.ID == room.ID {
+			t.Fatalf("room %q still present after delete", room.ID)
+		}
+	}
+	for _, tk := range state.Tasks {
+		if tk.ID == task.ID {
+			t.Fatalf("task %q still present after room delete", task.ID)
+		}
+	}
+
+	// Deleting again must 422.
+	del2Req := httptest.NewRequest(http.MethodDelete, "/api/rooms/"+room.ID+base, nil)
+	del2Req.RemoteAddr = "127.0.0.1:1234"
+	del2Req.Host = "127.0.0.1:8080"
+	del2Res := httptest.NewRecorder()
+	handler.ServeHTTP(del2Res, del2Req)
+	if del2Res.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("second delete status = %d, want 422", del2Res.Code)
+	}
+}
+
 func TestImportTeamAndCreateRoomAPIs(t *testing.T) {
 	server, project := newTestServer(t)
 	handler := server.Handler()

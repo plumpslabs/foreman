@@ -77,50 +77,66 @@ function normalizeTools(tools) {
   return out;
 }
 
-/* Model picker bound to the selected provider's model list. The picked model is
-   always shown as a badge; models not in the provider's list are kept as
-   explicit custom overrides instead of being silently dropped. */
-function ProviderModelField({ providerId, providers, model, onChange }) {
+/* Model picker bound to the connected providers. The trigger shows the picked
+   model as a badge with its source provider; clicking opens a searchable list
+   of every configured provider's models. Picking a model from another provider
+   also switches the provider. */
+function ProviderModelField({ providerId, providers, model, onChange, onProviderChange }) {
+  const [open, setOpen] = useState(false);
+  const [q, setQ] = useState('');
   const provider = providers.find((p) => p.id === providerId);
-  const models = provider?.models || [];
-  const inList = models.includes(model);
-  const [customOpen, setCustomOpen] = useState(false);
+  const allModels = [];
+  for (const p of providers) {
+    for (const m of p.models || []) {
+      if (!allModels.some((x) => x.model === m)) allModels.push({ model: m, provider: p });
+    }
+  }
+  const ql = q.trim().toLowerCase();
+  const filtered = ql
+    ? allModels.filter((x) => x.model.toLowerCase().includes(ql) || (x.provider.name || '').toLowerCase().includes(ql))
+    : allModels;
+  const sourceName = provider ? provider.name : providerId || 'workspace default';
+
+  const pick = (m, p) => {
+    onChange(m);
+    if (p && p.id !== providerId && onProviderChange) onProviderChange(p.id);
+    setOpen(false);
+    setQ('');
+  };
+
   return (
     <div class="field">
       <label>Model</label>
-      {models.length ? (
-        <select value={inList ? model : ''} onChange={(e) => onChange(e.currentTarget.value)}>
-          <option value="">Auto — {esc(provider?.defaultModel || 'provider default')}</option>
-          {models.map((m) => (
-            <option value={esc(m)}>{esc(m)}{m === provider?.defaultModel ? ' (default)' : ''}</option>
-          ))}
-        </select>
-      ) : (
-        <input placeholder="auto (workspace default)" value={model}
-          onInput={(e) => onChange(e.currentTarget.value)} />
-      )}
-      {(model || models.length) ? (
-        <div class="md-hint" style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
-          {model ? (
-            <>
-              <span class="chip chip-default">
-                {esc(model)}{!inList && models.length ? ' · custom' : ''}
-              </span>
-              {!inList && models.length && (
-                <button type="button" class="mini-link" onClick={() => setCustomOpen(!customOpen)}>
-                  {customOpen ? 'Close' : 'Edit custom'}
+      <div class="model-picker">
+        <button type="button" class="model-trigger" onClick={() => setOpen(!open)}>
+          <span class="model-badge">{esc(model || 'auto')}</span>
+          <span class="model-source">{esc(sourceName)}</span>
+          <span class={`model-caret ${open ? 'open' : ''}`}><Icon name="chevron-down" size={13} /></span>
+        </button>
+        {open && (
+          <div class="model-pop">
+            <input class="model-search" placeholder="Search models or providers…" value={q}
+              onInput={(e) => setQ(e.currentTarget.value)} />
+            <div class="model-groups">
+              {filtered.length ? filtered.map(({ model: m, provider: p }) => (
+                <button type="button" class="model-option" key={m} onClick={() => pick(m, p)}>
+                  <span class="model-opt-name">{esc(m)}</span>
+                  <span class="model-opt-src">{esc(p.name)}</span>
+                </button>
+              )) : (
+                <button type="button" class="model-option custom" onClick={() => pick(q.trim(), null)}>
+                  <span class="model-opt-name">Use custom “{esc(q.trim())}”</span>
                 </button>
               )}
-              {!inList && models.length && customOpen && (
-                <input style="max-width:220px" value={model}
-                  onInput={(e) => onChange(e.currentTarget.value)} />
-              )}
-            </>
-          ) : (
-            <span class="meta-text">This agent uses the provider's default model for runs.</span>
-          )}
-        </div>
-      ) : null}
+            </div>
+          </div>
+        )}
+      </div>
+      <div class="md-hint">
+        {model
+          ? <span class="chip chip-default">{esc(model)}</span>
+          : <span class="meta-text">This agent uses the provider's default model.</span>}
+      </div>
     </div>
   );
 }
@@ -300,7 +316,8 @@ export function AgentDetailPage({ agentId, state, notify, refresh, onBack }) {
             </select>
           </div>
           <ProviderModelField providerId={form.providerId} providers={state.providers || []}
-            model={form.model} onChange={(model) => set('model', model)} />
+            model={form.model} onChange={(model) => set('model', model)}
+            onProviderChange={(id) => set('providerId', id)} />
           <div class="field">
             <label>Default effort</label>
             <select value={form.effort} onChange={(e) => set('effort', e.currentTarget.value)}>

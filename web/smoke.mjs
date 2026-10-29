@@ -89,6 +89,7 @@ if (!view.includes('Proceed with the refactor?')) failures.push('question prompt
 if (!view.includes('Teams invited to this room')) failures.push('team-invited card missing');
 if (!view.includes('Smoke Team')) failures.push('invited team name missing from card');
 if (!window.document.querySelector('.live-agents .live-agent.live-on')) failures.push('live agent indicator missing');
+if (!window.document.querySelector('.member-badge.main')) failures.push('member badges missing from the room rail');
 if (window.location.hash !== '#/rooms/r1') failures.push('room route was not written to the hash');
 
 // Enter-to-send + send queue: typing and pressing Enter must POST a message.
@@ -168,8 +169,8 @@ if (!providerSelect) {
   providerSelect.dispatchEvent(new window.Event('change', { bubbles: true }));
   await flush();
   view = window.document.body.innerHTML;
-  if (!view.includes('Auto — deepseek-v4.1-flash:free')) failures.push('provider-bound model options missing');
-  if (!view.includes('This agent uses the provider\'s default model for runs.')) failures.push('provider-bound model picker hint missing');
+  if (!view.includes('auto')) failures.push('provider-bound model trigger missing');
+  if (!view.includes('This agent uses the provider\'s default model.')) failures.push('provider-bound model picker hint missing');
 }
 
 // Skill detail page with a directory tree.
@@ -259,6 +260,22 @@ if (!menuButton) {
   click(menuButton);
   await flush();
   if (window.document.querySelector('.app.collapsed')) failures.push('sidebar did not expand again');
+}
+
+// Room deletion from the rooms list.
+window.confirm = () => true;
+click(byText('.nav-btn', 'Rooms'));
+await flush();
+const delBtn = window.document.querySelector('.room-row .row-delete');
+if (!delBtn) {
+  failures.push('room delete button missing');
+} else {
+  calls.length = 0;
+  click(delBtn);
+  await flush();
+  if (!calls.some((c) => c.url.includes('/api/rooms/r1') && c.method === 'DELETE')) {
+    failures.push('room delete did not call DELETE /api/rooms/r1');
+  }
 }
 
 if (failures.length) {

@@ -164,6 +164,18 @@ export function App() {
     }
   };
 
+  const deleteRoom = async (roomId) => {
+    const room = current.rooms.find((r) => r.id === roomId);
+    if (!confirm(`Delete room "${room?.name || roomId}" and all of its tasks and runs?\nThis cannot be undone.`)) return;
+    try {
+      await api(`/api/rooms/${encodeURIComponent(roomId)}`, { method: 'DELETE' });
+      await refresh();
+      notify('Room deleted');
+    } catch (error) {
+      notify(error.message);
+    }
+  };
+
   const cancelRun = async (runId) => {
     try {
       await api(`/api/runs/${encodeURIComponent(runId)}/cancel`, { method: 'POST', body: '{}' });
@@ -187,7 +199,7 @@ export function App() {
   const pageProps = {
     state: current, notify, refresh, setModal, navigate,
     openRoom, openAgent, openTeam, openSkill, openTeamCreate,
-    runTask, deleteSkill, cancelRun, pauseRun,
+    runTask, deleteSkill, cancelRun, pauseRun, deleteRoom,
   };
 
   const pages = {

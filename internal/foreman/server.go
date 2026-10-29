@@ -43,6 +43,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("PUT /api/agents/{agentID}", s.updateAgent)
 	mux.HandleFunc("DELETE /api/agents/{agentID}", s.deleteAgent)
 	mux.HandleFunc("POST /api/rooms", s.createRoom)
+	mux.HandleFunc("DELETE /api/rooms/{roomID}", s.deleteRoom)
 	mux.HandleFunc("POST /api/rooms/{roomID}/messages", s.appendRoomMessage)
 	mux.HandleFunc("PUT /api/rooms/{roomID}/teams", s.updateRoomTeams)
 	mux.HandleFunc("PUT /api/rooms/{roomID}/questions/{questionID}", s.answerRoomQuestion)
@@ -163,6 +164,18 @@ func (s *Server) deleteAgent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := s.store.DeleteAgent(r.PathValue("agentID")); err != nil {
+		writeError(w, http.StatusUnprocessableEntity, err.Error())
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) deleteRoom(w http.ResponseWriter, r *http.Request) {
+	if err := s.verifyProject(r.URL.Query().Get("project")); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if err := s.store.DeleteRoom(r.PathValue("roomID")); err != nil {
 		writeError(w, http.StatusUnprocessableEntity, err.Error())
 		return
 	}
