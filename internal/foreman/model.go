@@ -1,18 +1,20 @@
 package foreman
 
 import (
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
 )
 
-const SchemaVersion = 2
+const SchemaVersion = 3
 
 type WorkspaceState struct {
 	SchemaVersion int              `json:"schemaVersion"`
 	ProjectPath   string           `json:"projectPath"`
 	Rooms         []Room           `json:"rooms"`
 	Teams         []Team           `json:"teams"`
+	Agents        []Agent          `json:"agents"`
 	Templates     []TeamTemplate   `json:"templates"`
 	Providers     []ProviderConfig `json:"providers"`
 	Tasks         []Task           `json:"tasks"`
@@ -47,13 +49,27 @@ type ProviderConfig struct {
 }
 
 type Skill struct {
-	ID           string `json:"id"`
-	Name         string `json:"name"`
-	Description  string `json:"description"`
-	Version      int    `json:"version"`
-	Instructions string `json:"instructions"`
-	Enabled      bool   `json:"enabled"`
+	ID           string      `json:"id"`
+	Name         string      `json:"name"`
+	Description  string      `json:"description"`
+	Version      int         `json:"version"`
+	Instructions string      `json:"instructions"`
+	Enabled      bool        `json:"enabled"`
+	Mode         string      `json:"mode"` // "active" (injected into agent context) or "passive" (reference only)
+	Files        []SkillFile `json:"files"`
 }
+
+// SkillFile is one markdown (or text) file inside a skill bundle. Paths are
+// relative to the skill root and may contain sub-directories.
+type SkillFile struct {
+	Path    string `json:"path"`
+	Content string `json:"content"`
+}
+
+const (
+	SkillModeActive  = "active"
+	SkillModePassive = "passive"
+)
 
 type Task struct {
 	ID             string    `json:"id"`
@@ -279,4 +295,50 @@ func DefaultTemplates() []TeamTemplate {
 			Instructions: "Investigate first, define dependencies and bounded work, parallelize only independent tasks, verify changes, and report unresolved risks.",
 		},
 	}
+}
+
+// DefaultAgents derives the initial agent library from the built-in team
+// templates. Names are the identity used by teams and tasks, so duplicates are
+// collapsed (the first template that declares a name wins).
+func DefaultAgents() []Agent {
+	seen := map[string]bool{}
+	var agents []Agent
+	for _, template := range DefaultTemplates() {
+		for _, agent := range template.Agents {
+			if seen[agent.Name] {
+				continue
+			}
+			seen[agent.Name] = true
+			agents = append(agents, agent)
+		}
+	}
+	return agents
+}
+
+// DefaultSkills derives a passive skill library from the capability names the
+// built-in templates reference, so imported teams and agents can attach them.
+func DefaultSkills() []Skill {
+	seen := map[string]bool{}
+	var skills []Skill
+	for _, template := range DefaultTemplates() {
+		for _, agent := range template.Agents {
+			for _, name := range agent.Skills {
+				name = strings.TrimSpace(name)
+				if name == "" || seen[name] {
+					continue
+				}
+				seen[name] = true
+				skills = append(skills, Skill{
+					Name:         name,
+					Description:  "Built-in capability shipped with the team templates.",
+					Version:      1,
+					Mode:         SkillModePassive,
+					Enabled:      false,
+					Instructions: "Describe how agents should apply this capability. Passive skills are reference only until switched to active.",
+					Files:        []SkillFile{{Path: "SKILL.md", Content: "# " + name + "\n\nDescribe how agents should apply this capability."}},
+				})
+			}
+		}
+	}
+	return skills
 }

@@ -139,3 +139,131 @@ func TestOpenStoreRejectsDifferentProjectAndUnsupportedSchema(t *testing.T) {
 		t.Fatal("expected unsupported schema to fail")
 	}
 }
+
+func TestAgentLibraryCRUD(t *testing.T) {
+	store, err := OpenStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	initial := len(store.Snapshot().Agents)
+	if initial == 0 {
+		t.Fatal("default agent library should be seeded")
+	}
+	agent, err := store.SaveAgent(Agent{
+		Name:          "Sentinel",
+		Role:          "Security reviewer",
+		Description:   "Reviews changes for security regressions.",
+		Instructions:  "Read only. Report findings with evidence.",
+		Tools:         []string{"read", "search"},
+		RequireReview: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if agent.ID == "" {
+		t.Fatal("agent id was not assigned")
+	}
+	if got := len(store.Snapshot().Agents); got != initial+1 {
+		t.Fatalf("agent count = %d, want %d", got, initial+1)
+	}
+	agent.Role = "Security and privacy reviewer"
+	updated, err := store.SaveAgent(agent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.Role != "Security and privacy reviewer" {
+		t.Fatalf("agent role was not updated: %q", updated.Role)
+	}
+	if _, err := store.SaveAgent(Agent{Name: "Sentinel", Role: "duplicate"}); err == nil {
+		t.Fatal("duplicate agent names must be rejected")
+	}
+	if err := store.DeleteAgent(agent.ID); err != nil {
+		t.Fatal(err)
+	}
+	if got := len(store.Snapshot().Agents); got != initial {
+		t.Fatalf("agent count after delete = %d, want %d", got, initial)
+	}
+	if err := store.DeleteAgent("missing"); err == nil {
+		t.Fatal("deleting an unknown agent must fail")
+	}
+}
+
+func TestSkillBundleStoresFilesAndMode(t *testing.T) {
+	store, err := OpenStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	skill, err := store.SaveSkill(Skill{
+		Name: "Release checklist",
+		Mode: SkillModeActive,
+		Files: []SkillFile{
+			{Path: "SKILL.md", Content: "# Release checklist\n\nRun every check."},
+			{Path: "references/commands.md", Content: "go test ./...\nmake check"},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if skill.Mode != SkillModeActive || !skill.Enabled {
+		t.Fatalf("active skill mode was not applied: %#v", skill)
+	}
+	if skill.Instructions == "" {
+		t.Fatal("instructions should be derived from SKILL.md")
+	}
+	if len(skill.Files) != 2 {
+		t.Fatalf("files = %d, want 2", len(skill.Files))
+	}
+	passive, err := store.SaveSkill(Skill{ID: skill.ID, Name: skill.Name, Mode: SkillModePassive,
+		Files: []SkillFile{{Path: "SKILL.md", Content: "reference"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if passive.Enabled {
+		t.Fatal("passive skill must not be marked enabled")
+	}
+	if _, err := store.SaveSkill(Skill{Name: "escape", Files: []SkillFile{{Path: "../secret.md", Content: "x"}}}); err == nil {
+		t.Fatal("paths escaping the skill root must be rejected")
+	}
+}
+
+func TestSchemaV2MigratesToAgentLibrary(t *testing.T) {
+	project := t.TempDir()
+	legacy := WorkspaceState{
+		SchemaVersion: 2,
+		ProjectPath:   project,
+		Rooms:         []Room{},
+		Teams: []Team{{
+			ID: "tm", TemplateID: "quick-fix", Name: "Legacy Team", Purpose: "p", MainAgent: "Legacy Lead",
+			Agents: []Agent{{Name: "Legacy Lead", Role: "coordinator"}},
+		}},
+		Templates: DefaultTemplates(),
+		Providers: []ProviderConfig{},
+		Tasks:     []Task{},
+		Runs:      []AgentRun{},
+		Skills:    []Skill{},
+		Settings:  normalizeSettings(Settings{}),
+	}
+	dir := filepath.Join(project, ".foreman")
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	data, err := json.Marshal(legacy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "workspace.json"), data, 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	store, err := OpenStore(project)
+	if err != nil {
+		t.Fatal(err)
+	}
+	state := store.Snapshot()
+	if state.SchemaVersion != SchemaVersion {
+		t.Fatalf("schema = %d, want %d", state.SchemaVersion, SchemaVersion)
+	}
+	if len(state.Agents) != 1 || state.Agents[0].Name != "Legacy Lead" || state.Agents[0].ID == "" {
+		t.Fatalf("legacy team agents were not imported into the library: %#v", state.Agents)
+	}
+}

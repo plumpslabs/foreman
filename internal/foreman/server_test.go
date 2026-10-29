@@ -233,8 +233,17 @@ func TestTasksSettingsAndSkillsAPI(t *testing.T) {
 	if err := json.Unmarshal(stateRes.Body.Bytes(), &state); err != nil {
 		t.Fatal(err)
 	}
-	if state.Settings.Theme != "light" || len(state.Tasks) != 2 || state.Tasks[0].Status != "blocked" || len(state.Skills) != 1 {
+	if state.Settings.Theme != "light" || len(state.Tasks) != 2 || state.Tasks[0].Status != "blocked" {
 		t.Fatalf("unexpected persisted state: %#v", state)
+	}
+	foundSkill := false
+	for _, item := range state.Skills {
+		if item.Name == "Go tests" {
+			foundSkill = true
+		}
+	}
+	if !foundSkill {
+		t.Fatalf("created skill was not persisted: %#v", state.Skills)
 	}
 	if got := call(http.MethodPost, "/api/tasks/"+dependent.ID+"/run", `{}`); got.Code != http.StatusUnprocessableEntity {
 		t.Fatalf("blocked task run status = %d %s", got.Code, got.Body.String())
@@ -249,5 +258,57 @@ func TestOpenStoreRequiresDirectory(t *testing.T) {
 	file.Close()
 	if _, err := OpenStore(file.Name()); err == nil {
 		t.Fatal("expected non-directory project path to fail")
+	}
+}
+
+func TestAgentLibraryAPI(t *testing.T) {
+	server, project := newTestServer(t)
+	handler := server.Handler()
+	base := "?project=" + url.QueryEscape(project)
+	call := func(method, path, body string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(method, path+base, strings.NewReader(body))
+		req.RemoteAddr = "127.0.0.1:1234"
+		req.Host = "127.0.0.1:8080"
+		res := httptest.NewRecorder()
+		handler.ServeHTTP(res, req)
+		return res
+	}
+
+	created := call(http.MethodPost, "/api/agents", `{"name":"Scout","role":"Researcher","instructions":"read only","tools":["read","search"]}`)
+	if created.Code != http.StatusCreated {
+		t.Fatalf("create agent status = %d: %s", created.Code, created.Body.String())
+	}
+	var agent Agent
+	if err := json.Unmarshal(created.Body.Bytes(), &agent); err != nil {
+		t.Fatal(err)
+	}
+	if agent.ID == "" || agent.Name != "Scout" {
+		t.Fatalf("unexpected agent: %#v", agent)
+	}
+
+	updated := call(http.MethodPut, "/api/agents/"+agent.ID,
+		`{"name":"Scout","role":"Researcher","instructions":"read only","tools":["read"],"requireReview":true}`)
+	if updated.Code != http.StatusOK {
+		t.Fatalf("update agent status = %d: %s", updated.Code, updated.Body.String())
+	}
+
+	stateRes := call(http.MethodGet, "/api/workspace", "")
+	var state WorkspaceState
+	if err := json.Unmarshal(stateRes.Body.Bytes(), &state); err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, item := range state.Agents {
+		if item.ID == agent.ID && item.RequireReview {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("agent update was not persisted in the workspace")
+	}
+
+	deleted := call(http.MethodDelete, "/api/agents/"+agent.ID, "")
+	if deleted.Code != http.StatusNoContent {
+		t.Fatalf("delete agent status = %d", deleted.Code)
 	}
 }

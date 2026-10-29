@@ -39,6 +39,9 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/workspace", s.workspace)
 	mux.HandleFunc("POST /api/teams/import", s.importTeam)
 	mux.HandleFunc("PUT /api/teams/{teamID}", s.updateTeam)
+	mux.HandleFunc("POST /api/agents", s.saveAgent)
+	mux.HandleFunc("PUT /api/agents/{agentID}", s.updateAgent)
+	mux.HandleFunc("DELETE /api/agents/{agentID}", s.deleteAgent)
 	mux.HandleFunc("POST /api/rooms", s.createRoom)
 	mux.HandleFunc("POST /api/rooms/{roomID}/messages", s.appendRoomMessage)
 	mux.HandleFunc("POST /api/rooms/{roomID}/tasks", s.createTask)
@@ -110,6 +113,55 @@ func (s *Server) updateTeam(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, updated)
+}
+
+func (s *Server) saveAgent(w http.ResponseWriter, r *http.Request) {
+	if err := s.verifyProject(r.URL.Query().Get("project")); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	var agent Agent
+	if err := decodeJSON(w, r, &agent); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	saved, err := s.store.SaveAgent(agent)
+	if err != nil {
+		writeError(w, http.StatusUnprocessableEntity, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusCreated, saved)
+}
+
+func (s *Server) updateAgent(w http.ResponseWriter, r *http.Request) {
+	if err := s.verifyProject(r.URL.Query().Get("project")); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	var agent Agent
+	if err := decodeJSON(w, r, &agent); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	agent.ID = r.PathValue("agentID")
+	updated, err := s.store.SaveAgent(agent)
+	if err != nil {
+		writeError(w, http.StatusUnprocessableEntity, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, updated)
+}
+
+func (s *Server) deleteAgent(w http.ResponseWriter, r *http.Request) {
+	if err := s.verifyProject(r.URL.Query().Get("project")); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if err := s.store.DeleteAgent(r.PathValue("agentID")); err != nil {
+		writeError(w, http.StatusUnprocessableEntity, err.Error())
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func (s *Server) createRoom(w http.ResponseWriter, r *http.Request) {

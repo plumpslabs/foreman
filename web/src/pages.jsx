@@ -523,83 +523,107 @@ export function TeamsPage({ state, setModal }) {
         <div>
           <div class="eyebrow">Reusable agent teams</div>
           <h1 class="page-title">Teams</h1>
-          <div class="page-sub">Build a team once, invite it into any room. Choose a main agent, set instructions, and attach skills.</div>
+          <div class="page-sub">Build a team once, invite it into any room. Pick a main agent, write instructions, and attach the agents it needs.</div>
         </div>
+        <button class="btn primary" onClick={() => setModal({ kind: 'rooms' })}><Icon name="users" />Manage teams</button>
       </div>
-      <div class="grid" style="grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:12px">
-        {templates.map((t) => <TemplateCard key={t.id} template={t} onImport={setModal} />)}
-      </div>
-      <div class="section-head" style="margin-top:24px">
+
+      <div class="section-head" style="margin-top:0">
         <div>
           <div class="section-title">Your teams</div>
-          <div class="section-note">Imported editable copies</div>
+          <div class="section-note">Imported and editable copies — click a team to inspect or edit it</div>
         </div>
+        <span class="tag">{teams.length}</span>
       </div>
       <div class="list">
         {teams.length
           ? teams.map((t) => (
-            <article class="room-row">
+            <article
+              class="room-row clickable"
+              role="button"
+              tabindex="0"
+              onClick={() => setModal({ kind: 'team-detail', team: t })}
+              onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setModal({ kind: 'team-detail', team: t }); } }}
+            >
               <div class="agent-avatar blue" style="border-radius:6px">{avatarInitials(t.mainAgent)}</div>
               <div class="room-main">
-                <div class="room-title">{esc(t.name)}<span class="tag">{esc(t.templateId)} template</span></div>
+                <div class="room-title">
+                  {esc(t.name)}
+                  <span class="tag">{esc(t.templateId)} template</span>
+                </div>
                 <div class="room-sub">{esc(t.purpose)}</div>
-                <div class="room-foot"><span class="meta-text">Main: {esc(t.mainAgent)} · {(t.agents || []).length} agent roles</span></div>
+                <div class="room-foot">
+                  <span class="meta-text">Main: {esc(t.mainAgent)} · {(t.agents || []).length} agents</span>
+                </div>
+                <div class="chip-row">
+                  {(t.agents || []).map((a) => <span class="chip">{esc(a.name)}</span>)}
+                </div>
               </div>
+              <span class="row-action"><Icon name="pencil" size={14} />Edit</span>
             </article>
           ))
-          : <div class="empty">No teams imported. Choose a template above to create an editable copy.</div>}
+          : <div class="empty">No teams imported yet. Import a template below to create an editable copy.</div>}
+      </div>
+
+      <div class="section-head">
+        <div>
+          <div class="section-title">Team templates</div>
+          <div class="section-note">Start from a built-in crew and customize it</div>
+        </div>
+      </div>
+      <div class="grid" style="grid-template-columns:repeat(auto-fill,minmax(280px,1fr));">
+        {templates.map((t) => <TemplateCard key={t.id} template={t} onImport={setModal} />)}
       </div>
     </>
   );
 }
 
 export function AgentsPage({ state, setModal }) {
-  const profiles = [];
-  for (const team of state.teams) {
-    for (const agent of team.agents || []) {
-      profiles.push({
-        ...agent,
-        teamName: team.name,
-        main: agent.name === team.mainAgent,
-        tone: agent.requireReview ? 'orange' : 'green',
-      });
-    }
-  }
+  const agents = state.agents || [];
   return (
     <>
       <div class="page-head">
         <div>
           <div class="eyebrow">Agent library</div>
           <h1 class="page-title">Agent profiles</h1>
-          <div class="page-sub">Define role, model, instructions, and allowed tools once. Assign profiles to teams when needed.</div>
+          <div class="page-sub">
+            A reusable profile defines a role, model, markdown instructions, allowed tools, and skills.
+            Teams and rooms reference these profiles by name.
+          </div>
         </div>
-        <button class="btn primary" onClick={() => setModal({ kind: 'agent' })}><Icon name="plus" />Create agent</button>
+        <button class="btn primary" onClick={() => setModal({ kind: 'agent', agent: null })}><Icon name="plus" />Create agent</button>
       </div>
       <div class="list">
-        {profiles.length
-          ? profiles.map((a) => (
-            <article class="room-row">
-              <div class={avatarClass(a.tone)} style="border-radius:6px">{avatarInitials(a.name)}</div>
+        {agents.length
+          ? agents.map((a) => (
+            <article
+              class="room-row clickable"
+              role="button"
+              tabindex="0"
+              onClick={() => setModal({ kind: 'agent', agent: a })}
+              onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setModal({ kind: 'agent', agent: a }); } }}
+            >
+              <div class={avatarClass(a.requireReview ? 'orange' : 'green')} style="border-radius:6px">{avatarInitials(a.name)}</div>
               <div class="room-main">
                 <div class="room-title">
                   {esc(a.name)}
-                  {a.main ? <span class="tag green">Main agent</span> : <span class="tag">Worker role</span>}
+                  {a.requireReview ? <span class="tag orange">Requires review</span> : <span class="tag">Profile</span>}
                 </div>
-                <div class="room-sub">{esc(a.role)} · team {esc(a.teamName)}</div>
+                <div class="room-sub">{esc(a.role)}</div>
                 <div class="room-foot">
-                  {a.requireReview ? <span class="tag orange">Requires review</span> : null}
-                  <span class="meta-text">{(a.tools || []).length} tools allowed</span>
+                  <span class="meta-text">{(a.tools || []).length} tools · {(a.skills || []).length} skills · {esc(a.model || 'auto model')}</span>
                 </div>
               </div>
+              <span class="row-action"><Icon name="pencil" size={14} />Edit</span>
             </article>
           ))
-          : <div class="empty">No agent profiles yet. Import a team template; its roles will appear here.</div>}
+          : <div class="empty">No agent profiles yet. Create one, or import a team template to seed the library.</div>}
       </div>
     </>
   );
 }
 
-export function SkillsPage({ state, setModal, deleteSkill }) {
+export function SkillsPage({ state, setModal, deleteSkill, saveSkill }) {
   const { skills } = state;
   return (
     <>
@@ -607,28 +631,60 @@ export function SkillsPage({ state, setModal, deleteSkill }) {
         <div>
           <div class="eyebrow">Reusable capabilities</div>
           <h1 class="page-title">Skills</h1>
-          <div class="page-sub">Attach focused instruction bundles to agents. Keep skills composable instead of hardcoding behavior into agent prompts.</div>
+          <div class="page-sub">
+            Skills are markdown bundles with optional sub-folders and files. Active skills are injected into an
+            agent's context; passive skills stay as reference material.
+          </div>
         </div>
-        <button class="btn primary" onClick={() => setModal({ kind: 'skill' })}><Icon name="plus" />Add skill</button>
+        <div style="display:flex;gap:8px;flex-wrap:wrap">
+          <button class="btn" onClick={() => setModal({ kind: 'skill-import' })}><Icon name="upload" />Import folder or .md</button>
+          <button class="btn primary" onClick={() => setModal({ kind: 'skill-custom' })}><Icon name="plus" />New skill</button>
+        </div>
       </div>
       <div class="list">
         {skills.length
           ? skills.map((s) => (
-            <article class="team-card">
-              <div class="team-card-top">
-                <div class="team-icon"><Icon name="puzzle" size={18} /></div>
-                <button class="btn small" onClick={() => { if (confirm('Delete this skill?')) deleteSkill(s.id); }}>Delete</button>
+            <article
+              class="skill-row"
+              role="button"
+              tabindex="0"
+              onClick={() => setModal({ kind: 'skill', skill: s })}
+              onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setModal({ kind: 'skill', skill: s }); } }}
+            >
+              <div class="team-icon"><Icon name={s.mode === 'active' ? 'check-circle' : 'archive'} size={18} /></div>
+              <div class="skill-body">
+                <div class="skill-title">
+                  {esc(s.name)}
+                  <span class="tag">v{esc(s.version)}</span>
+                  <span class={`tag ${s.mode === 'active' ? 'green' : 'muted'}`}>{s.mode === 'active' ? 'Active' : 'Passive'}</span>
+                </div>
+                <div class="skill-desc">{esc(s.description || 'No description.')}</div>
+                <div class="skill-meta">
+                  {(s.files || []).length} file{(s.files || []).length === 1 ? '' : 's'}
+                  {(s.files || []).length ? ` · ${(s.files || []).map((f) => f.path).slice(0, 3).join(', ')}` : ''}
+                </div>
               </div>
-              <div class="team-name">{esc(s.name)}<span class="tag" style="margin-left:6px">v{esc(s.version)}</span></div>
-              <div class="team-desc">{esc(s.description)}</div>
-              <div class="muted" style="font-size:11px;white-space:pre-wrap">{esc(s.instructions)}</div>
+              <div class="skill-actions" onClick={(e) => e.stopPropagation()}>
+                <button
+                  class={`btn small ${s.mode === 'active' ? '' : 'primary'}`}
+                  onClick={() => saveSkill({ ...s, mode: s.mode === 'active' ? 'passive' : 'active' },
+                    `Skill switched to ${s.mode === 'active' ? 'passive' : 'active'}`)}
+                >
+                  {s.mode === 'active' ? 'Make passive' : 'Make active'}
+                </button>
+                <button class="icon-btn" aria-label="Delete skill"
+                  onClick={() => { if (confirm(`Delete skill "${s.name}"?`)) deleteSkill(s.id); }}>
+                  <Icon name="trash" size={15} />
+                </button>
+              </div>
             </article>
           ))
-          : <div class="empty">No workspace skills configured.</div>}
+          : <div class="empty">No skills yet. Import a folder of markdown or create a skill.</div>}
       </div>
     </>
   );
 }
+
 
 export function RunsPage({ state, cancelRun }) {
   const { runs, tasks } = state;

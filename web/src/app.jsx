@@ -89,6 +89,28 @@ export function App() {
     }
   };
 
+  const saveSkill = async (skill, message) => {
+    try {
+      await api('/api/skills', { method: 'POST', body: JSON.stringify(skill) });
+      await refresh();
+      if (message) notify(message);
+      return true;
+    } catch (error) {
+      notify(error.message);
+      return false;
+    }
+  };
+
+  const deleteAgent = async (agentId) => {
+    try {
+      await api(`/api/agents/${encodeURIComponent(agentId)}`, { method: 'DELETE' });
+      await refresh();
+      notify('Agent deleted');
+    } catch (error) {
+      notify(error.message);
+    }
+  };
+
   const cancelRun = async (runId) => {
     try {
       await api(`/api/runs/${encodeURIComponent(runId)}/cancel`, { method: 'POST', body: '{}' });
@@ -101,7 +123,7 @@ export function App() {
 
   const pageProps = {
     state: current, notify, refresh, openRoom, setModal,
-    runTask, deleteSkill, cancelRun, activeRoomId, setActiveRoomId,
+    runTask, deleteSkill, saveSkill, deleteAgent, cancelRun, activeRoomId, setActiveRoomId,
   };
 
   const pages = {
@@ -180,7 +202,8 @@ export function App() {
               : pages[page]}
         </div>
       </main>
-      <ModalHost modal={modal} setModal={setModal} state={current} notify={notify} refresh={refresh} />
+      <ModalHost modal={modal} setModal={setModal} state={current} notify={notify} refresh={refresh}
+        saveSkill={saveSkill} deleteSkill={deleteSkill} deleteAgent={deleteAgent} />
       <div class={`toast ${toast ? 'show' : ''}`} role="status">{toast}</div>
     </div>
   );

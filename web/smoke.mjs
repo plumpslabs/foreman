@@ -21,7 +21,8 @@ const workspace = {
   providers: [],
   tasks: [{ id: 'k1', roomId: 'r1', title: 'Smoke Task', description: 'd', status: 'todo', priority: 'normal', effort: 'medium', dependencies: [], approved: false, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() }],
   runs: [],
-  skills: [],
+  skills: [{ id: 's1', name: 'Docs', description: 'd', version: 1, instructions: '# Docs', mode: 'passive', enabled: false, files: [{ path: 'SKILL.md', content: '# Docs' }] }],
+  agents: [{ id: 'a1', name: 'Scout', role: 'Researcher', description: 'd', instructions: '# Scout', tools: ['read'], skills: [], requireReview: false }],
   settings: { theme: 'dark', effortMode: 'automatic', defaultEffort: 'medium', maxConcurrentRuns: 1, maxWorkersPerTask: 1, maxDelegationDepth: 0, maxRetries: 0, maxExecutionSeconds: 600, budgetUsd: 0, requireRunApproval: false, allowProjectCommands: false },
 };
 
@@ -70,6 +71,45 @@ if (!roomRow) {
   for (const label of ['Chat', 'Kanban', 'Plan', 'Changes', 'Task progress', 'Execution policy', 'Room team']) {
     if (!detail.includes(label)) failures.push(`room detail missing "${label}"`);
   }
+}
+
+// Agent library: navigate, open a profile, and open the create-agent modal.
+const navButton = (label) => [...window.document.querySelectorAll('.nav-btn')]
+  .find((button) => button.textContent.trim() === label);
+const click = (el) => el && el.dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+const flush = () => new Promise((resolve) => setTimeout(resolve, 50));
+
+const agentsNav = navButton('Agent library');
+if (!agentsNav) {
+  failures.push('agent library nav missing');
+} else {
+  click(agentsNav);
+  await flush();
+  let html = window.document.body.innerHTML;
+  if (!html.includes('Scout')) failures.push('agent library did not render agent profiles');
+  const agentRow = window.document.querySelector('.content .room-row.clickable');
+  if (!agentRow) {
+    failures.push('agent profile row is not clickable');
+  } else {
+    click(agentRow);
+    await flush();
+    html = window.document.body.innerHTML;
+    if (!html.includes('Agent profile')) failures.push('agent detail modal did not open');
+    if (!html.includes('Instructions (markdown)')) failures.push('agent editor is missing markdown instructions');
+    if (!html.includes('Allowed tools')) failures.push('agent editor is missing tool permissions');
+    if (!html.includes('Skills')) failures.push('agent editor is missing skill assignment');
+  }
+}
+
+const skillsNav = navButton('Skills');
+if (!skillsNav) {
+  failures.push('skills nav missing');
+} else {
+  click(skillsNav);
+  await flush();
+  const html = window.document.body.innerHTML;
+  if (!html.includes('Import folder or .md')) failures.push('skill import action missing');
+  if (!html.includes('Docs')) failures.push('skill list did not render');
 }
 
 if (failures.length) {

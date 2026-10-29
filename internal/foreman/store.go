@@ -40,45 +40,17 @@ func OpenStore(projectPath string) (*Store, error) {
 		if err := json.Unmarshal(data, &s.state); err != nil {
 			return nil, fmt.Errorf("read Foreman workspace state: %w", err)
 		}
-		if s.state.SchemaVersion != SchemaVersion {
-			return nil, fmt.Errorf("unsupported Foreman workspace schema %d (expected %d)", s.state.SchemaVersion, SchemaVersion)
-		}
 		if s.state.ProjectPath != abs {
 			return nil, errors.New("Foreman workspace belongs to a different project path")
 		}
-		if s.state.Rooms == nil {
-			s.state.Rooms = []Room{}
+		migrated, err := s.migrate()
+		if err != nil {
+			return nil, err
 		}
-		for i := range s.state.Rooms {
-			if s.state.Rooms[i].Messages == nil {
-				s.state.Rooms[i].Messages = []ChatMessage{}
+		if migrated {
+			if err := s.save(); err != nil {
+				return nil, err
 			}
-		}
-		for i := range s.state.Teams {
-			for j := range s.state.Teams[i].Agents {
-				if s.state.Teams[i].Agents[j].ID == "" {
-					s.state.Teams[i].Agents[j].ID = uuid.NewString()
-				}
-			}
-		}
-		if s.state.Teams == nil {
-			s.state.Teams = []Team{}
-		}
-		if s.state.Providers == nil {
-			s.state.Providers = []ProviderConfig{}
-		}
-		if s.state.Tasks == nil {
-			s.state.Tasks = []Task{}
-		}
-		if s.state.Runs == nil {
-			s.state.Runs = []AgentRun{}
-		}
-		if s.state.Skills == nil {
-			s.state.Skills = []Skill{}
-		}
-		s.state.Settings = normalizeSettings(s.state.Settings)
-		if s.state.Templates == nil {
-			s.state.Templates = DefaultTemplates()
 		}
 		return s, nil
 	}
@@ -91,17 +63,173 @@ func OpenStore(projectPath string) (*Store, error) {
 		ProjectPath:   abs,
 		Rooms:         []Room{},
 		Teams:         []Team{},
+		Agents:        seedAgents(),
 		Templates:     DefaultTemplates(),
 		Providers:     []ProviderConfig{},
 		Tasks:         []Task{},
 		Runs:          []AgentRun{},
-		Skills:        []Skill{},
+		Skills:        seedSkills(),
 		Settings:      normalizeSettings(Settings{}),
 	}
 	if err := s.save(); err != nil {
 		return nil, err
 	}
 	return s, nil
+}
+
+// migrate upgrades an on-disk workspace to the current schema. It returns true
+// when the state changed and must be written back. Schema 2 → 3 adds a
+// standalone agent library and versioned skill bundles.
+func (s *Store) migrate() (bool, error) {
+	if s.state.SchemaVersion > SchemaVersion {
+		return false, fmt.Errorf("workspace schema %d is newer than supported version %d", s.state.SchemaVersion, SchemaVersion)
+	}
+	if s.state.SchemaVersion < 2 {
+		return false, fmt.Errorf("unsupported workspace schema %d (expected %d)", s.state.SchemaVersion, SchemaVersion)
+	}
+	migrated := false
+	if s.state.SchemaVersion == 2 {
+		s.state.Agents = agentsFromTeams(s.state.Teams)
+		s.state.SchemaVersion = 3
+		migrated = true
+	}
+
+	if s.state.Rooms == nil {
+		s.state.Rooms = []Room{}
+	}
+	for i := range s.state.Rooms {
+		if s.state.Rooms[i].Messages == nil {
+			s.state.Rooms[i].Messages = []ChatMessage{}
+		}
+	}
+	if s.state.Teams == nil {
+		s.state.Teams = []Team{}
+	}
+	for i := range s.state.Teams {
+		for j := range s.state.Teams[i].Agents {
+			if s.state.Teams[i].Agents[j].ID == "" {
+				s.state.Teams[i].Agents[j].ID = uuid.NewString()
+			}
+		}
+	}
+	if s.state.Agents == nil || (migrated && len(s.state.Agents) == 0) {
+		s.state.Agents = seedAgents()
+	}
+	for i := range s.state.Agents {
+		if s.state.Agents[i].ID == "" {
+			s.state.Agents[i].ID = uuid.NewString()
+		}
+	}
+	if s.state.Providers == nil {
+		s.state.Providers = []ProviderConfig{}
+	}
+	if s.state.Tasks == nil {
+		s.state.Tasks = []Task{}
+	}
+	if s.state.Runs == nil {
+		s.state.Runs = []AgentRun{}
+	}
+	if s.state.Skills == nil {
+		s.state.Skills = []Skill{}
+	}
+	if migrated && len(s.state.Skills) == 0 {
+		s.state.Skills = seedSkills()
+	}
+	for i := range s.state.Skills {
+		skill := &s.state.Skills[i]
+		if skill.Mode != SkillModeActive && skill.Mode != SkillModePassive {
+			if skill.Enabled {
+				skill.Mode = SkillModeActive
+			} else {
+				skill.Mode = SkillModePassive
+			}
+		}
+		skill.Enabled = skill.Mode == SkillModeActive
+		if skill.Files == nil {
+			skill.Files = []SkillFile{}
+		}
+		if len(skill.Files) == 0 && skill.Instructions != "" {
+			skill.Files = []SkillFile{{Path: "SKILL.md", Content: skill.Instructions}}
+		}
+	}
+	if s.state.Templates == nil {
+		s.state.Templates = DefaultTemplates()
+	}
+	s.state.Settings = normalizeSettings(s.state.Settings)
+	return migrated, nil
+}
+
+func seedAgents() []Agent {
+	agents := DefaultAgents()
+	for i := range agents {
+		if agents[i].ID == "" {
+			agents[i].ID = uuid.NewString()
+		}
+	}
+	return agents
+}
+
+func seedSkills() []Skill {
+	skills := DefaultSkills()
+	for i := range skills {
+		skills[i].ID = uuid.NewString()
+	}
+	return skills
+}
+
+// normalizeSkillRefs resolves skill references that may be either skill IDs or
+// legacy capability names and stores them as IDs.
+func (s *Store) normalizeSkillRefs(agent *Agent) error {
+	out := make([]string, 0, len(agent.Skills))
+	seen := map[string]bool{}
+	for _, ref := range agent.Skills {
+		ref = strings.TrimSpace(ref)
+		if ref == "" {
+			continue
+		}
+		id := ""
+		for _, skill := range s.state.Skills {
+			if skill.ID == ref {
+				id = skill.ID
+				break
+			}
+		}
+		if id == "" {
+			for _, skill := range s.state.Skills {
+				if strings.EqualFold(skill.Name, ref) {
+					id = skill.ID
+					break
+				}
+			}
+		}
+		if id == "" {
+			return fmt.Errorf("unknown skill %q", ref)
+		}
+		if !seen[id] {
+			seen[id] = true
+			out = append(out, id)
+		}
+	}
+	agent.Skills = out
+	return nil
+}
+
+func agentsFromTeams(teams []Team) []Agent {
+	seen := map[string]bool{}
+	var agents []Agent
+	for _, team := range teams {
+		for _, agent := range team.Agents {
+			if agent.Name == "" || seen[agent.Name] {
+				continue
+			}
+			seen[agent.Name] = true
+			if agent.ID == "" {
+				agent.ID = uuid.NewString()
+			}
+			agents = append(agents, agent)
+		}
+	}
+	return agents
 }
 
 func (s *Store) Snapshot() WorkspaceState {
@@ -290,16 +418,9 @@ func (s *Store) UpdateTeam(team Team) (Team, error) {
 		return Team{}, fmt.Errorf("unknown team id %q", team.ID)
 	}
 	team.MainAgent = strings.TrimSpace(team.MainAgent)
-	for _, skillID := range collectSkillIDs(team.Agents) {
-		valid := false
-		for _, skill := range s.state.Skills {
-			if skill.ID == skillID {
-				valid = true
-				break
-			}
-		}
-		if !valid {
-			return Team{}, fmt.Errorf("unknown skill id %q", skillID)
+	for i := range team.Agents {
+		if err := s.normalizeSkillRefs(&team.Agents[i]); err != nil {
+			return Team{}, err
 		}
 	}
 	for _, agent := range team.Agents {
@@ -358,7 +479,23 @@ func (s *Store) SaveSkill(skill Skill) (Skill, error) {
 	skill.Name = strings.TrimSpace(skill.Name)
 	skill.Description = strings.TrimSpace(skill.Description)
 	skill.Instructions = strings.TrimSpace(skill.Instructions)
-	if skill.Name == "" || skill.Instructions == "" || len(skill.Name) > 100 || len(skill.Instructions) > 16000 {
+	if skill.Mode != SkillModeActive && skill.Mode != SkillModePassive {
+		if skill.Enabled {
+			skill.Mode = SkillModeActive
+		} else {
+			skill.Mode = SkillModePassive
+		}
+	}
+	skill.Enabled = skill.Mode == SkillModeActive
+	files, err := normalizeSkillFiles(skill.Files)
+	if err != nil {
+		return Skill{}, err
+	}
+	skill.Files = files
+	if skill.Instructions == "" {
+		skill.Instructions = instructionsFromFiles(files)
+	}
+	if skill.Name == "" || (skill.Instructions == "" && len(skill.Files) == 0) || len(skill.Name) > 100 || len(skill.Instructions) > 16000 {
 		return Skill{}, errors.New("skill name and instructions are required (maximum 16000 instruction characters)")
 	}
 	if skill.ID == "" {
@@ -388,48 +525,187 @@ func (s *Store) SaveSkill(skill Skill) (Skill, error) {
 	return skill, nil
 }
 
-func collectSkillIDs(agents []Agent) []string {
+// normalizeSkillFiles validates and normalizes a skill bundle. Paths must be
+// relative, cannot escape the bundle root, and total content is capped so a
+// workspace file cannot grow without bound.
+func normalizeSkillFiles(files []SkillFile) ([]SkillFile, error) {
+	if len(files) > 500 {
+		return nil, errors.New("a skill may contain at most 500 files")
+	}
+	out := make([]SkillFile, 0, len(files))
 	seen := map[string]bool{}
-	var ids []string
-	for _, agent := range agents {
-		for _, id := range agent.Skills {
-			if id != "" && !seen[id] {
-				seen[id] = true
-				ids = append(ids, id)
-			}
+	total := 0
+	for _, file := range files {
+		path := strings.TrimSpace(strings.ReplaceAll(file.Path, "\\", "/"))
+		path = strings.TrimPrefix(path, "./")
+		if path == "" || len(path) > 300 {
+			return nil, errors.New("skill file paths must be non-empty and at most 300 characters")
+		}
+		if strings.HasPrefix(path, "/") || path == ".." || strings.HasPrefix(path, "../") || strings.Contains(path, "/../") {
+			return nil, fmt.Errorf("skill file path %q must stay inside the skill root", path)
+		}
+		if seen[path] {
+			return nil, fmt.Errorf("duplicate skill file path %q", path)
+		}
+		seen[path] = true
+		if len(file.Content) > 262144 {
+			return nil, fmt.Errorf("skill file %q exceeds the 256 KiB limit", path)
+		}
+		total += len(file.Content)
+		if total > 1048576 {
+			return nil, errors.New("skill bundle exceeds the 1 MiB total limit")
+		}
+		out = append(out, SkillFile{Path: path, Content: file.Content})
+	}
+	return out, nil
+}
+
+func instructionsFromFiles(files []SkillFile) string {
+	for _, file := range files {
+		base := file.Path
+		if idx := strings.LastIndex(base, "/"); idx >= 0 {
+			base = base[idx+1:]
+		}
+		if strings.EqualFold(base, "SKILL.md") || strings.EqualFold(base, "README.md") {
+			return strings.TrimSpace(file.Content)
 		}
 	}
-	return ids
+	for _, file := range files {
+		if strings.HasSuffix(strings.ToLower(file.Path), ".md") {
+			return strings.TrimSpace(file.Content)
+		}
+	}
+	return ""
+}
+
+// SaveAgent creates or updates an agent library profile. Agent names are the
+// identity used by teams and tasks, so they must be unique.
+func (s *Store) SaveAgent(agent Agent) (Agent, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	agent.Name = strings.TrimSpace(agent.Name)
+	agent.Role = strings.TrimSpace(agent.Role)
+	agent.Description = strings.TrimSpace(agent.Description)
+	agent.Instructions = strings.TrimSpace(agent.Instructions)
+	agent.Model = strings.TrimSpace(agent.Model)
+	if agent.Name == "" || agent.Role == "" {
+		return Agent{}, errors.New("agent name and role are required")
+	}
+	if len(agent.Name) > 80 || len(agent.Role) > 160 || len(agent.Instructions) > 16000 {
+		return Agent{}, errors.New("agent name, role, or instructions exceed the allowed length")
+	}
+	if agent.ID == "" {
+		agent.ID = uuid.NewString()
+	}
+	if err := s.normalizeSkillRefs(&agent); err != nil {
+		return Agent{}, err
+	}
+	if agent.ProviderID != "" {
+		valid := false
+		for _, provider := range s.state.Providers {
+			if provider.ID == agent.ProviderID {
+				valid = true
+				break
+			}
+		}
+		if !valid {
+			return Agent{}, fmt.Errorf("unknown provider id %q", agent.ProviderID)
+		}
+	}
+	for i := range s.state.Agents {
+		if s.state.Agents[i].ID != agent.ID && strings.EqualFold(s.state.Agents[i].Name, agent.Name) {
+			return Agent{}, fmt.Errorf("an agent named %q already exists", agent.Name)
+		}
+	}
+	previous := s.state.Agents
+	s.state.Agents = append([]Agent(nil), previous...)
+	updated := false
+	for i := range s.state.Agents {
+		if s.state.Agents[i].ID == agent.ID {
+			s.state.Agents[i] = agent
+			updated = true
+			break
+		}
+	}
+	if !updated {
+		s.state.Agents = append([]Agent{agent}, s.state.Agents...)
+	}
+	if err := s.save(); err != nil {
+		s.state.Agents = previous
+		return Agent{}, err
+	}
+	return agent, nil
+}
+
+func (s *Store) DeleteAgent(id string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	previous := s.state.Agents
+	filtered := make([]Agent, 0, len(previous))
+	found := false
+	for _, agent := range previous {
+		if agent.ID == id {
+			found = true
+			continue
+		}
+		filtered = append(filtered, agent)
+	}
+	if !found {
+		return fmt.Errorf("unknown agent id %q", id)
+	}
+	s.state.Agents = filtered
+	if err := s.save(); err != nil {
+		s.state.Agents = previous
+		return err
+	}
+	return nil
 }
 
 func (s *Store) DeleteSkill(id string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	for _, team := range s.state.Teams {
-		for _, agent := range team.Agents {
-			for _, skillID := range agent.Skills {
-				if skillID == id {
-					return errors.New("skill is assigned to a team agent")
-				}
-			}
-		}
-	}
-	previous := s.state.Skills
-	filtered := make([]Skill, 0, len(previous))
-	for _, skill := range previous {
+	previousSkills := s.state.Skills
+	previousAgents := s.state.Agents
+	previousTeams := s.state.Teams
+	filtered := make([]Skill, 0, len(previousSkills))
+	for _, skill := range previousSkills {
 		if skill.ID != id {
 			filtered = append(filtered, skill)
 		}
 	}
-	if len(filtered) == len(previous) {
+	if len(filtered) == len(previousSkills) {
 		return fmt.Errorf("unknown skill id %q", id)
+	}
+	// Strip dangling references from agent profiles and team rosters.
+	s.state.Agents = append([]Agent(nil), previousAgents...)
+	for i := range s.state.Agents {
+		s.state.Agents[i].Skills = withoutSkillRef(s.state.Agents[i].Skills, id)
+	}
+	s.state.Teams = append([]Team(nil), previousTeams...)
+	for i := range s.state.Teams {
+		s.state.Teams[i].Agents = append([]Agent(nil), previousTeams[i].Agents...)
+		for j := range s.state.Teams[i].Agents {
+			s.state.Teams[i].Agents[j].Skills = withoutSkillRef(s.state.Teams[i].Agents[j].Skills, id)
+		}
 	}
 	s.state.Skills = filtered
 	if err := s.save(); err != nil {
-		s.state.Skills = previous
+		s.state.Skills = previousSkills
+		s.state.Agents = previousAgents
+		s.state.Teams = previousTeams
 		return err
 	}
 	return nil
+}
+
+func withoutSkillRef(refs []string, id string) []string {
+	out := make([]string, 0, len(refs))
+	for _, ref := range refs {
+		if ref != id {
+			out = append(out, ref)
+		}
+	}
+	return out
 }
 
 func (s *Store) UpdateSettings(settings Settings) (Settings, error) {

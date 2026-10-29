@@ -40,23 +40,42 @@
 - Create room → POST `/api/rooms`; invite teams
 - Room tasks → POST `/api/rooms/{id}/tasks`; update status → PUT `/api/tasks/{id}/status`; run → POST `/api/tasks/{id}/run`
 - Provider → POST `/api/providers`, test → POST `/api/providers/test`
-- Skills → POST/DELETE `/api/skills`; Settings → PUT `/api/settings`
+- Agents → POST `/api/agents`, PUT/DELETE `/api/agents/{id}`
+- Skills → POST/DELETE `/api/skills` (POST also updates when `id` is present); bundle files travel in `files[]`
+- Settings → PUT `/api/settings`
 - Chat → POST `/api/rooms/{id}/messages` (user-only until runtime connected)
 
-## Backend state shape (unchanged)
+## Agent library & skills
+
+- **Agent profiles** are standalone records (`state.agents`). Creating or editing a profile sets
+  the name, role, description, markdown instructions, provider/model override, effort, allowed
+  tools, attached skills, and review requirement.
+- **Teams keep their own agent copies.** Editing a library profile does not rewrite an imported
+  team; edit the team to change its roster.
+- **Skill bundles** store `files: [{path, content}]` with relative paths and sub-folders. Paths are
+  validated (no `..`, no absolute paths), each file is capped at 256 KiB, and a bundle at 1 MiB.
+- **Mode** — `active` skills are intended for context injection; `passive` skills are reference
+  only. Toggle from the Skills page or the skill editor.
+- Skills are referenced by ID; legacy capability names from templates are resolved to IDs on save.
+
+## Backend state shape (schema 3)
 
 ```ts
-WorkspaceState { schemaVersion, projectPath, rooms[], teams[], templates[], providers[], tasks[], runs[], skills[], settings }
+WorkspaceState { schemaVersion, projectPath, rooms[], teams[], agents[], templates[], providers[], tasks[], runs[], skills[], settings }
 Room { id, name, goal, teamIds[], status, messages[], createdAt }
 Task { id, roomId, title, description, status, priority, effort, dependencies[], approved, createdAt, updatedAt }
 Task status: todo | blocked | in_progress | review | done | cancelled
-TeamTemplate { id, name, purpose, mainAgent, agents[], instructions }
-Agent { name, role, description, instructions, providerId, model, skills[], tools[], requireReview }
-Skill { id, name, description, instructions, enabled }
+Team { id, templateId, name, purpose, mainAgent, agents[], instructions, createdAt }
+TeamTemplate { id, version, name, purpose, mainAgent, agents[], instructions }
+Agent { id, name, role, description, instructions, providerId, model, effort, skills[], tools[], requireReview }
+Skill { id, name, description, version, instructions, enabled, mode, files[{path, content}] }
 ProviderConfig { id, name, protocol, baseUrl, models[], defaultModel, hasApiKey, enabled }
 Settings { theme, effortMode, defaultEffort, maxConcurrentRuns, maxWorkersPerTask, maxDelegationDepth, maxRetries, maxExecutionSeconds, budgetUsd, requireRunApproval, allowProjectCommands }
 ChatMessage { id, role, content, createdAt }
 ```
+
+Schema 2 workspaces migrate in place when opened: team agents become library profiles and skills
+gain a mode plus a file tree.
 
 ## Default agents (from templates)
 
@@ -81,10 +100,16 @@ ChatMessage { id, role, content, createdAt }
 | Budget | Per workspace | `budgetUsd`; 0 = unlimited |
 | API keys | Admin only | stored 0600, never returned by API (only `hasApiKey`) |
 | Tool access | Per agent profile (tools[]) | enforced by bridge/runtime; dashboard shows which tools each agent may use |
+| Create / edit agent | Workspace owner | unique name, skill and provider references must exist |
+| Create / import skill | Workspace owner | relative paths only, 256 KiB per file, 1 MiB per bundle |
+| Switch skill mode | Workspace owner | active = context injection, passive = reference only |
 
-Skills are metadata; they attach to agents but the runtime bridge does not yet inject them (marked in UI).
+Skills are stored metadata; the runtime bridge does not yet inject them into a run (the active/passive
+mode is persisted so injection can be wired without another migration).
 
 ## Icons
 
-- README: use `publics/foreman.png` (1254×1254). Add to `web/public/foreman.png` for dashboard manifest/pwa.
-- All nav items use Lucide icons (pulled from reference template).
+- README: uses `publics/foreman.png` (1254×1254). Vite copies `publics/` into the embedded dist as
+  the favicon and sidebar mark, so there is one source image.
+- All navigation, tabs, and actions use a small inline-SVG set in `web/src/icons.jsx` — no CDN and
+  no extra dependency, so the dashboard works offline.

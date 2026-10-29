@@ -50,9 +50,11 @@ result → task transition to `review`, with token accounting.
 ## Persistence
 
 Initial state lives in `<project>/.foreman/workspace.json` (versioned schema, atomic replace,
-mode 0600). Credentials live separately in `<project>/.foreman/credentials.json` (0600) and are
-never returned by the API — only a `hasApiKey` flag. Use SQLite migrations if durable runs,
-events, tasks, and approvals outgrow JSON.
+mode 0600). Schema 3 adds a standalone agent library plus versioned skill bundles; schema 2
+workspaces migrate in place on open (team agents become library profiles, skills gain an
+`active`/`passive` mode and a file tree). Credentials live separately in
+`<project>/.foreman/credentials.json` (0600) and are never returned by the API — only a
+`hasApiKey` flag. Use SQLite migrations if durable runs, events, tasks, and approvals outgrow JSON.
 
 ## Security posture
 
@@ -74,7 +76,10 @@ Preact SPA in `web/`, built by Vite into `internal/foreman/web/dist` and embedde
   task progress, live activity, and execution policy
 - Kanban is scoped per room (no global Kanban page)
 Pages: Home, Rooms, Teams, Agents, Skills, Runs, Settings, plus the RoomDetailHost.
-`npm run smoke` renders the built bundle in jsdom against a mocked API.
+The agent library and skill bundles have full editors (markdown instructions, tool permissions,
+skill assignment, folder/`.md` import with nested files, active/passive mode).
+`npm run smoke` renders the built bundle in jsdom against a mocked API and opens the room, agent,
+and skill surfaces.
 The layout, navigation map, and room interaction model are documented in
 [`docs/DASHBOARD.md`](DASHBOARD.md).
 

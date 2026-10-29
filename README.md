@@ -53,6 +53,9 @@ Open `http://127.0.0.1:8080/?project=<project-dir>` — the UI is room-centric:
 - **Rooms** — every room is an isolated work session with its own goal, invited teams, chat, and tasks
 - **Room detail** — toolbar, tabs (Chat · Kanban · Plan · Changes), and a right rail showing room team, task progress, live activity, and execution policy
 - **Kanban** lives *inside* each room, not as a global menu item — tasks are scoped to the room they belong to
+- **Agent library** — reusable profiles with markdown instructions, model/provider, allowed tools, skills, and review policy
+- **Skills** — markdown bundles (folder or `.md` import) with nested files; switch between *active* (injected) and *passive* (reference)
+- **Teams** — your imported teams first; open a team to edit its name, purpose, markdown instructions, main agent, and inspect every agent on it
 
 ## Architecture
 
@@ -113,7 +116,7 @@ make run     # foreman start for the current directory
 
 | What | Where |
 | --- | --- |
-| Workspace (rooms, teams, tasks, runs, settings) | `<project>/.foreman/workspace.json` (0600, atomic writes) |
+| Workspace (rooms, teams, agents, tasks, runs, skills, settings) | `<project>/.foreman/workspace.json` (0600, atomic writes, `schemaVersion` 3) |
 | Provider API keys | `<project>/.foreman/credentials.json` (0600) |
 | Engine session store | `<project>/.foreman/agent.db` |
 
