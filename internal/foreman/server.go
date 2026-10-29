@@ -184,6 +184,12 @@ func (s *Server) deleteRoom(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
+// RuntimeEngineInstalled lets the CLI prewarm the SDK probe so the dashboard's
+// engine status does not pay the slow first-import cost.
+func (s *Server) RuntimeEngineInstalled() (bool, string) {
+	return s.runtime.EngineInstalled()
+}
+
 func (s *Server) engineStatus(w http.ResponseWriter, r *http.Request) {
 	if err := s.verifyProject(r.URL.Query().Get("project")); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
@@ -265,6 +271,23 @@ func (s *Server) appendRoomMessage(w http.ResponseWriter, r *http.Request) {
 	message, err := s.store.AppendRoomMessage(r.PathValue("roomID"), req.Role, req.Content)
 	if err != nil {
 		writeError(w, http.StatusUnprocessableEntity, err.Error())
+		return
+	}
+	// Short small talk is answered locally so a simple "halo" does not start an
+	// expensive OpenHands run. Can be disabled in Settings (disableQuickReplies).
+	if req.Role == "user" && !s.store.Snapshot().Settings.DisableQuickReplies && classifyChatMessage(req.Content) == chatLight {
+		name := s.store.RoomMainAgentName(r.PathValue("roomID"))
+		if name == "" {
+			name = "Foreman"
+		}
+		_ = s.store.AppendAgentReply(r.PathValue("roomID"), name,
+			"👋 Halo! Aku siap. Ceritakan tugasnya atau tanya apa pun — kalau mau aku langsung kerjakan sesuatu, sebutkan goal room-nya.")
+		writeJSON(w, http.StatusCreated, map[string]any{
+			"message": message,
+			"run":     nil,
+			"warning": "",
+			"replied": "greeting",
+		})
 		return
 	}
 	// User chat messages trigger an agent run (routed to the mentioned agent or

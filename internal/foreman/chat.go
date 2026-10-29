@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/google/uuid"
 )
@@ -40,6 +41,90 @@ func parseChatMention(content string, team *Team) (agent string, rest string) {
 	}
 	rest = strings.TrimSpace(content[bestLen+1:])
 	return best, rest
+}
+
+// chatKind routes a user message either to the full agent loop or to the
+// lightweight local reply path.
+type chatKind int
+
+const (
+	chatAgent chatKind = iota
+	chatLight
+)
+
+// actionableIntentWords are short imperative words that signal real work;
+// messages containing them always go to the agent loop. This is deliberately a
+// small stoplist: everything else that is short and purely alphabetic (small
+// talk in any language: "halo", "hi", "oke", "selamat pagi", …) is treated as
+// a light chat message, so we never need to enumerate greetings.
+var actionableIntentWords = map[string]bool{
+	"buat": true, "buatkan": true, "buatlah": true, "bikin": true,
+	"tolong": true, "perbaiki": true, "bantu": true, "tulis": true,
+	"cek": true, "cari": true, "ganti": true, "hapus": true,
+	"tambah": true, "analisis": true, "ringkas": true, "jelaskan": true,
+	"review": true, "test": true, "jalankan": true, "running": true,
+	"pause": true, "stop": true, "lanjut": true, "deploy": true,
+	"commit": true, "push": true, "pull": true, "install": true,
+	"fix": true, "refactor": true, "rebase": true, "merge": true,
+}
+
+// classifyChatMessage decides whether a message is light small talk (answered
+// locally, no agent run) or a real request (agent loop). The rule is purely
+// structural: after stripping a leading @mention, a message of at most 4 short
+// alphabetic words that contains no actionable intent word is light.
+func classifyChatMessage(content string) chatKind {
+	t := strings.ToLower(strings.TrimSpace(content))
+	t = strings.Trim(t, "!?.,;: ")
+	if strings.HasPrefix(t, "@") {
+		if i := strings.IndexByte(t, ' '); i >= 0 {
+			t = strings.TrimSpace(t[i+1:])
+		} else {
+			t = ""
+		}
+	}
+	if t == "" {
+		return chatAgent
+	}
+	words := strings.Fields(t)
+	if len(words) == 0 || len(words) > 4 {
+		return chatAgent
+	}
+	for _, w := range words {
+		w = strings.Trim(w, "!?.,;:")
+		if w == "" {
+			continue
+		}
+		if actionableIntentWords[w] {
+			return chatAgent
+		}
+		if len([]rune(w)) > 12 {
+			return chatAgent
+		}
+		for _, r := range w {
+			if !unicode.IsLetter(r) {
+				return chatAgent
+			}
+		}
+	}
+	return chatLight
+}
+
+// RoomMainAgentName returns the main agent of the room's first invited team.
+func (s *Store) RoomMainAgentName(roomID string) string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for _, room := range s.state.Rooms {
+		if room.ID != roomID || len(room.TeamIDs) == 0 {
+			continue
+		}
+		for _, team := range s.state.Teams {
+			if team.ID == room.TeamIDs[0] {
+				return team.MainAgent
+			}
+		}
+		break
+	}
+	return ""
 }
 
 // CreateChatTask records a room chat message as a hidden task so a run can be

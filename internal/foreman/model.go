@@ -35,6 +35,7 @@ type Settings struct {
 	BudgetUSD            float64 `json:"budgetUsd"`
 	RequireRunApproval   bool    `json:"requireRunApproval"`
 	AllowProjectCommands bool    `json:"allowProjectCommands"`
+	DisableQuickReplies  bool    `json:"disableQuickReplies"`
 }
 
 type ProviderConfig struct {

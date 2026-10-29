@@ -160,7 +160,7 @@ func TestChatMessageCreatesHiddenTask(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	msgBody := bytes.NewBufferString(`{"role":"user","content":"@Quick Coordinator what changed?"}`)
+	msgBody := bytes.NewBufferString(`{"role":"user","content":"@Quick Coordinator cek perubahan"}`)
 	msgReq := httptest.NewRequest(http.MethodPost, "/api/rooms/"+room.ID+"/messages"+base, msgBody)
 	msgReq.Header.Set("Content-Type", "application/json")
 	msgReq.RemoteAddr = "127.0.0.1:1234"
@@ -230,7 +230,7 @@ func TestImportTeamAndCreateRoomAPIs(t *testing.T) {
 		t.Fatalf("unexpected room response: %#v", room)
 	}
 
-	messageBody := bytes.NewBufferString(`{"role":"user","content":"Please inspect this project"}`)
+	messageBody := bytes.NewBufferString(`{"role":"user","content":"Please inspect this project now"}`)
 	messageReq := httptest.NewRequest(http.MethodPost, "/api/rooms/"+room.ID+"/messages"+base, messageBody)
 	messageReq.RemoteAddr = "127.0.0.1:1234"
 	messageReq.Host = "127.0.0.1:8080"
@@ -248,7 +248,7 @@ func TestImportTeamAndCreateRoomAPIs(t *testing.T) {
 		t.Fatal(err)
 	}
 	message := messageEnvelope.Message
-	if message.Role != "user" || message.Content != "Please inspect this project" {
+	if message.Role != "user" || message.Content != "Please inspect this project now" {
 		t.Fatalf("unexpected chat message: %#v", message)
 	}
 	stateRes := httptest.NewRecorder()

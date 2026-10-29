@@ -1808,6 +1808,11 @@ export function SettingsPage({ state, notify, refresh }) {
                 onChange={(e) => setField('allowProjectCommands', e.currentTarget.checked)} />
               <span>Allow project commands (terminal tool in the engine)</span>
             </label>
+            <label class="check">
+              <input type="checkbox" checked={Boolean(policy.disableQuickReplies)}
+                onChange={(e) => setField('disableQuickReplies', e.currentTarget.checked)} />
+              <span>Matikan quick-reply sapaan (semua pesan dijalankan agent)</span>
+            </label>
           </div>
         </div>
       )}

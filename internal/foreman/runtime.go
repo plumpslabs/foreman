@@ -39,7 +39,7 @@ func (rt *Runtime) SetEngine(e *Engine) { rt.engine = e }
 
 // EngineInstalled reports whether the OpenHands SDK is importable.
 func (rt *Runtime) EngineInstalled() (bool, string) {
-	return rt.engine.sdkInstalled()
+	return rt.engine.sdkInstalledCached()
 }
 
 // EngineDiagnostics summarizes the engine environment for the dashboard.
@@ -55,7 +55,7 @@ func (rt *Runtime) InstallEngine(ctx context.Context) (string, error) {
 // Exported engine health helpers used by the CLI (cmd/foreman).
 
 // SDKInstalled reports whether the OpenHands SDK is importable.
-func (e *Engine) SDKInstalled() (bool, string) { return e.sdkInstalled() }
+func (e *Engine) SDKInstalled() (bool, string) { return e.sdkInstalledCached() }
 
 // PythonVersion returns the engine interpreter's version string.
 func (e *Engine) PythonVersion() string { return e.pythonVersion() }

@@ -65,6 +65,20 @@ func (e *Engine) sdkInstalled() (bool, string) {
 	return err == nil, strings.TrimSpace(out.String())
 }
 
+// sdkInstalledCached returns the SDK probe result, memoized for 30s. The first
+// import of the OpenHands SDK is slow (~3-4s), so repeated probes (startup,
+// dashboard /api/engine/status) reuse the last result instead of re-importing.
+func (e *Engine) sdkInstalledCached() (bool, string) {
+	e.probeMu.Lock()
+	defer e.probeMu.Unlock()
+	if time.Since(e.cachedAt) < 30*time.Second {
+		return e.cachedInstalled, e.cachedProbe
+	}
+	ok, detail := e.sdkInstalled()
+	e.cachedInstalled, e.cachedProbe, e.cachedAt = ok, detail, time.Now()
+	return ok, detail
+}
+
 // pythonVersion returns the engine interpreter's version string.
 func (e *Engine) pythonVersion() string {
 	cmd := exec.Command(e.python, "--version")
@@ -90,7 +104,7 @@ func (e *Engine) diagnostics() EngineDiag {
 	pip.Stdout = &pb
 	pip.Stderr = &pb
 	d.PipAvailable = pip.Run() == nil
-	d.Installed, d.ProbeDetail = e.sdkInstalled()
+	d.Installed, d.ProbeDetail = e.sdkInstalledCached()
 	return d
 }
 
@@ -210,6 +224,11 @@ type EngineResult struct {
 // Engine runs OpenHands bridge processes for the Foreman runtime.
 type Engine struct {
 	python string
+
+	probeMu         sync.Mutex
+	cachedInstalled bool
+	cachedProbe     string
+	cachedAt        time.Time
 }
 
 // NewEngine resolves the Python interpreter used for the bridge. The
