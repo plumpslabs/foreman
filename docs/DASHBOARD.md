@@ -50,8 +50,13 @@
 - **Agent profiles** are standalone records (`state.agents`). Creating or editing a profile sets
   the name, role, description, markdown instructions, provider/model override, effort, allowed
   tools, attached skills, and review requirement.
+- **Provider-bound model picker** — when a provider is selected, the model field becomes a dropdown
+  of that provider's configured models (first = default). The picked model is shown as a badge;
+  models outside the provider's list are kept as explicit custom overrides.
 - **Teams keep their own agent copies.** Editing a library profile does not rewrite an imported
-  team; edit the team to change its roster.
+  team; edit the team to change its roster. Team agents are added via a picker modal that lists
+  library agents (excluding ones already on the team), and each roster row can be promoted to
+  main agent with a "Make main" control.
 - **Skill bundles** store `files: [{path, content}]` with relative paths and sub-folders. Paths are
   validated (no `..`, no absolute paths), each file is capped at 256 KiB, and a bundle at 1 MiB.
 - **Mode** — `active` skills are intended for context injection; `passive` skills are reference
@@ -102,6 +107,12 @@ gain a mode plus a file tree.
   `question` block whose first line is the question and whose `- ` lines are options. The runtime
   stores it and the room shows a card with option buttons plus a custom answer. Answering records
   the choice in the chat.
+- **Chat compose** — Enter sends, Shift+Enter adds a newline, and sends are queued so you can type
+  while an earlier message is still in flight (no spam/double submit). The agent selector lists
+  every agent across the invited teams; routing is via `@agent` mention.
+- **Live agents strip** — above the input, room agents currently running show as pulsing chips
+  (dimmed when paused), so it is always clear who is working.
+- **Invited-team card** — the chat shows a centered card naming each invited team and its members.
 - **Changes** — unified diffs from a room's runs render red/green with collapsible files.
 
 ## Tool wiring and permissions
@@ -155,6 +166,12 @@ An agent's `providerId` + `model` override the workspace default for runs of tha
 - Skills resolve by id or name from the agent's `skills[]`; unrecognized references are ignored.
 - The bridge enables the SDK's summarizing condenser (`default_condenser`) on every run so long
   conversations stay inside the model window.
+- **Diagnostics stream live** — the Go engine forwards the bridge's stderr lines into the run's
+  event feed (`[engine] …`), so SDK/model/HTTP failures are visible in the room instead of a
+  silent "no response". The bridge also logs the resolved model and base URL, maps an ERROR/STUCK
+  agent loop to a failed run, and falls back to recent event text when the final agent message is
+  empty. Conversation construction steps down optional kwargs (persistence, budget, iterations) so
+  SDK version differences never mask a real `TypeError`.
 
 ## Icons
 

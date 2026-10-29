@@ -130,8 +130,13 @@ def collect_usage(llm):
     return tokens, cost
 
 
-def extract_final_message(conversation):
-    """Best-effort: last agent-authored text from the event log."""
+def extract_final_message(conversation, limit=4000):
+    """Best-effort: the last agent-authored text from the event log.
+
+    Falls back to any recent non-user textual content (tool summaries, status
+    lines) so a completed run still reports something useful when the final
+    agent message is empty or was condensed away.
+    """
     try:
         log = conversation.state.events
     except Exception:
@@ -146,6 +151,7 @@ def extract_final_message(conversation):
                 break
         except Exception:
             continue
+    fallback = []
     for event in reversed(items):
         try:
             source = getattr(event, "source", None)
@@ -153,11 +159,17 @@ def extract_final_message(conversation):
             kind = type(event).__name__.lower()
             if isinstance(content, str) and content.strip():
                 if "message" in kind and source != "user":
-                    return content.strip()[:4000]
+                    return content.strip()[:limit]
                 if source == "agent":
-                    return content.strip()[:4000]
+                    return content.strip()[:limit]
+                if source != "user":
+                    fallback.append(content.strip())
         except Exception:
             continue
+        if len(fallback) >= 3:
+            break
+    if fallback:
+        return "\n".join(reversed(fallback))[:limit]
     return ""
 
 
@@ -234,6 +246,7 @@ def main():
         llm = LLM(**llm_kwargs)
     except Exception as exc:
         fail("could not configure the model provider: %s" % exc)
+    emit({"type": "status", "message": "LLM ready: model=%s base_url=%s" % (model, config.get("baseUrl") or "default")})
 
     agent = Agent(llm=llm, tools=tools)
     # Context compaction: the SDK's summarizing condenser keeps long runs from
@@ -246,9 +259,6 @@ def main():
         emit({"type": "status", "message": "condenser unavailable: %s" % exc})
     max_iterations = int(config.get("maxIterations") or 30)
     budget = float(config.get("budgetUsd") or 0)
-    # visualizer=None keeps the SDK's pretty-printer off stdout so the
-    # JSON-line protocol stays the only thing on the pipe.
-    conv_kwargs = {"visualizer": None}
     # Conversation state (events, agent progress) persists to disk so a paused
     # or interrupted run resumes where it stopped instead of starting over.
     persistence_dir = (config.get("persistenceDir") or "").strip()
@@ -256,32 +266,52 @@ def main():
     if persistence_dir:
         try:
             os.makedirs(persistence_dir, exist_ok=True)
-            conv_kwargs["persistence_dir"] = persistence_dir
-            if conversation_id:
-                conv_kwargs["conversation_id"] = conversation_id
         except Exception as exc:
             emit({"type": "status", "message": "persistence unavailable: %s" % exc})
-    if budget > 0:
-        conv_kwargs["max_budget_per_run"] = budget
     resumed = False
-    try:
-        conversation = Conversation(
-            agent=agent,
-            workspace=workspace,
-            max_iteration_per_run=max_iterations,
-            **conv_kwargs,
-        )
-    except TypeError:
-        try:
-            conversation = Conversation(
-                agent=agent, workspace=workspace, max_iterations=max_iterations, **conv_kwargs
-            )
-        except TypeError:
-            conversation = Conversation(agent=agent, workspace=workspace, **conv_kwargs)
+
+    def build_conversation():
+        """Construct a Conversation, always disabling the visualizer (stdout
+        must stay clean for the JSON-line protocol) and stepping down optional
+        kwargs so SDK version differences never mask real TypeErrors.
+        """
+        base = {"agent": agent, "workspace": workspace, "visualizer": None}
+        attempts = [
+            dict(base,
+                 max_iterations=max_iterations,
+                 max_budget_per_run=budget,
+                 persistence_dir=persistence_dir,
+                 conversation_id=conversation_id),
+            dict(base, max_iterations=max_iterations, persistence_dir=persistence_dir,
+                 conversation_id=conversation_id),
+            dict(base, max_iterations=max_iterations, persistence_dir=persistence_dir),
+            dict(base, max_iterations=max_iterations),
+            dict(base),
+        ]
+        last = None
+        for attempt in attempts:
+            # Skip attempts that reference unset options.
+            if attempt.get("max_budget_per_run") is not None and attempt["max_budget_per_run"] <= 0:
+                attempt.pop("max_budget_per_run", None)
+            if attempt.get("persistence_dir") is None:
+                attempt.pop("persistence_dir", None)
+                attempt.pop("conversation_id", None)
             try:
-                conversation.state.max_iterations = max_iterations
+                return Conversation(**attempt)
+            except TypeError as exc:
+                last = exc
             except Exception:
-                pass
+                raise
+        raise last
+
+    try:
+        conversation = build_conversation()
+    except Exception as exc:
+        fail("could not create the conversation: %s" % exc)
+    try:
+        conversation.state.max_iterations = max_iterations
+    except Exception:
+        pass
     if persistence_dir:
         try:
             prior = list(conversation.state.events.get_all_events())
@@ -342,6 +372,14 @@ def main():
     tokens, cost = collect_usage(llm)
     final_message = extract_final_message(conversation)
 
+    # If the agent loop ended in an error/stuck state, surface that as a failed
+    # run instead of a completed run with an empty message.
+    terminal_state = ""
+    try:
+        terminal_state = str(conversation.state.execution_status).lower()
+    except Exception:
+        pass
+
     if state["paused"] and not state["over_budget"]:
         status = "paused"
         message = final_message or "Run paused. Conversation state is saved for Continue."
@@ -351,6 +389,9 @@ def main():
     elif run_error is not None:
         status = "failed"
         message = "Engine run failed: %s" % run_error
+    elif terminal_state in ("error", "stuck"):
+        status = "failed"
+        message = final_message or ("Agent loop ended in state %r." % terminal_state)
     else:
         status = "completed"
         message = final_message or "Agent run finished."

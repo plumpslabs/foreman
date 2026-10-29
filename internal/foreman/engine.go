@@ -147,6 +147,17 @@ func (e *Engine) run(ctx context.Context, req EngineRequest, emit func(EngineEve
 	if err != nil {
 		return EngineResult{}, err
 	}
+	// Serialize event emission so the stdout scanner and the stderr streamer
+	// never invoke the caller's emit concurrently.
+	var emitMu sync.Mutex
+	safeEmit := func(ev EngineEvent) {
+		if emit == nil {
+			return
+		}
+		emitMu.Lock()
+		defer emitMu.Unlock()
+		emit(ev)
+	}
 	cmd := exec.CommandContext(ctx, e.python, scriptPath)
 	cmd.Dir = req.Workspace
 	cmd.Env = append(os.Environ(), "PYTHONUNBUFFERED=1")
@@ -163,7 +174,9 @@ func (e *Engine) run(ctx context.Context, req EngineRequest, emit func(EngineEve
 		return EngineResult{}, err
 	}
 	var stderr bytes.Buffer
-	cmd.Stderr = &limitedWriter{buf: &stderr, max: 8 << 10}
+	cmd.Stderr = newStderrStreamer(&stderr, 8<<10, func(line string) {
+		safeEmit(EngineEvent{Type: "status", Message: "[engine] " + line})
+	})
 
 	if err := cmd.Start(); err != nil {
 		if errors.Is(ctx.Err(), context.Canceled) || errors.Is(ctx.Err(), context.DeadlineExceeded) {
@@ -211,8 +224,8 @@ func (e *Engine) run(ctx context.Context, req EngineRequest, emit func(EngineEve
 				mu.Unlock()
 				continue
 			}
-			if ev.Message != "" && emit != nil {
-				emit(ev)
+			if ev.Message != "" {
+				safeEmit(ev)
 			}
 		}
 		if err := scanner.Err(); err != nil {
@@ -258,6 +271,52 @@ func statusFromContext(ctx context.Context) string {
 type limitedWriter struct {
 	buf *bytes.Buffer
 	max int
+}
+
+// stderrStreamer captures the bridge's diagnostics tail for error reports and
+// forwards each complete line to emit as a status event. os/exec copies the
+// child's stderr from a single goroutine, so synchronous emission is ordered.
+type stderrStreamer struct {
+	mu   sync.Mutex
+	buf  *bytes.Buffer
+	max  int
+	rest []byte
+	emit func(string)
+}
+
+func newStderrStreamer(buf *bytes.Buffer, max int, emit func(string)) *stderrStreamer {
+	return &stderrStreamer{buf: buf, max: max, emit: emit}
+}
+
+func (s *stderrStreamer) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if remaining := s.max - s.buf.Len(); remaining > 0 {
+		if len(p) > remaining {
+			s.buf.Write(p[:remaining])
+		} else {
+			s.buf.Write(p)
+		}
+	}
+	s.rest = append(s.rest, p...)
+	var lines []string
+	for {
+		idx := bytes.IndexByte(s.rest, '\n')
+		if idx < 0 {
+			break
+		}
+		line := strings.TrimSpace(string(s.rest[:idx]))
+		s.rest = s.rest[idx+1:]
+		if line != "" {
+			lines = append(lines, line)
+		}
+	}
+	if emit := s.emit; emit != nil {
+		for _, line := range lines {
+			emit(line)
+		}
+	}
+	return len(p), nil
 }
 
 func (l *limitedWriter) Write(p []byte) (int, error) {

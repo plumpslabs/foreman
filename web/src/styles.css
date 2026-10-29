@@ -496,11 +496,31 @@ select { cursor: pointer; }
 .tool-desc { font-size: 11px; color: var(--muted); line-height: 1.45; }
 
 /* ---------- Team roster ---------- */
-.team-agent { border: 1px solid var(--line); border-radius: 10px; background: var(--panel); padding: 14px; }
+.team-agent { border: 1px solid var(--line); border-radius: 10px; background: var(--panel); padding: 14px; transition: border-color .15s ease, background .15s ease; }
+.team-agent:hover { border-color: #505b6b; }
 .team-agent-head { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; }
 .team-agent-details { margin-top: 8px; }
 .team-agent-details summary { cursor: pointer; font-size: 11px; color: var(--blue); }
 .team-agent-details .md { margin-top: 8px; padding: 10px 12px; background: var(--panel2); border-radius: 8px; }
+.agent-name-trunc { max-width: 220px; display: inline-block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; vertical-align: bottom; }
+.main-pick { display: inline-flex; align-items: center; gap: 5px; cursor: pointer; font-size: 10.5px; color: var(--muted); border: 1px solid var(--line); border-radius: 7px; padding: 5px 8px; flex-shrink: 0; }
+.main-pick:hover { border-color: #505b6b; color: var(--text); }
+.main-pick input[type="radio"] { appearance: none; -webkit-appearance: none; width: 14px; height: 14px; border: 1px solid #3a4452; border-radius: 50%; background: #0d1014; display: grid; place-content: center; margin: 0; cursor: pointer; }
+.main-pick input[type="radio"]:checked { background: var(--accent); border-color: var(--accent); }
+.main-pick input[type="radio"]:checked::after { content: ""; width: 6px; height: 6px; border-radius: 50%; background: #15180e; }
+
+/* Add-agent modal grid */
+.agent-pick-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(170px, 1fr)); gap: 10px; }
+.agent-pick-card {
+  display: flex; flex-direction: column; align-items: flex-start; gap: 6px; text-align: left;
+  padding: 13px; border: 1px solid var(--line); border-radius: 10px; background: var(--panel2);
+  cursor: pointer; font-family: inherit; color: var(--text); min-width: 0;
+}
+.agent-pick-card:hover { border-color: var(--accent); background: #192116; }
+.agent-pick-name { font-size: 12.5px; font-weight: 700; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.agent-pick-role { font-size: 11px; color: var(--muted); line-height: 1.35; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.agent-pick-meta { font-size: 10.5px; color: var(--muted); }
+.mini-link { background: none; border: 0; color: var(--blue); cursor: pointer; font-size: 11px; padding: 0; font-family: inherit; }
 
 /* ---------- Template picker ---------- */
 .template-pick { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 10px; margin-top: 10px; }
@@ -718,7 +738,47 @@ select { cursor: pointer; }
 }
 .compose-selects { display: flex; gap: 6px; flex-wrap: wrap; min-width: 0; }
 .compose-foot { font-size: 10.5px; color: var(--muted); margin-top: 8px; padding-left: 2px; }
-select.mini-select { appearance: none; -webkit-appearance: none; padding-right: 22px; cursor: pointer; }
+select.mini-select { appearance: none; -webkit-appearance: none; padding-right: 22px; cursor: pointer; color-scheme: dark; }
+
+/* Live agents strip above the composer */
+.live-agents { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; padding: 8px 20px 0; }
+.live-label { display: inline-flex; align-items: center; gap: 4px; font-size: 10px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); }
+.live-agent {
+  display: inline-flex; align-items: center; gap: 6px; font-size: 11px; color: #c0c6d0;
+  border: 1px solid var(--line); background: var(--panel); border-radius: 999px; padding: 4px 10px;
+}
+.live-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--accent); flex-shrink: 0; }
+.live-on .live-dot { animation: livePulse 1.2s ease-in-out infinite; }
+.live-dim { opacity: .55; color: var(--muted); }
+.live-dim .live-dot { background: var(--orange); animation: none; }
+.live-dot.idle { background: var(--muted); animation: none; }
+@keyframes livePulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(90, 200, 120, .45); }
+  50% { box-shadow: 0 0 0 5px rgba(90, 200, 120, 0); }
+}
+
+/* Team-invited status card (centered at top of chat) */
+.invite-card {
+  display: flex; gap: 10px; align-items: flex-start; max-width: 620px;
+  border: 1px solid var(--line); background: var(--panel); border-radius: 12px;
+  padding: 12px 14px; margin: 0 auto 18px;
+}
+.invite-icon { width: 30px; height: 30px; border-radius: 8px; background: #192116; border: 1px solid #33432a; color: var(--accent); display: grid; place-items: center; flex-shrink: 0; }
+.invite-body { min-width: 0; }
+.invite-title { font-size: 11.5px; font-weight: 700; margin-bottom: 4px; }
+.invite-members { display: flex; flex-wrap: wrap; gap: 6px 14px; }
+.invite-team { display: inline-flex; align-items: baseline; gap: 6px; font-size: 11px; color: var(--muted); min-width: 0; }
+.invite-team b { color: var(--text); font-weight: 650; white-space: nowrap; }
+
+.activity-empty { display: flex; align-items: center; gap: 8px; font-size: 11px; color: var(--muted); line-height: 1.45; }
+.activity-row { display: flex; flex-direction: column; gap: 3px; }
+.activity-row-top { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.activity-row-msg { font-size: 10.5px; color: var(--muted); line-height: 1.4; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* Idle welcome suggestions */
+.chat-welcome { display: flex; flex-direction: column; gap: 10px; align-items: center; }
+.chat-welcome-title { font-size: 12.5px; }
+.chat-welcome-actions { display: flex; gap: 6px; flex-wrap: wrap; justify-content: center; }
 
 /* ---------- Agent question card ---------- */
 .question-card {

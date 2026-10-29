@@ -86,7 +86,25 @@ if (!calls.some((c) => c.url.includes('/pause') && c.method === 'POST')) {
 }
 if (!view.includes('Agent needs a decision')) failures.push('agent question card missing');
 if (!view.includes('Proceed with the refactor?')) failures.push('question prompt missing');
+if (!view.includes('Teams invited to this room')) failures.push('team-invited card missing');
+if (!view.includes('Smoke Team')) failures.push('invited team name missing from card');
+if (!window.document.querySelector('.live-agents .live-agent.live-on')) failures.push('live agent indicator missing');
 if (window.location.hash !== '#/rooms/r1') failures.push('room route was not written to the hash');
+
+// Enter-to-send + send queue: typing and pressing Enter must POST a message.
+const composeTa = window.document.querySelector('.compose-shell textarea');
+if (!composeTa) {
+  failures.push('chat textarea missing');
+} else {
+  calls.length = 0;
+  composeTa.value = 'hello from smoke';
+  composeTa.dispatchEvent(new window.Event('input', { bubbles: true }));
+  await flush();
+  composeTa.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+  await flush();
+  const sentMsg = calls.some((c) => c.url.includes('/api/rooms/r1/messages') && c.method === 'POST');
+  if (!sentMsg) failures.push('enter did not send the message');
+}
 
 click(byText('.room-tab', 'Changes'));
 await flush();
@@ -138,6 +156,22 @@ for (const label of ['File editor', 'Terminal', 'Glob', 'Grep', 'Browser', 'Sub-
 if (!view.includes('Wired')) failures.push('tool wired badge missing');
 if (!view.includes('Policy gated')) failures.push('terminal policy badge missing');
 
+// Agent overview: model picker bound to the connected provider.
+click(byText('.detail-tab', 'Overview'));
+await flush();
+const providerSelect = [...window.document.querySelectorAll('.field select')]
+  .find((s) => [...s.options].some((o) => o.textContent === 'TokenHarbor'));
+if (!providerSelect) {
+  failures.push('provider select missing in agent overview');
+} else {
+  providerSelect.value = 'tokenharbor';
+  providerSelect.dispatchEvent(new window.Event('change', { bubbles: true }));
+  await flush();
+  view = window.document.body.innerHTML;
+  if (!view.includes('Auto — deepseek-v4.1-flash:free')) failures.push('provider-bound model options missing');
+  if (!view.includes('This agent uses the provider\'s default model for runs.')) failures.push('provider-bound model picker hint missing');
+}
+
 // Skill detail page with a directory tree.
 click(byText('.nav-btn', 'Skills'));
 await flush();
@@ -162,6 +196,35 @@ window.location.hash = '#/agents/a1';
 window.dispatchEvent(new window.HashChangeEvent('hashchange'));
 await flush();
 if (!window.document.body.innerHTML.includes('Instructions')) failures.push('hash route did not open the agent page');
+
+// Team detail: add-agent modal grid + per-row "Make main" radio.
+click(byText('.nav-btn', 'Teams'));
+await flush();
+const teamRow = window.document.querySelector('.content .room-row.clickable');
+if (!teamRow) {
+  failures.push('team row missing');
+} else {
+  click(teamRow);
+  await flush();
+  click(byText('.detail-tab', 'Agents'));
+  await flush();
+  view = window.document.body.innerHTML;
+  if (!view.includes('Make main')) failures.push('"Make main" radio missing from team agents');
+  if (!view.includes('Main agent')) failures.push('main agent tag missing');
+  const addAgentBtn = byText('.btn', 'Add agent');
+  if (!addAgentBtn) {
+    failures.push('"Add agent" button missing');
+  } else {
+    click(addAgentBtn);
+    await flush();
+    view = window.document.body.innerHTML;
+    if (!view.includes('Add an agent to this team')) failures.push('add-agent modal did not open');
+    const cards = [...window.document.querySelectorAll('.agent-pick-card')];
+    if (!cards.length) failures.push('add-agent modal grid is empty');
+    if (!cards.some((c) => c.textContent.includes('Scout'))) failures.push('library agent Scout missing from picker grid');
+    if (cards.some((c) => c.textContent.includes('M'))) failures.push('already-on-team agent appears in picker grid');
+  }
+}
 
 // Settings: provider presets, configured row, and the add-provider modal.
 click(byText('.nav-btn', 'Settings'));

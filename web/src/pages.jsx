@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'preact/hooks';
+import { useEffect, useRef, useState } from 'preact/hooks';
 import { api } from './api.js';
 import { Icon } from './icons.jsx';
 import { Markdown } from './markdown.jsx';
@@ -204,12 +204,24 @@ export function RoomDetailHost({ room, state, notify, setModal, runTask, refresh
   const [inviteOpen, setInviteOpen] = useState(false);
   const [invited, setInvited] = useState(room.teamIds || []);
   const [answerDraft, setAnswerDraft] = useState({});
+  const sendQueueRef = useRef([]);
+  const sendingRef = useRef(false);
 
   useEffect(() => { setInvited(room.teamIds || []); }, [room.id, room.teamIds.join(',')]);
   useEffect(() => { setActiveAgent(room.mainAgent || 'Atlas'); }, [room.id]);
 
   const { teams: allTeams, tasks, skills, runs, settings } = state;
   const teams = allTeams.filter((t) => room.teamIds.includes(t.id));
+  const composeAgents = [];
+  const seenAgents = new Set();
+  for (const t of teams) {
+    for (const a of t.agents || []) {
+      if (!seenAgents.has(a.name)) {
+        seenAgents.add(a.name);
+        composeAgents.push([a.name, t.name]);
+      }
+    }
+  }
   const roomTasks = tasks.filter((t) => t.roomId === room.id);
   const roomRuns = (runs || []).filter((r) => r.roomId === room.id);
   const activeRun = roomRuns.find((r) => r.status === 'running');
@@ -217,25 +229,58 @@ export function RoomDetailHost({ room, state, notify, setModal, runTask, refresh
   const runtime = activeRun ? 'running'
     : lastRun && ['paused', 'failed', 'timed_out', 'cancelled'].includes(lastRun.status) ? 'paused'
       : 'idle';
+  const runningRuns = roomRuns.filter((r) => r.status === 'running');
+  const pausedRuns = roomRuns.filter((r) => r.status === 'paused').slice(0, 2);
+  const agentNameForRun = (run) => {
+    const task = roomTasks.find((t) => t.id === run.taskId);
+    if (task && task.agentName) return task.agentName;
+    const team = teams[0];
+    return team ? team.mainAgent : 'Agent';
+  };
   const pendingQuestions = (room.questions || []).filter((q) => !q.answer);
 
-  const send = async (e) => {
-    e.preventDefault();
-    const content = draft.trim();
-    if (!content) return;
-    setSending(true);
+  const routeContent = (content) => {
+    const routed = activeAgent && activeAgent !== room.mainAgent ? `@${activeAgent} ${content}` : content;
+    return routed;
+  };
+
+  const flushSendQueue = async () => {
+    if (sendingRef.current) return;
+    sendingRef.current = true;
     try {
-      const routed = activeAgent && activeAgent !== room.mainAgent ? `@${activeAgent} ${content}` : content;
-      await api(`/api/rooms/${encodeURIComponent(room.id)}/messages`, {
-        method: 'POST',
-        body: JSON.stringify({ role: 'user', content: routed }),
-      });
-      setDraft('');
-      await refresh();
-    } catch (error) {
-      notify(error.message);
+      while (sendQueueRef.current.length) {
+        const content = sendQueueRef.current.shift();
+        setSending(true);
+        try {
+          await api(`/api/rooms/${encodeURIComponent(room.id)}/messages`, {
+            method: 'POST',
+            body: JSON.stringify({ role: 'user', content: routeContent(content) }),
+          });
+          await refresh();
+        } catch (error) {
+          notify(error.message);
+        }
+      }
     } finally {
       setSending(false);
+      sendingRef.current = false;
+    }
+  };
+
+  const send = (e) => {
+    if (e) e.preventDefault();
+    const content = draft.trim();
+    if (!content || sendingRef.current) return;
+    setDraft('');
+    sendQueueRef.current.push(content);
+    flushSendQueue();
+  };
+
+  const onComposeKeyDown = (e) => {
+    // Enter sends; Shift+Enter inserts a newline.
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault();
+      send();
     }
   };
 
@@ -332,6 +377,22 @@ export function RoomDetailHost({ room, state, notify, setModal, runTask, refresh
           {tab === 'chat' && (
             <div class="room-view active">
               <div class="chat-scroll">
+                {teams.length ? (
+                  <div class="invite-card">
+                    <span class="invite-icon"><Icon name="users" size={15} /></span>
+                    <div class="invite-body">
+                      <div class="invite-title">Teams invited to this room</div>
+                      <div class="invite-members">
+                        {teams.map((t) => (
+                          <span key={t.id} class="invite-team">
+                            <b>{esc(t.name)}</b>
+                            <span>{(t.agents || []).map((a) => esc(a.name)).join(', ') || 'no members'}</span>
+                          </span>
+                        ))}
+                      </div>
+                    </div>
+                  </div>
+                ) : null}
                 {(room.messages || []).length
                   ? room.messages.map((m) => (
                     <div class={`msg ${m.role === 'user' ? 'user' : ''}`}>
@@ -350,8 +411,15 @@ export function RoomDetailHost({ room, state, notify, setModal, runTask, refresh
                     </div>
                   ))
                   : (
-                    <div class="empty">
-                      No messages yet. Describe the goal below to start this room's conversation.
+                    <div class="empty chat-welcome">
+                      <div class="chat-welcome-title">No messages yet. Describe the goal below to start this room's conversation.</div>
+                      <div class="chat-welcome-actions">
+                        {['Draft a plan for this room\'s goal', 'Summarize open work', 'What changed so far?'].map((s) => (
+                          <button type="button" class="chip chip-add" key={s} onClick={() => setDraft(s)}>
+                            <Icon name="plus" size={11} />{esc(s)}
+                          </button>
+                        ))}
+                      </div>
                     </div>
                   )}
 
@@ -384,20 +452,39 @@ export function RoomDetailHost({ room, state, notify, setModal, runTask, refresh
                 ))}
               </div>
 
+              {(runningRuns.length || pausedRuns.length) && (
+                <div class="live-agents">
+                  <span class="live-label"><Icon name="activity" size={12} />Live</span>
+                  {runningRuns.map((run) => (
+                    <span class="live-agent live-on" key={run.id} title={`${esc(agentNameForRun(run))} · ${esc(run.model)}`}>
+                      <span class="live-dot" />{esc(agentNameForRun(run))}
+                    </span>
+                  ))}
+                  {pausedRuns.map((run) => (
+                    <span class="live-agent live-dim" key={run.id} title={`${esc(agentNameForRun(run))} paused`}>
+                      <span class="live-dot" />{esc(agentNameForRun(run))} paused
+                    </span>
+                  ))}
+                </div>
+              )}
+
               <form class="chat-compose" onSubmit={send}>
                 <div class="compose-shell">
                   <textarea
                     rows="2"
-                    placeholder="Describe a task or ask for a decision…"
+                    placeholder="Describe a task or ask for a decision… (Enter to send)"
                     value={draft}
                     onInput={(e) => setDraft(e.currentTarget.value)}
+                    onKeyDown={onComposeKeyDown}
                   />
                   <div class="compose-toolbar">
                     <div class="compose-selects">
-                      {teams.length ? (
+                      {composeAgents.length ? (
                         <select class="mini-select" value={activeAgent}
                           onChange={(e) => setActiveAgent(e.currentTarget.value)}>
-                          {teams.map((t) => <option value={esc(t.mainAgent)}>{esc(t.mainAgent)} · {esc(t.name)}</option>)}
+                          {composeAgents.map(([name, teamName]) => (
+                            <option value={esc(name)}>{esc(name)} · {esc(teamName)}</option>
+                          ))}
                         </select>
                       ) : (
                         <span class="mini-select muted">No team invited</span>
@@ -556,11 +643,32 @@ export function RoomDetailHost({ room, state, notify, setModal, runTask, refresh
             <div class="activity-feed">
               {roomRuns.slice(0, 3).map((run) => (
                 <div class="activity-row">
-                  <b>{esc(run.status)}</b>
-                  <span>{timeAgo(run.startedAt)}</span>
+                  <div class="activity-row-top">
+                    <b>{esc(run.status)}</b>
+                    <span>{timeAgo(run.startedAt)}</span>
+                  </div>
+                  {(() => {
+                    const last = (run.events || []).slice(-1)[0];
+                    const text = last?.message || run.error;
+                    return text ? <div class="activity-row-msg" title={esc(text)}>{esc(text)}</div> : null;
+                  })()}
                 </div>
               ))}
-              {!roomRuns.length && <span style="color:var(--muted)">No runs yet.</span>}
+              {!roomRuns.length && (
+                <div class="activity-empty">
+                  {teams.length ? (
+                    <>
+                      <span class="live-dot idle" />
+                      <span>
+                        {teams.flatMap((t) => (t.agents || []).map((a) => a.name)).join(', ')
+                          || teams.map((t) => t.name).join(', ')}
+                      </span>
+                    </>
+                  ) : (
+                    <span>Invite a team to get started.</span>
+                  )}
+                </div>
+              )}
             </div>
           </div>
 

@@ -77,6 +77,54 @@ function normalizeTools(tools) {
   return out;
 }
 
+/* Model picker bound to the selected provider's model list. The picked model is
+   always shown as a badge; models not in the provider's list are kept as
+   explicit custom overrides instead of being silently dropped. */
+function ProviderModelField({ providerId, providers, model, onChange }) {
+  const provider = providers.find((p) => p.id === providerId);
+  const models = provider?.models || [];
+  const inList = models.includes(model);
+  const [customOpen, setCustomOpen] = useState(false);
+  return (
+    <div class="field">
+      <label>Model</label>
+      {models.length ? (
+        <select value={inList ? model : ''} onChange={(e) => onChange(e.currentTarget.value)}>
+          <option value="">Auto — {esc(provider?.defaultModel || 'provider default')}</option>
+          {models.map((m) => (
+            <option value={esc(m)}>{esc(m)}{m === provider?.defaultModel ? ' (default)' : ''}</option>
+          ))}
+        </select>
+      ) : (
+        <input placeholder="auto (workspace default)" value={model}
+          onInput={(e) => onChange(e.currentTarget.value)} />
+      )}
+      {(model || models.length) ? (
+        <div class="md-hint" style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+          {model ? (
+            <>
+              <span class="chip chip-default">
+                {esc(model)}{!inList && models.length ? ' · custom' : ''}
+              </span>
+              {!inList && models.length && (
+                <button type="button" class="mini-link" onClick={() => setCustomOpen(!customOpen)}>
+                  {customOpen ? 'Close' : 'Edit custom'}
+                </button>
+              )}
+              {!inList && models.length && customOpen && (
+                <input style="max-width:220px" value={model}
+                  onInput={(e) => onChange(e.currentTarget.value)} />
+              )}
+            </>
+          ) : (
+            <span class="meta-text">This agent uses the provider's default model for runs.</span>
+          )}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
 /* ---------- Shared pieces ---------- */
 
 function DetailShell({ kicker, title, subtitle, tabs, tab, onTab, onBack, actions, children }) {
@@ -251,11 +299,8 @@ export function AgentDetailPage({ agentId, state, notify, refresh, onBack }) {
               {(state.providers || []).map((p) => <option value={esc(p.id)}>{esc(p.name)}</option>)}
             </select>
           </div>
-          <div class="field">
-            <label>Model override</label>
-            <input placeholder="e.g. claude-sonnet" value={form.model}
-              onInput={(e) => set('model', e.currentTarget.value)} />
-          </div>
+          <ProviderModelField providerId={form.providerId} providers={state.providers || []}
+            model={form.model} onChange={(model) => set('model', model)} />
           <div class="field">
             <label>Default effort</label>
             <select value={form.effort} onChange={(e) => set('effort', e.currentTarget.value)}>
@@ -383,7 +428,7 @@ export function TeamDetailPage({ teamId, state, notify, refresh, onBack, onOpenA
   });
   const [tab, setTab] = useState('overview');
   const [busy, setBusy] = useState(false);
-  const [pickAgent, setPickAgent] = useState('');
+  const [pickOpen, setPickOpen] = useState(false);
   const set = (field, value) => setForm((prev) => ({ ...prev, [field]: value }));
   const skillName = (ref) => {
     const match = (state.skills || []).find((s) => s.id === ref || s.name === ref);
@@ -404,12 +449,12 @@ export function TeamDetailPage({ teamId, state, notify, refresh, onBack, onOpenA
     }
   };
 
-  const addAgent = () => {
-    const source = (state.agents || []).find((a) => a.id === pickAgent);
-    if (!source) return;
-    if (form.agents.some((a) => a.name === source.name)) { notify('That agent is already on this team'); return; }
+  const libraryAgents = (state.agents || []).filter((a) => !form.agents.some((x) => x.name === a.name));
+
+  const pickFromLibrary = (source) => {
     set('agents', [...form.agents, { ...source, id: undefined }]);
-    setPickAgent('');
+    setPickOpen(false);
+    notify(`Added ${source.name} to the team`);
   };
 
   const removeAgent = (name) => {
@@ -477,15 +522,11 @@ export function TeamDetailPage({ teamId, state, notify, refresh, onBack, onOpenA
           <div class="detail-hint-row">
             <div>
               <div class="detail-section-title">Agents on this team</div>
-              <div class="section-note">Each entry is a full profile copy owned by this team.</div>
+              <div class="section-note">Each entry is a full profile copy owned by this team. Pick which agent is the main one.</div>
             </div>
-            <div style="display:flex;gap:6px">
-              <select value={pickAgent} onChange={(e) => setPickAgent(e.currentTarget.value)} style="max-width:200px">
-                <option value="">Add from library…</option>
-                {(state.agents || []).map((a) => <option value={esc(a.id)}>{esc(a.name)}</option>)}
-              </select>
-              <button class="btn small" onClick={addAgent}><Icon name="plus" size={13} />Add</button>
-            </div>
+            <button class="btn small" onClick={() => setPickOpen(true)} disabled={!libraryAgents.length}>
+              <Icon name="plus" size={13} />Add agent
+            </button>
           </div>
           {form.agents.map((agent) => (
             <div class="team-agent">
@@ -493,12 +534,17 @@ export function TeamDetailPage({ teamId, state, notify, refresh, onBack, onOpenA
                 <div class="agent-avatar green" style="border-radius:6px">{esc(agent.name).slice(0, 2).toUpperCase()}</div>
                 <div style="flex:1;min-width:0">
                   <div class="tool-name">
-                    {esc(agent.name)}
+                    <span class="agent-name-trunc" title={esc(agent.name)}>{esc(agent.name)}</span>
                     {agent.name === form.mainAgent ? <span class="tag green">Main agent</span> : <span class="tag">Worker</span>}
                     {agent.requireReview ? <span class="tag orange">Requires review</span> : null}
                   </div>
                   <div class="tool-desc">{esc(agent.role)}</div>
                 </div>
+                <label class="main-pick" title="Set as the team's main agent">
+                  <input type="radio" name="team-main-agent" checked={agent.name === form.mainAgent}
+                    onChange={() => set('mainAgent', agent.name)} />
+                  <span>Make main</span>
+                </label>
                 <button class="icon-btn" aria-label="Remove agent" onClick={() => removeAgent(agent.name)}>
                   <Icon name="x" size={14} />
                 </button>
@@ -511,11 +557,43 @@ export function TeamDetailPage({ teamId, state, notify, refresh, onBack, onOpenA
                 </details>
               ) : null}
               <div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:8px">
-                {(agent.tools || []).map((t) => <span class="chip">{esc(t)}</span>)}
-                {(agent.skills || []).map((s) => <span class="chip">{esc(skillName(s))}</span>)}
+                {(agent.tools || []).map((t) => <span class="chip" title={esc(t)}>{esc(t)}</span>)}
+                {(agent.skills || []).map((s) => <span class="chip" title={esc(skillName(s))}>{esc(skillName(s))}</span>)}
               </div>
             </div>
           ))}
+
+          {pickOpen && (
+            <div class="modal-backdrop open" onClick={(e) => { if (e.target === e.currentTarget) setPickOpen(false); }}>
+              <div class="modal modal-lg">
+                <header class="modal-head">
+                  <h3>Add an agent to this team</h3>
+                  <button type="button" class="icon-btn" aria-label="Close" onClick={() => setPickOpen(false)}><Icon name="x" /></button>
+                </header>
+                <div class="modal-body">
+                  {libraryAgents.length ? (
+                    <div class="agent-pick-grid">
+                      {libraryAgents.map((a) => (
+                        <button type="button" class="agent-pick-card" key={a.id} onClick={() => pickFromLibrary(a)}>
+                          <div class="agent-avatar green" style="border-radius:8px">{esc(a.name).slice(0, 2).toUpperCase()}</div>
+                          <div class="agent-pick-name" title={esc(a.name)}>{esc(a.name)}</div>
+                          <div class="agent-pick-role" title={esc(a.role)}>{esc(a.role || 'No role')}</div>
+                          <div class="agent-pick-meta">
+                            {(a.tools || []).length} tools · {(a.skills || []).length} skills
+                          </div>
+                        </button>
+                      ))}
+                    </div>
+                  ) : (
+                    <div class="empty">All library agents are already on this team.</div>
+                  )}
+                </div>
+                <footer class="modal-foot">
+                  <button type="button" class="btn" onClick={() => setPickOpen(false)}>Close</button>
+                </footer>
+              </div>
+            </div>
+          )}
         </div>
       )}
     </DetailShell>
