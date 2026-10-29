@@ -1071,7 +1071,7 @@ select.mini-select { appearance: none; -webkit-appearance: none; padding-right: 
 .mention-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .mention-team { margin-left: auto; font-size: 10.5px; color: var(--muted); flex-shrink: 0; }
 
-.live-agent em { font-style: normal; font-size: 10px; color: var(--muted); }
+.live-agent em { font-style: normal; font-size: 10px; color: var(--muted); flex-shrink: 0; }
 
 /* SDK install hint */
 .sdk-hint {
@@ -1100,12 +1100,14 @@ select.mini-select { appearance: none; -webkit-appearance: none; padding-right: 
 }
 
 /* Live agents strip above the composer */
-.live-agents { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; padding: 8px 20px 0; }
-.live-label { display: inline-flex; align-items: center; gap: 4px; font-size: 10px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); }
+.live-agents { display: flex; align-items: center; gap: 6px; flex-wrap: nowrap; overflow-x: auto; scrollbar-width: thin; padding: 8px 20px 0; }
+.live-label { display: inline-flex; align-items: center; gap: 4px; font-size: 10px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); flex-shrink: 0; }
 .live-agent {
   display: inline-flex; align-items: center; gap: 6px; font-size: 11px; color: #c0c6d0;
   border: 1px solid var(--line); background: var(--panel); border-radius: 999px; padding: 4px 10px;
+  flex-shrink: 0; max-width: 210px;
 }
+.live-agent-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .live-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--accent); flex-shrink: 0; }
 .live-on .live-dot { animation: livePulse 1.2s ease-in-out infinite; }
 .live-dim { opacity: .55; color: var(--muted); }

@@ -382,6 +382,26 @@ func (s *Store) UpdateRoomTeams(roomID string, teamIDs []string) (Room, error) {
 		if s.state.Rooms[i].ID != roomID {
 			continue
 		}
+		// Block removing a team that still has running work in this room.
+		current := make(map[string]bool, len(s.state.Rooms[i].TeamIDs))
+		for _, id := range s.state.Rooms[i].TeamIDs {
+			current[id] = true
+		}
+		var removed []string
+		for id := range current {
+			if !seen[id] {
+				removed = append(removed, id)
+			}
+		}
+		if len(removed) > 0 {
+			removedSet := make(map[string]bool, len(removed))
+			for _, id := range removed {
+				removedSet[id] = true
+			}
+			if name := teamWithRunningRuns(&s.state, roomID, removedSet); name != "" {
+				return Room{}, fmt.Errorf("team %q still has running work in this room — pause or cancel it before removing the team", name)
+			}
+		}
 		previous := s.state.Rooms[i].TeamIDs
 		s.state.Rooms[i].TeamIDs = ids
 		if err := s.save(); err != nil {
@@ -391,6 +411,31 @@ func (s *Store) UpdateRoomTeams(roomID string, teamIDs []string) (Room, error) {
 		return s.state.Rooms[i], nil
 	}
 	return Room{}, fmt.Errorf("unknown room id %q", roomID)
+}
+
+// teamWithRunningRuns returns the name of a removed team that still has a run
+// in flight in the room, or "" when no removed team has running work.
+func teamWithRunningRuns(state *WorkspaceState, roomID string, removed map[string]bool) string {
+	taskTeam := map[string]string{}
+	for _, task := range state.Tasks {
+		if task.RoomID == roomID && task.TeamID != "" {
+			taskTeam[task.ID] = task.TeamID
+		}
+	}
+	for _, run := range state.Runs {
+		if run.RoomID != roomID || run.Status != "running" {
+			continue
+		}
+		if tid, ok := taskTeam[run.TaskID]; ok && removed[tid] {
+			for _, tm := range state.Teams {
+				if tm.ID == tid {
+					return tm.Name
+				}
+			}
+			return tid
+		}
+	}
+	return ""
 }
 
 // AddRoomQuestion records a decision request from an agent.

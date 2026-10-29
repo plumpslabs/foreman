@@ -7,6 +7,26 @@ import (
 	"testing"
 )
 
+func TestTeamWithRunningRunsBlocksKick(t *testing.T) {
+	state := &WorkspaceState{
+		Rooms: []Room{{ID: "r1", TeamIDs: []string{"t1"}}},
+		Teams: []Team{{ID: "t1", Name: "Fixes"}},
+		Tasks: []Task{{ID: "k1", RoomID: "r1", TeamID: "t1"}},
+		Runs:  []AgentRun{{ID: "run1", TaskID: "k1", RoomID: "r1", Status: "running"}},
+	}
+	if got := teamWithRunningRuns(state, "r1", map[string]bool{"t1": true}); got != "Fixes" {
+		t.Fatalf("expected blocked team name, got %q", got)
+	}
+	state.Runs[0].Status = "completed"
+	if got := teamWithRunningRuns(state, "r1", map[string]bool{"t1": true}); got != "" {
+		t.Fatalf("expected no block when run finished, got %q", got)
+	}
+	state.Runs[0].Status = "running"
+	if got := teamWithRunningRuns(state, "r1", map[string]bool{"t9": true}); got != "" {
+		t.Fatalf("expected no block for unrelated team, got %q", got)
+	}
+}
+
 func TestOpenStoreSeedsAndPersistsWorkspace(t *testing.T) {
 	project := t.TempDir()
 	store, err := OpenStore(project)

@@ -230,6 +230,7 @@ export function RoomDetailHost({ room, state, notify, setModal, runTask, refresh
   const [engineHint, setEngineHint] = useState('');
   const [engineLog, setEngineLog] = useState('');
   const [engineStatus, setEngineStatus] = useState(null);
+  const [kickBlock, setKickBlock] = useState(null);
 
   const loadEngineStatus = async () => {
     try {
@@ -471,6 +472,14 @@ export function RoomDetailHost({ room, state, notify, setModal, runTask, refresh
 
   const kickTeam = async (teamId) => {
     const name = allTeams.find((t) => t.id === teamId)?.name || 'team';
+    const running = runningRuns.find((run) => {
+      const task = allRoomTasks.find((x) => x.id === run.taskId);
+      return task && task.teamId === teamId;
+    });
+    if (running) {
+      setKickBlock({ teamId, teamName: name, run: running });
+      return;
+    }
     if (!confirm(`Remove ${name} from this room?`)) return;
     await saveTeams((room.teamIds || []).filter((id) => id !== teamId));
   };
@@ -650,9 +659,12 @@ export function RoomDetailHost({ room, state, notify, setModal, runTask, refresh
                     const label = lastEvent?.type === 'tool' ? 'acting'
                       : (lastEvent?.message || '').includes('engine:') ? 'reasoning'
                         : 'working';
+                    const aname = agentNameForRun(run);
                     return (
-                      <span class="live-agent live-on" key={run.id}>
-                        <span class="live-dot" />{esc(agentNameForRun(run))}<em>{label}</em>
+                      <span class="live-agent live-on" key={run.id} title={`${esc(aname)} · ${label}`}>
+                        <span class="live-dot" />
+                        <span class="live-agent-name">{esc(aname)}</span>
+                        <em>{label}</em>
                       </span>
                     );
                   })}
@@ -941,6 +953,31 @@ export function RoomDetailHost({ room, state, notify, setModal, runTask, refresh
                 const ok = await saveTeams(invited);
                 if (ok) setInviteOpen(false);
               }}>Save participants</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {kickBlock && (
+        <div class="modal-backdrop open" onClick={(e) => { if (e.target === e.currentTarget) setKickBlock(null); }}>
+          <div class="modal">
+            <div class="modal-head">
+              <h3>Tim masih bekerja</h3>
+              <button class="icon-btn" onClick={() => setKickBlock(null)} aria-label="Close"><Icon name="x" /></button>
+            </div>
+            <div class="modal-body">
+              <p style="font-size:13px;color:var(--text);line-height:1.6;margin:0">
+                Team <b>{esc(kickBlock.teamName)}</b> masih punya pekerjaan berjalan di room ini
+                (<b>{esc(agentNameForRun(kickBlock.run))}</b>). Pause dulu sebelum melepas tim.
+              </p>
+            </div>
+            <div class="modal-foot">
+              <button class="btn" onClick={() => setKickBlock(null)}>Batal</button>
+              <button class="btn primary" onClick={() => {
+                const run = kickBlock.run;
+                setKickBlock(null);
+                pauseRun(run.id);
+              }}><Icon name="pause" size={13} />Pause run</button>
             </div>
           </div>
         </div>
