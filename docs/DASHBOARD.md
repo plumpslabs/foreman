@@ -111,14 +111,18 @@ gain a mode plus a file tree.
   stores it and the room shows a card with option buttons plus a custom answer. Answering records
   the choice in the chat.
 - **Chat compose** — Enter sends, Shift+Enter adds a newline, and sends are queued so you can type
-  while an earlier message is still in flight (no spam/double submit). There is no agent dropdown in
-  the composer: a message runs the room's main agent by default; prefix `@agent` to route it to a
-  specific agent.
+  while an earlier message is still in flight (no spam/double submit). Typing `@` opens an agent
+  suggestion list (Tab/Enter/click to pick); the picked agent appears as a badge with the composer
+  and can be removed. Without a pick, a message runs the room's main agent by default.
+- **Live working strip** — above the input, only agents with an active run are shown as pulsing
+  chips with a status label (reasoning / acting / working); no idle agents are listed. While a chat
+  run is active the room auto-polls so the agent's reply appears in the chat without manual reloads.
 - **Send = run** — a user message is stored in chat **and** starts an agent run (a hidden task
-  spawned per message; implicit in the Kanban and task progress). The agent's reply is appended back
-  into the chat when the run finishes, and questions from the agent appear as decision cards. If the
-  room has no invited team (or no configured provider), the message is still stored and a warning is
-  returned to the sender.
+  spawned per message; invisible in the Kanban and task progress). The agent's reply is appended back
+  into the chat **under the responding agent's name** when the run finishes, and questions from the
+  agent appear as decision cards. If the room has no invited team (or no configured provider), the
+  message is still stored and a warning is returned to the sender. If the OpenHands SDK is missing,
+  a hint banner shows the install command.
 - **Live agents strip** — above the input, every invited agent shows as a chip with a status dot:
   pulsing while running, dimmed when paused, muted when idle.
 - **Room rail members** — each invited team in the right rail lists its member badges (main agent

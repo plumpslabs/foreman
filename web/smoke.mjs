@@ -17,7 +17,8 @@ const workspace = {
   projectPath: '/tmp/demo',
   rooms: [{
     id: 'r1', name: 'Smoke Room', goal: 'g', teamIds: ['t1'], status: 'planning',
-    messages: [], createdAt: new Date().toISOString(),
+    messages: [{ id: 'm1', role: 'agent', agentName: 'Quick Coordinator', content: 'saya siap', createdAt: new Date().toISOString() }],
+    createdAt: new Date().toISOString(),
     questions: [{ id: 'q1', prompt: 'Proceed with the refactor?', options: ['Yes', 'No'], answer: '', createdAt: new Date().toISOString() }],
   }],
   teams: [{ id: 't1', templateId: 'quick-fix', name: 'Smoke Team', purpose: 'p', mainAgent: 'M', agents: [{ id: 'ta1', name: 'M', role: 'r', instructions: '# hi' }], instructions: 'i', createdAt: new Date().toISOString() }],
@@ -39,7 +40,7 @@ const { window } = dom;
 
 const calls = [];
 window.fetch = async (url, opts) => {
-  calls.push({ url: String(url), method: opts?.method || 'GET' });
+  calls.push({ url: String(url), method: opts?.method || 'GET', body: opts?.body || null });
   return { ok: true, status: 200, json: async () => workspace };
 };
 window.matchMedia = window.matchMedia || (() => ({ matches: false, addListener() {}, removeListener() {} }));
@@ -108,6 +109,34 @@ if (!composeTa) {
   const sentMsg = calls.some((c) => c.url.includes('/api/rooms/r1/messages') && c.method === 'POST');
   if (!sentMsg) failures.push('enter did not send the message');
 }
+
+// Agent reply bubble should show the real responding agent name.
+const authored = [...window.document.querySelectorAll('.msg .msg-meta strong')].map((el) => el.textContent.trim());
+if (!authored.includes('Quick Coordinator')) failures.push('agent reply does not show the responding agent name');
+
+// @ mention autocomplete -> badge -> routed send.
+calls.length = 0;
+const ta2 = window.document.querySelector('.compose-shell textarea');
+ta2.value = '@M ';
+ta2.dispatchEvent(new window.Event('input', { bubbles: true }));
+await flush();
+if (!window.document.querySelector('.mention-suggest')) failures.push('mention suggestions missing');
+const mOpt = byText('.mention-option', 'M');
+if (!mOpt) {
+  failures.push('mention option missing');
+} else {
+  click(mOpt);
+  await flush();
+  if (!window.document.querySelector('.compose-mention .mention-badge')) failures.push('mention badge missing after pick');
+}
+ta2.value = 'halo';
+ta2.dispatchEvent(new window.Event('input', { bubbles: true }));
+await flush();
+ta2.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+await flush();
+const routedMsg = calls.some((c) => c.method === 'POST' && c.url.includes('/messages')
+  && typeof c.body === 'string' && c.body.includes('@M halo'));
+if (!routedMsg) failures.push('mention-routed message was not sent');
 
 click(byText('.room-tab', 'Changes'));
 await flush();

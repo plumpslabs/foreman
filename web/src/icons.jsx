@@ -92,6 +92,13 @@ const ICONS = {
       <path d="M12 19V5" />
     </>
   ),
+  info: (
+    <>
+      <circle cx="12" cy="12" r="10" />
+      <path d="M12 16v-4" />
+      <path d="M12 8h.01" />
+    </>
+  ),
   check: <path d="M20 6 9 17l-5-5" />,
   'check-check': (
     <>

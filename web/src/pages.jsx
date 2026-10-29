@@ -218,6 +218,13 @@ export function RoomDetailHost({ room, state, notify, setModal, runTask, refresh
   const [answerDraft, setAnswerDraft] = useState({});
   const sendQueueRef = useRef([]);
   const sendingRef = useRef(false);
+  const refreshRef = useRef(refresh);
+  useEffect(() => { refreshRef.current = refresh; });
+  const [mentionAgent, setMentionAgent] = useState('');
+  const [mentionOpen, setMentionOpen] = useState(false);
+  const [mentionQuery, setMentionQuery] = useState('');
+  const [mentionIdx, setMentionIdx] = useState(0);
+  const [sdkHintDismissed, setSdkHintDismissed] = useState(false);
 
   useEffect(() => { setInvited(room.teamIds || []); }, [room.id, room.teamIds.join(',')]);
 
@@ -251,6 +258,26 @@ export function RoomDetailHost({ room, state, notify, setModal, runTask, refresh
   };
   const pendingQuestions = (room.questions || []).filter((q) => !q.answer);
 
+  // Realtime: while any chat run is active, poll so replies land in the chat
+  // without manual refreshes.
+  const runningCount = roomRuns.filter((r) => r.status === 'running').length;
+  useEffect(() => {
+    if (!runningCount) return undefined;
+    const id = setInterval(() => refreshRef.current(), 3000);
+    return () => clearInterval(id);
+  }, [room.id, runningCount]);
+
+  const mentionCandidates = composeAgents.filter(([name]) => name.toLowerCase().includes(mentionQuery.toLowerCase()));
+
+  const pickMention = ([name]) => {
+    setDraft((d) => d.replace(/(?:^|\s)@[^\s]*\s*$/, ''));
+    setMentionAgent(name);
+    setMentionOpen(false);
+    setMentionQuery('');
+  };
+
+  const clearMention = () => setMentionAgent('');
+
   const flushSendQueue = async () => {
     if (sendingRef.current) return;
     sendingRef.current = true;
@@ -279,12 +306,49 @@ export function RoomDetailHost({ room, state, notify, setModal, runTask, refresh
     if (e) e.preventDefault();
     const content = draft.trim();
     if (!content || sendingRef.current) return;
+    const finalContent = mentionAgent && !draft.startsWith('@') ? `@${mentionAgent} ${content}` : content;
     setDraft('');
-    sendQueueRef.current.push(content);
+    setMentionOpen(false);
+    sendQueueRef.current.push(finalContent);
     flushSendQueue();
   };
 
+  const onComposeInput = (e) => {
+    const value = e.currentTarget.value;
+    setDraft(value);
+    const m = value.match(/(?:^|\s)@([^\s]*)\s*$/);
+    if (m) {
+      setMentionQuery(m[1]);
+      setMentionIdx(0);
+      setMentionOpen(true);
+    } else {
+      setMentionOpen(false);
+    }
+  };
+
   const onComposeKeyDown = (e) => {
+    if (mentionOpen && mentionCandidates.length) {
+      if (e.key === 'ArrowDown') {
+        e.preventDefault();
+        setMentionIdx((i) => (i + 1) % mentionCandidates.length);
+        return;
+      }
+      if (e.key === 'ArrowUp') {
+        e.preventDefault();
+        setMentionIdx((i) => (i - 1 + mentionCandidates.length) % mentionCandidates.length);
+        return;
+      }
+      if (e.key === 'Enter' || e.key === 'Tab') {
+        e.preventDefault();
+        pickMention(mentionCandidates[mentionIdx]);
+        return;
+      }
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        setMentionOpen(false);
+        return;
+      }
+    }
     // Enter sends; Shift+Enter inserts a newline.
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
@@ -402,22 +466,25 @@ export function RoomDetailHost({ room, state, notify, setModal, runTask, refresh
                   </div>
                 ) : null}
                 {(room.messages || []).length
-                  ? room.messages.map((m) => (
+                  ? room.messages.map((m) => {
+                    const name = m.role === 'user' ? 'You' : (m.agentName || room.mainAgent || 'Main agent');
+                    return (
                     <div class={`msg ${m.role === 'user' ? 'user' : ''}`}>
                       <div class={`msg-avatar ${m.role === 'user' ? 'user' : 'main-agent'}`}>
-                        {m.role === 'user' ? 'ME' : avatarInitials(room.mainAgent || 'Foreman')}
+                        {m.role === 'user' ? 'ME' : avatarInitials(name)}
                       </div>
                       <div class="msg-content">
                         <div class="msg-meta">
-                          <strong>{esc(m.role === 'user' ? 'You' : (room.mainAgent || 'Foreman'))}</strong>
-                          <span>{m.role === 'user' ? 'You' : 'Main agent'} · {timeAgo(m.createdAt)}</span>
+                          <strong>{esc(name)}</strong>
+                          <span>{m.role === 'user' ? 'You' : esc(name)} · {timeAgo(m.createdAt)}</span>
                         </div>
                         <div class={`bubble ${m.role === 'user' ? 'user-bubble' : ''}`}>
                           {m.role === 'user' ? esc(m.content) : <Markdown text={m.content} />}
                         </div>
                       </div>
                     </div>
-                  ))
+                    );
+                  })
                   : (
                     <div class="empty chat-welcome">
                       <div class="chat-welcome-title">No messages yet. Describe the goal below to start this room's conversation.</div>
@@ -460,17 +527,35 @@ export function RoomDetailHost({ room, state, notify, setModal, runTask, refresh
                 ))}
               </div>
 
-              {composeAgents.length ? (
+              {(() => {
+                const sdkMissing = (room.messages || []).some((m) => m.role === 'agent' && /OpenHands SDK is not installed/.test(m.content));
+                if (!sdkMissing || sdkHintDismissed) return null;
+                return (
+                  <div class="sdk-hint">
+                    <Icon name="info" size={15} class="icon" />
+                    <div class="sdk-hint-body">
+                      <b>OpenHands engine belum terpasang di Python environment.</b>
+                      <span>Jalankan di terminal, lalu restart Foreman:</span>
+                      <code>python3 -m pip install openhands-sdk openhands-tools</code>
+                    </div>
+                    <button type="button" class="icon-btn" onClick={() => setSdkHintDismissed(true)} aria-label="Dismiss">
+                      <Icon name="x" size={13} />
+                    </button>
+                  </div>
+                );
+              })()}
+
+              {runningRuns.length ? (
                 <div class="live-agents">
-                  <span class="live-label"><Icon name="activity" size={12} />Agents</span>
-                  {composeAgents.map(([name]) => {
-                    const isOn = runningRuns.some((run) => agentNameForRun(run) === name);
-                    const isPaused = !isOn && pausedRuns.some((run) => agentNameForRun(run) === name);
-                    const cls = isOn ? 'live-on' : isPaused ? 'live-dim' : 'live-idle';
+                  <span class="live-label"><Icon name="activity" size={12} />Working</span>
+                  {runningRuns.map((run) => {
+                    const lastEvent = (run.events || []).slice(-1)[0];
+                    const label = lastEvent?.type === 'tool' ? 'acting'
+                      : (lastEvent?.message || '').includes('engine:') ? 'reasoning'
+                        : 'working';
                     return (
-                      <span class={`live-agent ${cls}`} key={name}
-                        title={isOn ? `${esc(name)} is running now` : isPaused ? `${esc(name)} paused` : esc(name)}>
-                        <span class="live-dot" />{esc(name)}
+                      <span class="live-agent live-on" key={run.id}>
+                        <span class="live-dot" />{esc(agentNameForRun(run))}<em>{label}</em>
                       </span>
                     );
                   })}
@@ -479,11 +564,35 @@ export function RoomDetailHost({ room, state, notify, setModal, runTask, refresh
 
               <form class="chat-compose" onSubmit={send}>
                 <div class="compose-shell">
+                  {mentionAgent ? (
+                    <div class="compose-mention">
+                      <span class="mention-badge"><Icon name="bot" size={12} />@{esc(mentionAgent)}</span>
+                      <button type="button" class="icon-btn" title="Clear mention (defaults to main agent)" onClick={clearMention}>
+                        <Icon name="x" size={12} />
+                      </button>
+                    </div>
+                  ) : null}
+                  {mentionOpen && mentionCandidates.length ? (
+                    <div class="mention-suggest">
+                      {mentionCandidates.map(([name, teamName], i) => (
+                        <button type="button" class={`mention-option ${i === mentionIdx ? 'on' : ''}`}
+                          key={name}
+                          onMouseDown={(e) => e.preventDefault()}
+                          onClick={() => pickMention([name, teamName])}>
+                          <span class="agent-avatar green" style="border-radius:5px;width:20px;height:20px;font-size:9px">
+                            {esc(name).slice(0, 2).toUpperCase()}
+                          </span>
+                          <span class="mention-name">{esc(name)}</span>
+                          <span class="mention-team">{esc(teamName)}</span>
+                        </button>
+                      ))}
+                    </div>
+                  ) : null}
                   <textarea
                     rows="2"
-                    placeholder="Ask an agent… (mention @agent to route)"
+                    placeholder="Ask an agent… (type @ for suggestions)"
                     value={draft}
-                    onInput={(e) => setDraft(e.currentTarget.value)}
+                    onInput={onComposeInput}
                     onKeyDown={onComposeKeyDown}
                   />
                   <div class="compose-toolbar">
@@ -495,8 +604,8 @@ export function RoomDetailHost({ room, state, notify, setModal, runTask, refresh
                         <Icon name="shield-check" size={13} />Approval {settings.requireRunApproval ? 'on' : 'off'}
                       </button>
                     </div>
-                    <span class="compose-route" title="Messages run the room's main agent unless you mention @agent">
-                      <Icon name="bot" size={12} />@agent routes · default main
+                    <span class="compose-route" title="Messages run the room's main agent unless you pick an agent above or type @name">
+                      <Icon name="bot" size={12} />Default: main agent · @ untuk saran
                     </span>
                     <button class="send-btn" type="submit" disabled={sending} aria-label="Send message">
                       <Icon name="arrow-up" />

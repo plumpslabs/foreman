@@ -110,7 +110,7 @@ func (s *Store) CreateChatTask(roomID, content string) (Task, error) {
 }
 
 // AppendAgentReply records an agent's answer in the room chat.
-func (s *Store) AppendAgentReply(roomID, content string) error {
+func (s *Store) AppendAgentReply(roomID, agentName, content string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	content = strings.TrimSpace(content)
@@ -125,6 +125,7 @@ func (s *Store) AppendAgentReply(roomID, content string) error {
 			content = content[:16000]
 		}
 		message := NewChatMessage("agent", content)
+		message.AgentName = agentName
 		previous := s.state.Rooms[i].Messages
 		s.state.Rooms[i].Messages = append(previous, message)
 		if err := s.save(); err != nil {

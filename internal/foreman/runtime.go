@@ -161,7 +161,7 @@ func (rt *Runtime) execute(ctx context.Context, control *RunControl, run AgentRu
 	if err != nil {
 		final := finish(result.Status, resultOrError(result.Message, err), err, result.Tokens, result.CostUSD)
 		if task.Hidden && final.Result != "" {
-			_ = rt.store.AppendAgentReply(room.ID, final.Result)
+			_ = rt.store.AppendAgentReply(room.ID, task.AgentName, final.Result)
 		}
 		return final
 	}
@@ -177,7 +177,7 @@ func (rt *Runtime) execute(ctx context.Context, control *RunControl, run AgentRu
 	}
 	final := finish(result.Status, result.Message, nil, result.Tokens, result.CostUSD)
 	if task.Hidden && final.Result != "" {
-		_ = rt.store.AppendAgentReply(room.ID, final.Result)
+		_ = rt.store.AppendAgentReply(room.ID, task.AgentName, final.Result)
 	}
 	return final
 }

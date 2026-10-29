@@ -164,6 +164,7 @@ type ChatMessage struct {
 	ID        string    `json:"id"`
 	Role      string    `json:"role"`
 	Content   string    `json:"content"`
+	AgentName string    `json:"agentName,omitempty"`
 	CreatedAt time.Time `json:"createdAt"`
 }
 
