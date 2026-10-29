@@ -43,7 +43,15 @@ const { window } = dom;
 
 const calls = [];
 window.fetch = async (url, opts) => {
-  calls.push({ url: String(url), method: opts?.method || 'GET', body: opts?.body || null });
+  const u = String(url);
+  const method = opts?.method || 'GET';
+  calls.push({ url: u, method, body: opts?.body || null });
+  if (u.includes('/api/engine/status')) {
+    return { ok: true, status: 200, json: async () => ({ installed: false, pythonVersion: 'Python 3.12.16', pipAvailable: true }) };
+  }
+  if (u.includes('/api/engine/install')) {
+    return { ok: true, status: 200, json: async () => ({ ok: false, installed: false, error: 'Installasi gagal — lihat log di bawah.', hint: '', output: 'exit status 1\n...' }) };
+  }
   return { ok: true, status: 200, json: async () => workspace };
 };
 window.matchMedia = window.matchMedia || (() => ({ matches: false, addListener() {}, removeListener() {} }));

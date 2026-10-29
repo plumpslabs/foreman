@@ -57,6 +57,7 @@ const sdkImportProbe = "import openhands.sdk, openhands.tools; print('ok')"
 // Python. It returns true plus the probe output when the import succeeds.
 func (e *Engine) sdkInstalled() (bool, string) {
 	cmd := exec.Command(e.python, "-c", sdkImportProbe)
+	cmd.Env = append(os.Environ(), "OPENHANDS_SUPPRESS_BANNER=1")
 	var out bytes.Buffer
 	cmd.Stdout = &out
 	cmd.Stderr = &out
@@ -214,16 +215,47 @@ type Engine struct {
 // NewEngine resolves the Python interpreter used for the bridge. The
 // FOREMAN_PYTHON environment variable overrides auto-detection so users and
 // tests can pin a specific interpreter (e.g. a venv with openhands installed).
+// Without an override, discover a Python 3.12+ interpreter first (the
+// OpenHands SDK requires it), preferring Homebrew's python@3.12, then fall
+// back to any available python3.
 func NewEngine() *Engine {
 	if py := strings.TrimSpace(os.Getenv("FOREMAN_PYTHON")); py != "" {
 		return &Engine{python: py}
 	}
-	for _, candidate := range []string{"python3", "python"} {
-		if path, err := exec.LookPath(candidate); err == nil {
+	candidates := []string{
+		"python3.12",
+		"/opt/homebrew/opt/python@3.12/bin/python3.12",
+		"/usr/local/opt/python@3.12/bin/python3.12",
+		"python3",
+		"python",
+	}
+	var fallback string
+	for _, candidate := range candidates {
+		path, err := exec.LookPath(candidate)
+		if err != nil {
+			if _, serr := os.Stat(candidate); serr != nil {
+				continue
+			}
+			path = candidate
+		}
+		if fallback == "" {
+			fallback = path
+		}
+		if pythonAtLeast312(path) {
 			return &Engine{python: path}
 		}
 	}
+	if fallback != "" {
+		return &Engine{python: fallback}
+	}
 	return &Engine{}
+}
+
+// pythonAtLeast312 reports whether the interpreter is Python 3.12 or newer.
+func pythonAtLeast312(py string) bool {
+	cmd := exec.Command(py, "-c", "import sys; print(1 if sys.version_info >= (3,12) else 0)")
+	out, err := cmd.Output()
+	return err == nil && strings.Contains(string(out), "1")
 }
 
 // materializeBridge writes the embedded bridge script into a private temp

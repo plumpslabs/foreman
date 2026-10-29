@@ -229,6 +229,17 @@ export function RoomDetailHost({ room, state, notify, setModal, runTask, refresh
   const [engineReason, setEngineReason] = useState('');
   const [engineHint, setEngineHint] = useState('');
   const [engineLog, setEngineLog] = useState('');
+  const [engineStatus, setEngineStatus] = useState(null);
+
+  const loadEngineStatus = async () => {
+    try {
+      const d = await api('/api/engine/status');
+      setEngineStatus(d);
+    } catch {
+      setEngineStatus(null);
+    }
+  };
+  useEffect(() => { loadEngineStatus(); }, [room.id]);
 
   useEffect(() => { setInvited(room.teamIds || []); }, [room.id, room.teamIds.join(',')]);
 
@@ -330,6 +341,7 @@ export function RoomDetailHost({ room, state, notify, setModal, runTask, refresh
     setEngineLog('');
     try {
       const data = await api('/api/engine/install', { method: 'POST', body: '{}' });
+      setEngineStatus({ installed: data && data.installed, pythonVersion: data && data.pythonVersion, pipAvailable: data && data.pipAvailable });
       if (data && data.ok && data.installed) {
         notify('OpenHands engine installed — send a message again');
         setSdkHintDismissed(true);
@@ -597,42 +609,38 @@ export function RoomDetailHost({ room, state, notify, setModal, runTask, refresh
                 ))}
               </div>
 
-              {(() => {
-                const sdkMissing = (room.messages || []).some((m) => m.role === 'agent' && /OpenHands SDK is not installed/.test(m.content));
-                if (!sdkMissing || sdkHintDismissed) return null;
-                return (
-                  <div class="sdk-hint">
-                    <Icon name="info" size={15} class="icon" />
-                    <div class="sdk-hint-body">
-                      <b>OpenHands engine belum terpasang di Python environment.</b>
-                      {!engineReason ? (
-                        <>
-                          <span>Klik Install — Foreman menjalankan:</span>
-                          <code>python3 -m pip install openhands-sdk openhands-tools</code>
-                        </>
-                      ) : (
-                        <>
-                          <div class="sdk-hint-reason">{esc(engineReason)}</div>
-                          {engineHint ? <div class="sdk-hint-hint">{esc(engineHint)}</div> : null}
-                          {engineLog ? (
-                            <details class="sdk-log">
-                              <summary>Lihat log instalasi</summary>
-                              <pre>{esc(engineLog)}</pre>
-                            </details>
-                          ) : null}
-                        </>
-                      )}
-                    </div>
-                    <div class="sdk-hint-actions">
-                      <button type="button" class="btn small primary" disabled={engineBusy} onClick={installEngine}>
-                        {engineBusy ? <span class="btn-spin"><Icon name="refresh" size={13} /></span> : <Icon name="refresh" size={13} />}
-                        {engineBusy ? 'Installing…' : engineReason ? 'Coba lagi' : 'Install engine'}
-                      </button>
-                      <button type="button" class="btn small" onClick={() => setSdkHintDismissed(true)}>Hide</button>
-                    </div>
+              {engineStatus && !engineStatus.installed && !sdkHintDismissed ? (
+                <div class="sdk-hint">
+                  <Icon name="info" size={15} class="icon" />
+                  <div class="sdk-hint-body">
+                    <b>OpenHands engine belum terpasang di Python environment.</b>
+                    {!engineReason ? (
+                      <>
+                        <span>Klik Install — Foreman menjalankan:</span>
+                        <code>python3 -m pip install openhands-sdk openhands-tools</code>
+                      </>
+                    ) : (
+                      <>
+                        <div class="sdk-hint-reason">{esc(engineReason)}</div>
+                        {engineHint ? <div class="sdk-hint-hint">{esc(engineHint)}</div> : null}
+                        {engineLog ? (
+                          <details class="sdk-log">
+                            <summary>Lihat log instalasi</summary>
+                            <pre>{esc(engineLog)}</pre>
+                          </details>
+                        ) : null}
+                      </>
+                    )}
                   </div>
-                );
-              })()}
+                  <div class="sdk-hint-actions">
+                    <button type="button" class="btn small primary" disabled={engineBusy} onClick={installEngine}>
+                      {engineBusy ? <span class="btn-spin"><Icon name="refresh" size={13} /></span> : <Icon name="refresh" size={13} />}
+                      {engineBusy ? 'Installing…' : engineReason ? 'Coba lagi' : 'Install engine'}
+                    </button>
+                    <button type="button" class="btn small" onClick={() => setSdkHintDismissed(true)}>Hide</button>
+                  </div>
+                </div>
+              ) : null}
 
               {runningRuns.length ? (
                 <div class="live-agents">
