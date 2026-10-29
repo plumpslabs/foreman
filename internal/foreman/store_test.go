@@ -27,6 +27,27 @@ func TestTeamWithRunningRunsBlocksKick(t *testing.T) {
 	}
 }
 
+func TestDefaultTemplatesIncludeEveryday(t *testing.T) {
+	var found bool
+	for _, tmpl := range DefaultTemplates() {
+		if tmpl.ID != "everyday" {
+			continue
+		}
+		found = true
+		if tmpl.MainAgent != "Orion" || len(tmpl.Agents) != 4 {
+			t.Fatalf("everyday template malformed: main=%s agents=%d", tmpl.MainAgent, len(tmpl.Agents))
+		}
+		for _, a := range tmpl.Agents {
+			if len(NormalizeToolIDs(a.Tools)) == 0 {
+				t.Fatalf("everyday agent %q has no resolvable tools: %#v", a.Name, a.Tools)
+			}
+		}
+	}
+	if !found {
+		t.Fatal("DefaultTemplates missing 'everyday' template")
+	}
+}
+
 func TestOpenStoreSeedsAndPersistsWorkspace(t *testing.T) {
 	project := t.TempDir()
 	store, err := OpenStore(project)
@@ -34,7 +55,7 @@ func TestOpenStoreSeedsAndPersistsWorkspace(t *testing.T) {
 		t.Fatal(err)
 	}
 	state := store.Snapshot()
-	if state.SchemaVersion != SchemaVersion || len(state.Templates) != 4 {
+	if state.SchemaVersion != SchemaVersion || len(state.Templates) != 5 {
 		t.Fatalf("unexpected initial state: schema=%d templates=%d", state.SchemaVersion, len(state.Templates))
 	}
 	path := filepath.Join(project, ".foreman", "workspace.json")

@@ -402,8 +402,9 @@ img { max-width: 100%; display: block; }
 .rail-title .dots { background: transparent; border: 0; color: var(--muted); padding: 3px; border-radius: 5px; }
 .rail-title .dots:hover { background: #171b21; }
 .rail-title .dots svg { width: 14px; height: 14px; }
-.agent-line { display: flex; align-items: center; gap: 9px; padding: 8px; border-radius: 8px; margin-bottom: 4px; }
+.agent-line { display: flex; align-items: center; gap: 9px; padding: 8px; border-radius: 8px; margin-bottom: 4px; min-width: 0; }
 .agent-line:hover { background: #171b21; }
+.agent-line .agent-info { min-width: 0; flex: 1; }
 .agent-info { min-width: 0; flex: 1; }
 .agent-name { font-size: 12px; font-weight: 650; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .agent-role { font-size: 10px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
@@ -720,7 +721,7 @@ select { cursor: pointer; }
 
 /* Room team rail: member badges */
 .team-rail { margin-bottom: 10px; }
-.member-badges { display: flex; flex-wrap: wrap; gap: 4px; margin: 4px 0 0 44px; }
+.member-badges { display: flex; flex-wrap: wrap; gap: 4px; margin: 4px 0 2px 44px; }
 .member-badge {
   display: inline-flex; align-items: center; font-size: 10.5px; color: #c0c6d0;
   border: 1px solid var(--line); background: var(--panel2); border-radius: 999px; padding: 2px 8px;
