@@ -121,15 +121,29 @@ func (e *Engine) installSDK(ctx context.Context) (string, error) {
 	attempts := [][]string{
 		{"-m", "pip", "install", "--upgrade", "openhands-sdk", "openhands-tools"},
 	}
-	for i, args := range attempts {
+	retriedPEP668 := false
+	retriedUser := false
+	for len(attempts) > 0 {
+		args := attempts[0]
+		attempts = attempts[1:]
 		out, err := run(args...)
 		log.WriteString(fmt.Sprintf("$ %s %s\n%s\n", e.python, strings.Join(args, " "), strings.TrimSpace(out)))
 		if err == nil {
 			return log.String(), nil
 		}
-		if i == 0 && strings.Contains(strings.ToLower(out), "externally-managed") {
+		low := strings.ToLower(out)
+		if !retriedPEP668 && strings.Contains(low, "externally-managed") {
+			retriedPEP668 = true
 			attempts = append(attempts, []string{
 				"-m", "pip", "install", "--upgrade", "--break-system-packages",
+				"openhands-sdk", "openhands-tools",
+			})
+			continue
+		}
+		if !retriedUser && strings.Contains(low, "permission denied") {
+			retriedUser = true
+			attempts = append(attempts, []string{
+				"-m", "pip", "install", "--upgrade", "--user", "--break-system-packages",
 				"openhands-sdk", "openhands-tools",
 			})
 			continue
