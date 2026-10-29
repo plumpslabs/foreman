@@ -101,6 +101,9 @@ func (s *Store) migrate() (bool, error) {
 		if s.state.Rooms[i].Messages == nil {
 			s.state.Rooms[i].Messages = []ChatMessage{}
 		}
+		if s.state.Rooms[i].Questions == nil {
+			s.state.Rooms[i].Questions = []AgentQuestion{}
+		}
 	}
 	if s.state.Teams == nil {
 		s.state.Teams = []Team{}
@@ -268,7 +271,7 @@ func (s *Store) CreateRoom(name, goal string, teamIDs []string) (Room, error) {
 			delete(seen, id)
 		}
 	}
-	r := Room{ID: uuid.NewString(), Name: name, Goal: strings.TrimSpace(goal), TeamIDs: ids, Status: "planning", Messages: []ChatMessage{}, CreatedAt: time.Now().UTC()}
+	r := Room{ID: uuid.NewString(), Name: name, Goal: strings.TrimSpace(goal), TeamIDs: ids, Status: "planning", Messages: []ChatMessage{}, Questions: []AgentQuestion{}, CreatedAt: time.Now().UTC()}
 	previous := s.state.Rooms
 	s.state.Rooms = append([]Room{r}, previous...)
 	if err := s.save(); err != nil {
@@ -306,6 +309,114 @@ func (s *Store) AppendRoomMessage(roomID, role, content string) (ChatMessage, er
 		return message, nil
 	}
 	return ChatMessage{}, fmt.Errorf("unknown room id %q", roomID)
+}
+
+// UpdateRoomTeams replaces a room's invited teams. Unknown team IDs are
+// rejected and duplicates are collapsed.
+func (s *Store) UpdateRoomTeams(roomID string, teamIDs []string) (Room, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	valid := make(map[string]bool, len(s.state.Teams))
+	for _, team := range s.state.Teams {
+		valid[team.ID] = true
+	}
+	seen := make(map[string]bool, len(teamIDs))
+	ids := make([]string, 0, len(teamIDs))
+	for _, id := range teamIDs {
+		if !valid[id] {
+			return Room{}, fmt.Errorf("unknown team id %q", id)
+		}
+		if !seen[id] {
+			seen[id] = true
+			ids = append(ids, id)
+		}
+	}
+	for i := range s.state.Rooms {
+		if s.state.Rooms[i].ID != roomID {
+			continue
+		}
+		previous := s.state.Rooms[i].TeamIDs
+		s.state.Rooms[i].TeamIDs = ids
+		if err := s.save(); err != nil {
+			s.state.Rooms[i].TeamIDs = previous
+			return Room{}, err
+		}
+		return s.state.Rooms[i], nil
+	}
+	return Room{}, fmt.Errorf("unknown room id %q", roomID)
+}
+
+// AddRoomQuestion records a decision request from an agent.
+func (s *Store) AddRoomQuestion(roomID string, question AgentQuestion) (AgentQuestion, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	question.Prompt = strings.TrimSpace(question.Prompt)
+	if question.Prompt == "" {
+		return AgentQuestion{}, errors.New("question prompt is required")
+	}
+	if len(question.Prompt) > 4000 {
+		return AgentQuestion{}, errors.New("question prompt exceeds 4000 characters")
+	}
+	if question.ID == "" {
+		question.ID = uuid.NewString()
+	}
+	if question.CreatedAt.IsZero() {
+		question.CreatedAt = time.Now().UTC()
+	}
+	for i := range s.state.Rooms {
+		if s.state.Rooms[i].ID != roomID {
+			continue
+		}
+		previous := s.state.Rooms[i].Questions
+		s.state.Rooms[i].Questions = append([]AgentQuestion{question}, previous...)
+		if err := s.save(); err != nil {
+			s.state.Rooms[i].Questions = previous
+			return AgentQuestion{}, err
+		}
+		return question, nil
+	}
+	return AgentQuestion{}, fmt.Errorf("unknown room id %q", roomID)
+}
+
+// AnswerRoomQuestion stores a human answer and appends it to the room chat so
+// the decision stays in the transcript.
+func (s *Store) AnswerRoomQuestion(roomID, questionID, answer string) (AgentQuestion, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	answer = strings.TrimSpace(answer)
+	if answer == "" {
+		return AgentQuestion{}, errors.New("answer cannot be empty")
+	}
+	if len(answer) > 8000 {
+		return AgentQuestion{}, errors.New("answer exceeds 8000 characters")
+	}
+	for i := range s.state.Rooms {
+		if s.state.Rooms[i].ID != roomID {
+			continue
+		}
+		room := &s.state.Rooms[i]
+		for j := range room.Questions {
+			if room.Questions[j].ID != questionID {
+				continue
+			}
+			if room.Questions[j].Answer != "" {
+				return AgentQuestion{}, errors.New("question has already been answered")
+			}
+			previousQuestions := append([]AgentQuestion(nil), room.Questions...)
+			previousMessages := room.Messages
+			room.Questions[j].Answer = answer
+			room.Questions[j].AnsweredAt = time.Now().UTC()
+			room.Messages = append(previousMessages, NewChatMessage("user", answer))
+			if err := s.save(); err != nil {
+				room.Questions = previousQuestions
+				room.Messages = previousMessages
+				return AgentQuestion{}, err
+			}
+			return room.Questions[j], nil
+		}
+		return AgentQuestion{}, fmt.Errorf("unknown question id %q", questionID)
+	}
+	return AgentQuestion{}, fmt.Errorf("unknown room id %q", roomID)
 }
 
 func (s *Store) ImportTeam(templateID, name string) (Team, error) {

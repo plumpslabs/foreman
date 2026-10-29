@@ -135,7 +135,57 @@ func (rt *Runtime) execute(ctx context.Context, run AgentRun, task Task, room Ro
 	if result.Message == "" {
 		result.Message = "Agent run finished."
 	}
+	if result.Status != "failed" {
+		for _, question := range parseAgentQuestions(result.Message) {
+			question.ID = uuid.NewString()
+			question.CreatedAt = time.Now().UTC()
+			_, _ = rt.store.AddRoomQuestion(room.ID, question)
+		}
+	}
 	return finish(result.Status, result.Message, nil, result.Tokens, result.CostUSD)
+}
+
+// parseAgentQuestions extracts fenced question blocks from an agent reply:
+//
+//	```question
+//	Which approach should I take?
+//	- Option A
+//	- Option B
+//	```
+func parseAgentQuestions(message string) []AgentQuestion {
+	var questions []AgentQuestion
+	rest := message
+	for len(questions) < 5 {
+		start := strings.Index(rest, "```question")
+		if start < 0 {
+			break
+		}
+		body := rest[start+len("```question"):]
+		end := strings.Index(body, "```")
+		if end < 0 {
+			break
+		}
+		block := strings.TrimSpace(body[:end])
+		rest = body[end+3:]
+		var promptParts []string
+		var options []string
+		for _, line := range strings.Split(block, "\n") {
+			trimmed := strings.TrimSpace(line)
+			if strings.HasPrefix(trimmed, "- ") || strings.HasPrefix(trimmed, "* ") {
+				options = append(options, strings.TrimSpace(trimmed[2:]))
+				continue
+			}
+			if trimmed != "" {
+				promptParts = append(promptParts, trimmed)
+			}
+		}
+		prompt := strings.Join(promptParts, " ")
+		if prompt == "" {
+			continue
+		}
+		questions = append(questions, AgentQuestion{Prompt: prompt, Options: options})
+	}
+	return questions
 }
 
 func buildRunPrompt(room Room, task Task, team *Team) string {
@@ -150,7 +200,9 @@ func buildRunPrompt(room Room, task Task, team *Team) string {
 			strings.TrimSpace(strings.Join([]string{team.Purpose, team.Instructions, agentInstructions(*team, task.AgentName)}, "\n\n")))
 	}
 	sections = append(sections,
-		"Work only on this task. Keep changes within the active project workspace. Report what changed and what you verified.")
+		"Work only on this task. Keep changes within the active project workspace. Report what changed and what you verified.",
+		"Need a decision from the human before continuing? End your reply with a fenced block:\n\n```question\n<the question>\n- option one\n- option two\n```\n\nThen stop and wait for the answer.",
+	)
 	return strings.Join(sections, "\n\n")
 }
 

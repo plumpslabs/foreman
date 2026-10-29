@@ -2,6 +2,7 @@ import { useEffect, useState } from 'preact/hooks';
 import { api } from './api.js';
 import { Icon } from './icons.jsx';
 import { Markdown } from './markdown.jsx';
+import { DiffView, parseDiff } from './diff.jsx';
 
 const esc = (s) => String(s ?? '');
 const timeAgo = (iso) => {
@@ -42,11 +43,21 @@ function StatCard({ label, icon, num, sub }) {
   );
 }
 
-function RoomRow({ room, onOpen }) {
+function roomRuntimeStatus(room, runs) {
+  const roomRuns = (runs || []).filter((run) => run.roomId === room.id);
+  const active = roomRuns.find((run) => run.status === 'running');
+  if (active) return 'running';
+  const last = roomRuns[0];
+  if (last && ['failed', 'timed_out', 'cancelled'].includes(last.status)) return 'paused';
+  return 'idle';
+}
+
+function RoomRow({ room, onOpen, runs }) {
   const statusTag = {
     planning: 'muted', running: 'blue', review: 'orange', cancelled: 'red', completed: 'green',
   }[room.status] || 'muted';
   const teamCount = (room.teamIds || []).length;
+  const runtime = roomRuntimeStatus(room, runs);
   return (
     <article
       class="room-row clickable"
@@ -61,10 +72,15 @@ function RoomRow({ room, onOpen }) {
         <div class="room-title">{esc(room.name)}</div>
         <div class="room-sub">{esc(room.goal || 'No goal provided.')}</div>
         <div class="room-foot">
+          <span class={`runtime-dot ${runtime}`} />
+          <span class={`runtime-label ${runtime}`}>
+            {runtime === 'running' ? 'Running' : runtime === 'paused' ? 'Paused' : 'Idle'}
+          </span>
           <span class={`tag ${statusTag}`}>{esc(room.status)}</span>
           <span class="meta-text">{teamCount} team{teamCount === 1 ? '' : 's'} · {timeAgo(room.createdAt)}</span>
         </div>
       </div>
+      <span class="row-action"><Icon name="chevron-right" size={14} />Open</span>
     </article>
   );
 }
@@ -137,7 +153,7 @@ export function HomePage({ state, openRoom, setModal, onTeamCreate, navigate }) 
       </div>
       <div class="list">
         {rooms.length
-          ? rooms.map((r) => <RoomRow key={r.id} room={r} onOpen={openRoom} />)
+          ? rooms.map((r) => <RoomRow key={r.id} room={r} onOpen={openRoom} runs={state.runs} />)
           : <div class="empty">No rooms yet. Create a room to define a goal and invite teams.</div>}
       </div>
       <div class="section-head">
@@ -167,7 +183,7 @@ export function RoomsPage({ state, openRoom, setModal }) {
       </div>
       <div class="list">
         {rooms.length
-          ? rooms.map((r) => <RoomRow key={r.id} room={r} onOpen={openRoom} />)
+          ? rooms.map((r) => <RoomRow key={r.id} room={r} onOpen={openRoom} runs={state.runs} />)
           : <div class="empty">No rooms yet. Create one to define a goal and invite teams.</div>}
       </div>
       <div class="panel" style="margin-top:24px">
@@ -180,20 +196,28 @@ export function RoomsPage({ state, openRoom, setModal }) {
   );
 }
 
-export function RoomDetailHost({ room, state, notify, setModal, runTask, refresh, onBack }) {
+export function RoomDetailHost({ room, state, notify, setModal, runTask, refresh, onBack, cancelRun }) {
   const [tab, setTab] = useState('chat');
   const [draft, setDraft] = useState('');
   const [sending, setSending] = useState(false);
   const [activeAgent, setActiveAgent] = useState(room.mainAgent || 'Atlas');
   const [inviteOpen, setInviteOpen] = useState(false);
   const [invited, setInvited] = useState(room.teamIds || []);
+  const [answerDraft, setAnswerDraft] = useState({});
 
-  useEffect(() => { setInvited(room.teamIds || []); }, [room.id]);
+  useEffect(() => { setInvited(room.teamIds || []); }, [room.id, room.teamIds.join(',')]);
   useEffect(() => { setActiveAgent(room.mainAgent || 'Atlas'); }, [room.id]);
 
-  const { teams: allTeams, tasks, settings } = state;
+  const { teams: allTeams, tasks, skills, runs, settings } = state;
   const teams = allTeams.filter((t) => room.teamIds.includes(t.id));
   const roomTasks = tasks.filter((t) => t.roomId === room.id);
+  const roomRuns = (runs || []).filter((r) => r.roomId === room.id);
+  const activeRun = roomRuns.find((r) => r.status === 'running');
+  const lastRun = roomRuns[0];
+  const runtime = activeRun ? 'running'
+    : lastRun && ['failed', 'timed_out', 'cancelled'].includes(lastRun.status) ? 'paused'
+      : 'idle';
+  const pendingQuestions = (room.questions || []).filter((q) => !q.answer);
 
   const send = async (e) => {
     e.preventDefault();
@@ -201,9 +225,10 @@ export function RoomDetailHost({ room, state, notify, setModal, runTask, refresh
     if (!content) return;
     setSending(true);
     try {
+      const routed = activeAgent && activeAgent !== room.mainAgent ? `@${activeAgent} ${content}` : content;
       await api(`/api/rooms/${encodeURIComponent(room.id)}/messages`, {
         method: 'POST',
-        body: JSON.stringify({ role: 'user', content }),
+        body: JSON.stringify({ role: 'user', content: routed }),
       });
       setDraft('');
       await refresh();
@@ -214,9 +239,50 @@ export function RoomDetailHost({ room, state, notify, setModal, runTask, refresh
     }
   };
 
+  const answerQuestion = async (question, value) => {
+    const answer = String(value || '').trim();
+    if (!answer) return;
+    try {
+      await api(`/api/rooms/${encodeURIComponent(room.id)}/questions/${encodeURIComponent(question.id)}`, {
+        method: 'PUT',
+        body: JSON.stringify({ answer }),
+      });
+      setAnswerDraft((prev) => ({ ...prev, [question.id]: '' }));
+      await refresh();
+      notify('Answer sent to the room');
+    } catch (error) {
+      notify(error.message);
+    }
+  };
+
+  const saveTeams = async (ids) => {
+    try {
+      await api(`/api/rooms/${encodeURIComponent(room.id)}/teams`, {
+        method: 'PUT',
+        body: JSON.stringify({ teamIds: ids }),
+      });
+      await refresh();
+      notify('Room participants updated');
+      return true;
+    } catch (error) {
+      notify(error.message);
+      return false;
+    }
+  };
+
+  const kickTeam = async (teamId) => {
+    const name = allTeams.find((t) => t.id === teamId)?.name || 'team';
+    if (!confirm(`Remove ${name} from this room?`)) return;
+    await saveTeams((room.teamIds || []).filter((id) => id !== teamId));
+  };
+
   const done = roomTasks.filter((t) => t.status === 'done').length;
   const total = roomTasks.length;
   const pct = total ? Math.round((done / total) * 100) : 0;
+  const diffText = roomRuns
+    .map((run) => `${run.result || ''}\n${(run.events || []).map((e) => e.message).join('\n')}`)
+    .join('\n');
+  const diffFiles = parseDiff(diffText);
 
   const toggleInvite = (id) => setInvited((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
 
@@ -230,16 +296,37 @@ export function RoomDetailHost({ room, state, notify, setModal, runTask, refresh
               <div class="room-title-large">{esc(room.name)}</div>
               <div class="room-desc-small">{esc(room.goal || 'No goal provided.')}</div>
             </div>
-            <button class="btn subtle" onClick={() => setInviteOpen(true)}><Icon name="user-plus" /><span class="hide-sm">Invite</span></button>
+            <div class={`runtime-pill ${runtime}`}>
+              <span class={`runtime-dot ${runtime}`} />
+              {runtime === 'running' ? 'Running' : runtime === 'paused' ? 'Paused' : 'Idle'}
+            </div>
+            {activeRun ? (
+              <button class="btn" onClick={() => cancelRun(activeRun.id)}>
+                <Icon name="pause" size={14} />Pause run
+              </button>
+            ) : lastRun && ['failed', 'timed_out', 'cancelled'].includes(lastRun.status) ? (
+              <button class="btn primary" onClick={() => runTask(lastRun.taskId)}>
+                <Icon name="activity" size={14} />Continue
+              </button>
+            ) : null}
+            <button class="btn subtle" onClick={() => setInviteOpen(true)}>
+              <Icon name="user-plus" size={14} /><span class="hide-sm">Invite</span>
+            </button>
           </div>
 
           <div class="room-tabs">
-            <button class={`room-tab ${tab === 'chat' ? 'active' : ''}`} onClick={() => setTab('chat')}><Icon name="message-square" />Chat</button>
+            <button class={`room-tab ${tab === 'chat' ? 'active' : ''}`} onClick={() => setTab('chat')}>
+              <Icon name="message-square" />Chat
+            </button>
             <button class={`room-tab ${tab === 'board' ? 'active' : ''}`} onClick={() => setTab('board')}>
               <Icon name="kanban" />Kanban{total ? <span class="tag" style="margin-left:2px">{total}</span> : null}
             </button>
-            <button class={`room-tab ${tab === 'plan' ? 'active' : ''}`} onClick={() => setTab('plan')}><Icon name="git-branch" />Plan</button>
-            <button class={`room-tab ${tab === 'changes' ? 'active' : ''}`} onClick={() => setTab('changes')}><Icon name="git-diff" />Changes</button>
+            <button class={`room-tab ${tab === 'plan' ? 'active' : ''}`} onClick={() => setTab('plan')}>
+              <Icon name="git-branch" />Plan
+            </button>
+            <button class={`room-tab ${tab === 'changes' ? 'active' : ''}`} onClick={() => setTab('changes')}>
+              <Icon name="git-diff" />Changes{diffFiles.length ? <span class="tag" style="margin-left:2px">{diffFiles.length}</span> : null}
+            </button>
           </div>
 
           {tab === 'chat' && (
@@ -254,7 +341,7 @@ export function RoomDetailHost({ room, state, notify, setModal, runTask, refresh
                       <div class="msg-content">
                         <div class="msg-meta">
                           <strong>{esc(m.role === 'user' ? 'You' : (room.mainAgent || 'Foreman'))}</strong>
-                          <span>{m.role === 'user' ? 'You' : `${room.mainAgent || 'Foreman'} · Main agent`} · {timeAgo(m.createdAt)}</span>
+                          <span>{m.role === 'user' ? 'You' : 'Main agent'} · {timeAgo(m.createdAt)}</span>
                         </div>
                         <div class={`bubble ${m.role === 'user' ? 'user-bubble' : ''}`}>
                           {m.role === 'user' ? esc(m.content) : <Markdown text={m.content} />}
@@ -267,34 +354,67 @@ export function RoomDetailHost({ room, state, notify, setModal, runTask, refresh
                       No messages yet. Describe the goal below to start this room's conversation.
                     </div>
                   )}
+
+                {pendingQuestions.map((question) => (
+                  <div class="question-card">
+                    <div class="question-head">
+                      <Icon name="sparkles" size={15} />
+                      Agent needs a decision
+                    </div>
+                    <div class="question-prompt">{esc(question.prompt)}</div>
+                    {question.options.length ? (
+                      <div class="question-options">
+                        {question.options.map((option) => (
+                          <button class="btn" onClick={() => answerQuestion(question, option)}>{esc(option)}</button>
+                        ))}
+                      </div>
+                    ) : null}
+                    <form class="question-custom" onSubmit={(e) => {
+                      e.preventDefault();
+                      answerQuestion(question, answerDraft[question.id]);
+                    }}>
+                      <input
+                        placeholder="Or type your own answer…"
+                        value={answerDraft[question.id] || ''}
+                        onInput={(e) => setAnswerDraft((prev) => ({ ...prev, [question.id]: e.currentTarget.value }))}
+                      />
+                      <button class="btn primary" type="submit"><Icon name="arrow-up" size={14} />Send</button>
+                    </form>
+                  </div>
+                ))}
               </div>
+
               <form class="chat-compose" onSubmit={send}>
-                <div class="compose-tools">
-                  <span class="compose-hint">Message the room · work is saved locally</span>
-                  <button class="btn subtle" type="button" onClick={() => setModal({ kind: 'attach' })}>
-                    <Icon name="paperclip" size={14} />Attach context
-                  </button>
-                </div>
-                <div class="compose-box">
+                <div class="compose-shell">
                   <textarea
                     rows="2"
-                    placeholder="Describe a task for this room…"
+                    placeholder="Describe a task or ask for a decision…"
                     value={draft}
                     onInput={(e) => setDraft(e.currentTarget.value)}
                   />
-                  <button class="send-btn" type="submit" disabled={sending} aria-label="Send message"><Icon name="arrow-up" /></button>
+                  <div class="compose-toolbar">
+                    <div class="compose-selects">
+                      {teams.length ? (
+                        <select class="mini-select" value={activeAgent}
+                          onChange={(e) => setActiveAgent(e.currentTarget.value)}>
+                          {teams.map((t) => <option value={esc(t.mainAgent)}>{esc(t.mainAgent)} · {esc(t.name)}</option>)}
+                        </select>
+                      ) : (
+                        <span class="mini-select muted">No team invited</span>
+                      )}
+                      <button class="mini-select" type="button" onClick={() => setModal({ kind: 'attach' })}>
+                        <Icon name="paperclip" size={13} />Attach
+                      </button>
+                      <button class="mini-select" type="button" onClick={() => setModal({ kind: 'approval', required: settings.requireRunApproval })}>
+                        <Icon name="shield-check" size={13} />Approval {settings.requireRunApproval ? 'on' : 'off'}
+                      </button>
+                    </div>
+                    <button class="send-btn" type="submit" disabled={sending} aria-label="Send message">
+                      <Icon name="arrow-up" />
+                    </button>
+                  </div>
                 </div>
-                <div class="compose-selects">
-                  <button class="mini-select" type="button" onClick={() => setModal({ kind: 'route', agents: teams, current: activeAgent, onPick: setActiveAgent })}>
-                    <Icon name="bot" size={13} /><span>{esc(activeAgent)}</span><Icon name="chevron-down" size={13} />
-                  </button>
-                  <button class="mini-select" type="button" onClick={() => setModal({ kind: 'effort', current: settings.defaultEffort })}>
-                    <Icon name="gauge" size={13} /><span>Effort: {esc(settings.defaultEffort)}</span><Icon name="chevron-down" size={13} />
-                  </button>
-                  <button class="mini-select" type="button" onClick={() => setModal({ kind: 'approval', required: settings.requireRunApproval })}>
-                    <Icon name="shield-check" size={13} /><span>Approval {settings.requireRunApproval ? 'on' : 'off'}</span>
-                  </button>
-                </div>
+                <div class="compose-foot">Messages are saved locally. A task only runs when you start it.</div>
               </form>
             </div>
           )}
@@ -307,7 +427,7 @@ export function RoomDetailHost({ room, state, notify, setModal, runTask, refresh
 
           {tab === 'plan' && (
             <div class="room-view active">
-              <div style="padding:24px;max-width:900px;width:100%;margin:0 auto">
+              <div class="tab-scroll">
                 <div class="section-title">Task graph</div>
                 <div class="section-note" style="margin-top:5px">
                   Dependencies determine when workers can be spawned. Parallel work is scheduled only when safe.
@@ -344,28 +464,20 @@ export function RoomDetailHost({ room, state, notify, setModal, runTask, refresh
 
           {tab === 'changes' && (
             <div class="room-view active">
-              <div style="padding:24px;max-width:900px;width:100%;margin:0 auto">
-                <div class="section-title">Proposed changes</div>
+              <div class="tab-scroll">
+                <div class="section-title">Code changes</div>
                 <div class="section-note" style="margin-top:5px">
-                  A review surface for agent output. Local room state only until a run produces artifacts.
+                  Unified diffs from this room's runs. Expanded by default; collapse a file to focus.
                 </div>
-                <div class="changes-list" style="margin-top:16px">
-                  <div class="changes-row">
-                    <div class="changes-symbol"><Icon name="file-code" /></div>
-                    <div class="changes-main">
-                      <div class="changes-title">No change sets yet</div>
-                      <div class="changes-sub">Run a task to produce a reviewable change.</div>
+                {diffFiles.length
+                  ? <div style="margin-top:16px"><DiffView text={diffText} /></div>
+                  : (
+                    <div class="empty" style="margin-top:16px">
+                      No diff yet. When an agent returns a unified diff, it appears here with red/green lines.
                     </div>
-                    <span class="tag orange">Pending</span>
-                  </div>
-                  <div class="changes-row">
-                    <div class="changes-symbol"><Icon name="shield-check" /></div>
-                    <div class="changes-main">
-                      <div class="changes-title">Review gate</div>
-                      <div class="changes-sub">{settings.requireRunApproval ? 'Changes require human approval before merge.' : 'Approval is currently disabled by policy.'}</div>
-                    </div>
-                    <span class={`tag ${settings.requireRunApproval ? 'green' : 'muted'}`}>{settings.requireRunApproval ? 'Enabled' : 'Off'}</span>
-                  </div>
+                  )}
+                <div class="changes-meta">
+                  {roomRuns.length ? `${roomRuns.length} run${roomRuns.length === 1 ? '' : 's'} in this room` : 'No runs yet'}
                 </div>
               </div>
             </div>
@@ -383,16 +495,40 @@ export function RoomDetailHost({ room, state, notify, setModal, runTask, refresh
                 <div class="agent-line">
                   <div class="agent-avatar green" style="border-radius:6px">{avatarInitials(t.mainAgent)}</div>
                   <div class="agent-info">
-                    <div class="agent-name">{esc(t.mainAgent)}</div>
-                    <div class="agent-role">{esc(t.name)}</div>
+                    <div class="agent-name">{esc(t.name)}</div>
+                    <div class="agent-role">Main: {esc(t.mainAgent)}</div>
                   </div>
-                  <span class="agent-status running"><span class="status-dot" />Ready</span>
+                  <button class="icon-btn" title="Remove team" onClick={() => kickTeam(t.id)}>
+                    <Icon name="x" size={13} />
+                  </button>
                 </div>
               ))
               : <div class="muted" style="font-size:11px;padding:4px 0">No teams invited yet.</div>}
             <button class="btn subtle" style="width:100%;margin-top:8px" onClick={() => setInviteOpen(true)}>
               <Icon name="users" size={14} />Manage participants
             </button>
+          </div>
+
+          <div class="rail-section">
+            <div class="rail-title">Run status</div>
+            <div class={`rail-status ${runtime}`}>
+              <span class={`runtime-dot ${runtime}`} />
+              <span>{runtime === 'running' ? 'Agent running' : runtime === 'paused' ? 'Paused after a failure' : 'No active run'}</span>
+            </div>
+            {activeRun ? (
+              <button class="btn" style="width:100%;margin-top:8px" onClick={() => cancelRun(activeRun.id)}>
+                <Icon name="pause" size={13} />Pause run
+              </button>
+            ) : lastRun && ['failed', 'timed_out', 'cancelled'].includes(lastRun.status) ? (
+              <button class="btn primary" style="width:100%;margin-top:8px" onClick={() => runTask(lastRun.taskId)}>
+                <Icon name="activity" size={13} />Continue where it stopped
+              </button>
+            ) : null}
+            {lastRun && (
+              <div class="section-note" style="margin-top:8px">
+                Last: {esc(lastRun.status)} · {lastRun.tokens || 0} tokens
+              </div>
+            )}
           </div>
 
           <div class="rail-section">
@@ -415,10 +551,13 @@ export function RoomDetailHost({ room, state, notify, setModal, runTask, refresh
           <div class="rail-section">
             <div class="rail-title">Live activity</div>
             <div class="activity-feed">
-              <b>Room</b> created<br />
-              <span style="color:var(--muted)">{timeAgo(room.createdAt)}</span><br /><br />
-              <b>Policy</b> {settings.effortMode} effort · max {settings.maxConcurrentRuns} run{settings.maxConcurrentRuns === 1 ? '' : 's'}<br />
-              <span style="color:var(--muted)">Guardrails from Settings</span>
+              {roomRuns.slice(0, 3).map((run) => (
+                <div class="activity-row">
+                  <b>{esc(run.status)}</b>
+                  <span>{timeAgo(run.startedAt)}</span>
+                </div>
+              ))}
+              {!roomRuns.length && <span style="color:var(--muted)">No runs yet.</span>}
             </div>
           </div>
 
@@ -440,28 +579,34 @@ export function RoomDetailHost({ room, state, notify, setModal, runTask, refresh
         <div class="modal-backdrop open" onClick={(e) => { if (e.target === e.currentTarget) setInviteOpen(false); }}>
           <div class="modal">
             <div class="modal-head">
-              <h3>Invite teams to room</h3>
+              <h3>Manage room participants</h3>
               <button class="icon-btn" onClick={() => setInviteOpen(false)} aria-label="Close"><Icon name="x" /></button>
             </div>
             <div class="modal-body">
               <div class="field">
-                <label>Select teams to invite</label>
-                <div class="choice-grid">
+                <label>Teams in this room</label>
+                <div class="team-picker">
                   {allTeams.length
                     ? allTeams.map((t) => (
-                      <label class={`choice ${invited.includes(t.id) ? 'selected' : ''}`}>
+                      <label class={`team-pick ${invited.includes(t.id) ? 'on' : ''}`}>
                         <input type="checkbox" checked={invited.includes(t.id)} onChange={() => toggleInvite(t.id)} />
-                        <span><b>{esc(t.name)}</b><br /><small>{esc(t.purpose)}</small></span>
+                        <span class="team-pick-body">
+                          <span class="team-pick-name">{esc(t.name)}</span>
+                          <span class="team-pick-desc">Main: {esc(t.mainAgent)} · {esc(t.purpose)}</span>
+                        </span>
                       </label>
                     ))
-                    : <span class="muted">No teams yet. Import a template first.</span>}
+                    : <div class="empty" style="padding:16px">No teams yet. Create one on the Teams page.</div>}
                 </div>
               </div>
-              <small>Inviting a team does not spawn every agent. The scheduler starts only the workers needed for assigned tasks.</small>
+              <div class="notice">Inviting a team does not start agents. Tasks decide what runs.</div>
             </div>
             <div class="modal-foot">
               <button class="btn" onClick={() => setInviteOpen(false)}>Cancel</button>
-              <button class="btn primary" onClick={() => { notify('Room participants updated'); setInviteOpen(false); }}>Save participants</button>
+              <button class="btn primary" onClick={async () => {
+                const ok = await saveTeams(invited);
+                if (ok) setInviteOpen(false);
+              }}>Save participants</button>
             </div>
           </div>
         </div>

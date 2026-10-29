@@ -23,6 +23,42 @@ const PARENT_PAGE = {
   'skill-detail': 'skills',
 };
 
+const routeToHash = (page, id = '') => {
+  const enc = (value) => encodeURIComponent(value);
+  switch (page) {
+    case 'home': return '#/';
+    case 'room-detail': return `#/rooms/${enc(id)}`;
+    case 'team-create': return '#/teams/new';
+    case 'team-detail': return `#/teams/${enc(id)}`;
+    case 'agent-detail': return id ? `#/agents/${enc(id)}` : '#/agents/new';
+    case 'skill-detail': return id ? `#/skills/${enc(id)}` : '#/skills/new';
+    default: return `#/${page}`;
+  }
+};
+
+const hashToRoute = (hash) => {
+  const parts = String(hash || '').replace(/^#\/?/, '').split('/').filter(Boolean);
+  if (!parts.length) return { page: 'home', id: '' };
+  const [head, id] = parts;
+  const decode = (value) => { try { return decodeURIComponent(value); } catch { return value; } };
+  switch (head) {
+    case 'rooms':
+      return id ? { page: 'room-detail', id: decode(id) } : { page: 'rooms', id: '' };
+    case 'teams':
+      if (id === 'new') return { page: 'team-create', id: '' };
+      return id ? { page: 'team-detail', id: decode(id) } : { page: 'teams', id: '' };
+    case 'agents':
+      if (id === 'new') return { page: 'agent-detail', id: '' };
+      return id ? { page: 'agent-detail', id: decode(id) } : { page: 'agents', id: '' };
+    case 'skills':
+      if (id === 'new') return { page: 'skill-detail', id: '' };
+      return id ? { page: 'skill-detail', id: decode(id) } : { page: 'skills', id: '' };
+    case 'runs': return { page: 'runs', id: '' };
+    case 'settings': return { page: 'settings', id: '' };
+    default: return { page: 'home', id: '' };
+  }
+};
+
 const emptyState = {
   projectPath: '',
   rooms: [],
@@ -37,9 +73,10 @@ const emptyState = {
 };
 
 export function App() {
+  const initial = hashToRoute(typeof window !== 'undefined' ? window.location.hash : '');
   const [state, setState] = useState(null);
-  const [page, setPage] = useState('home');
-  const [selectedId, setSelectedId] = useState('');
+  const [page, setPage] = useState(initial.page);
+  const [selectedId, setSelectedId] = useState(initial.id);
   const [modal, setModal] = useState(null);
   const [toast, setToast] = useState('');
   const toastTimer = useRef(0);
@@ -61,21 +98,39 @@ export function App() {
 
   useEffect(() => { refresh(); }, []);
 
+  useEffect(() => {
+    const apply = () => {
+      const next = hashToRoute(window.location.hash);
+      setPage(next.page);
+      setSelectedId(next.id);
+      setSidebarOpen(false);
+    };
+    apply();
+    window.addEventListener('hashchange', apply);
+    return () => window.removeEventListener('hashchange', apply);
+  }, []);
+
   const current = state || emptyState;
   const settings = current.settings || emptyState.settings;
   const themeClass = settings.theme === 'light' ? 'theme-light' : '';
 
-  const navigate = (next) => {
-    setSelectedId('');
-    setPage(next);
+  const go = (nextPage, id = '') => {
+    const hash = routeToHash(nextPage, id);
+    if (window.location.hash === hash) {
+      setPage(nextPage);
+      setSelectedId(id);
+    } else {
+      window.location.hash = hash;
+    }
     setSidebarOpen(false);
   };
 
-  const openRoom = (id) => { setSelectedId(id); setPage('room-detail'); };
-  const openAgent = (id) => { setSelectedId(id); setPage('agent-detail'); };
-  const openTeam = (id) => { setSelectedId(id); setPage('team-detail'); };
-  const openSkill = (id) => { setSelectedId(id); setPage('skill-detail'); };
-  const openTeamCreate = () => { setSelectedId(''); setPage('team-create'); };
+  const navigate = (next) => go(next);
+  const openRoom = (id) => go('room-detail', id);
+  const openAgent = (id) => go('agent-detail', id);
+  const openTeam = (id) => go('team-detail', id);
+  const openSkill = (id) => go('skill-detail', id);
+  const openTeamCreate = () => go('team-create');
 
   const runTask = async (taskId, button) => {
     if (button) button.disabled = true;
@@ -226,9 +281,6 @@ export function App() {
           </div>
           <div class="top-actions">
             <div class="status-pill"><span class="status-dot" />Runtime ready</div>
-            <button class="icon-btn" aria-label="Search"><Icon name="search" /></button>
-            <button class="icon-btn" aria-label="Notifications"><Icon name="bell" /></button>
-            <div class="avatar">MW</div>
           </div>
         </header>
         <div class={`content ${['room-detail', 'agent-detail', 'team-detail', 'team-create', 'skill-detail'].includes(page) ? 'flush' : ''}`}>

@@ -324,3 +324,64 @@ func TestProviderLifecycleAndCredentialRetention(t *testing.T) {
 		t.Fatal("deleting an unknown provider must fail")
 	}
 }
+
+func TestRoomTeamUpdatesAndQuestions(t *testing.T) {
+	store, err := OpenStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	team, err := store.ImportTeam("quick-fix", "Focused Team")
+	if err != nil {
+		t.Fatal(err)
+	}
+	room, err := store.CreateRoom("Interactive", "goal", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	updated, err := store.UpdateRoomTeams(room.ID, []string{team.ID, team.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(updated.TeamIDs) != 1 || updated.TeamIDs[0] != team.ID {
+		t.Fatalf("room team ids = %#v", updated.TeamIDs)
+	}
+	if _, err := store.UpdateRoomTeams(room.ID, []string{"missing"}); err == nil {
+		t.Fatal("unknown team must be rejected")
+	}
+
+	question, err := store.AddRoomQuestion(room.ID, AgentQuestion{Prompt: "Proceed with the refactor?", Options: []string{"Yes", "No"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if question.ID == "" || len(question.Options) != 2 {
+		t.Fatalf("unexpected question: %#v", question)
+	}
+	answered, err := store.AnswerRoomQuestion(room.ID, question.ID, "Yes")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if answered.Answer != "Yes" || answered.AnsweredAt.IsZero() {
+		t.Fatalf("answer not stored: %#v", answered)
+	}
+	state := store.Snapshot()
+	if len(state.Rooms[0].Messages) != 1 || state.Rooms[0].Messages[0].Content != "Yes" {
+		t.Fatalf("answer was not appended to chat: %#v", state.Rooms[0].Messages)
+	}
+	if _, err := store.AnswerRoomQuestion(room.ID, question.ID, "No"); err == nil {
+		t.Fatal("answering twice must fail")
+	}
+}
+
+func TestParseAgentQuestions(t *testing.T) {
+	message := "I inspected the code.\n\n```question\nProceed with the schema change?\n- Yes, migrate\n- No, stop\n```\n"
+	questions := parseAgentQuestions(message)
+	if len(questions) != 1 {
+		t.Fatalf("questions = %d, want 1", len(questions))
+	}
+	if questions[0].Prompt != "Proceed with the schema change?" {
+		t.Fatalf("prompt = %q", questions[0].Prompt)
+	}
+	if len(questions[0].Options) != 2 || questions[0].Options[1] != "No, stop" {
+		t.Fatalf("options = %#v", questions[0].Options)
+	}
+}

@@ -44,6 +44,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("DELETE /api/agents/{agentID}", s.deleteAgent)
 	mux.HandleFunc("POST /api/rooms", s.createRoom)
 	mux.HandleFunc("POST /api/rooms/{roomID}/messages", s.appendRoomMessage)
+	mux.HandleFunc("PUT /api/rooms/{roomID}/teams", s.updateRoomTeams)
+	mux.HandleFunc("PUT /api/rooms/{roomID}/questions/{questionID}", s.answerRoomQuestion)
 	mux.HandleFunc("POST /api/rooms/{roomID}/tasks", s.createTask)
 	mux.HandleFunc("PUT /api/tasks/{taskID}/status", s.updateTaskStatus)
 	mux.HandleFunc("POST /api/tasks/{taskID}/run", s.startTask)
@@ -207,6 +209,46 @@ func (s *Server) appendRoomMessage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusCreated, message)
+}
+
+func (s *Server) updateRoomTeams(w http.ResponseWriter, r *http.Request) {
+	if err := s.verifyProject(r.URL.Query().Get("project")); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	var req struct {
+		TeamIDs []string `json:"teamIds"`
+	}
+	if err := decodeJSON(w, r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	room, err := s.store.UpdateRoomTeams(r.PathValue("roomID"), req.TeamIDs)
+	if err != nil {
+		writeError(w, http.StatusUnprocessableEntity, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, room)
+}
+
+func (s *Server) answerRoomQuestion(w http.ResponseWriter, r *http.Request) {
+	if err := s.verifyProject(r.URL.Query().Get("project")); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	var req struct {
+		Answer string `json:"answer"`
+	}
+	if err := decodeJSON(w, r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	question, err := s.store.AnswerRoomQuestion(r.PathValue("roomID"), r.PathValue("questionID"), req.Answer)
+	if err != nil {
+		writeError(w, http.StatusUnprocessableEntity, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, question)
 }
 
 func (s *Server) createTask(w http.ResponseWriter, r *http.Request) {

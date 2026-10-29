@@ -15,12 +15,20 @@ if (!jsFile) {
 const workspace = {
   schemaVersion: 3,
   projectPath: '/tmp/demo',
-  rooms: [{ id: 'r1', name: 'Smoke Room', goal: 'g', teamIds: ['t1'], status: 'planning', messages: [], createdAt: new Date().toISOString() }],
+  rooms: [{
+    id: 'r1', name: 'Smoke Room', goal: 'g', teamIds: ['t1'], status: 'planning',
+    messages: [], createdAt: new Date().toISOString(),
+    questions: [{ id: 'q1', prompt: 'Proceed with the refactor?', options: ['Yes', 'No'], answer: '', createdAt: new Date().toISOString() }],
+  }],
   teams: [{ id: 't1', templateId: 'quick-fix', name: 'Smoke Team', purpose: 'p', mainAgent: 'M', agents: [{ id: 'ta1', name: 'M', role: 'r', instructions: '# hi' }], instructions: 'i', createdAt: new Date().toISOString() }],
   templates: [{ id: 'quick-fix', version: 1, name: 'Quick Fix', purpose: 'p', mainAgent: 'M', agents: [{ name: 'M', role: 'r' }], instructions: 'i' }],
   providers: [{ id: 'tokenharbor', name: 'TokenHarbor', protocol: 'openai-compatible', baseUrl: 'https://tokenharbor.ai/v1', models: ['deepseek-v4.1-flash:free', 'claude-sonnet-5'], defaultModel: 'deepseek-v4.1-flash:free', hasApiKey: true, enabled: true }],
   tasks: [{ id: 'k1', roomId: 'r1', title: 'Smoke Task', description: 'd', status: 'todo', priority: 'normal', effort: 'medium', dependencies: [], approved: false, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() }],
-  runs: [],
+  runs: [{
+    id: 'run1', roomId: 'r1', taskId: 'k1', provider: 'tokenharbor', model: 'deepseek-v4.1-flash:free',
+    status: 'running', startedAt: new Date().toISOString(), events: [], tokens: 120,
+    result: 'diff --git a/src/app.js b/src/app.js\n--- a/src/app.js\n+++ b/src/app.js\n@@ -1,2 +1,3 @@\n-old line\n+new line\n+extra line\n',
+  }],
   skills: [{ id: 's1', name: 'Docs', description: 'd', version: 1, instructions: '# Docs', mode: 'passive', enabled: false, files: [{ path: 'SKILL.md', content: '# Docs' }, { path: 'references/steps.md', content: 'step 1' }] }],
   agents: [{ id: 'a1', name: 'Scout', role: 'Researcher', description: 'd', instructions: '# Scout\n\n## Responsibilities\n\n- Inspect', tools: ['file_editor'], skills: [], requireReview: false }],
   settings: { theme: 'dark', effortMode: 'automatic', defaultEffort: 'medium', maxConcurrentRuns: 1, maxWorkersPerTask: 1, maxDelegationDepth: 0, maxRetries: 0, maxExecutionSeconds: 600, budgetUsd: 0, requireRunApproval: false, allowProjectCommands: false },
@@ -65,6 +73,19 @@ let view = window.document.body.innerHTML;
 for (const label of ['Chat', 'Kanban', 'Plan', 'Changes', 'Task progress', 'Execution policy', 'Room team']) {
   if (!view.includes(label)) failures.push(`room detail missing "${label}"`);
 }
+if (!view.includes('Running')) failures.push('room runtime status missing');
+if (!view.includes('Pause run')) failures.push('pause control missing');
+if (!view.includes('Agent needs a decision')) failures.push('agent question card missing');
+if (!view.includes('Proceed with the refactor?')) failures.push('question prompt missing');
+if (window.location.hash !== '#/rooms/r1') failures.push('room route was not written to the hash');
+
+click(byText('.room-tab', 'Changes'));
+await flush();
+view = window.document.body.innerHTML;
+if (!view.includes('diff-file')) failures.push('diff viewer missing');
+if (!view.includes('src/app.js')) failures.push('diff file path missing');
+if (!view.includes('Collapse all') && !view.includes('Show all')) failures.push('diff collapse control missing');
+
 const back = window.document.querySelector('[aria-label="Back to rooms"]');
 if (!back) {
   failures.push('room back button missing');
@@ -115,6 +136,21 @@ view = window.document.body.innerHTML;
 if (!view.includes('Files')) failures.push('skill file manager missing');
 if (!view.includes('references')) failures.push('skill directory tree missing nested folder');
 if (!byText('.tree-file', 'SKILL.md')) failures.push('skill tree missing SKILL.md');
+if (!window.document.querySelector('.tree-file-del')) failures.push('file delete icon missing from the tree');
+const newFolder = window.document.querySelector('[title="New folder"]');
+if (!newFolder) {
+  failures.push('new folder button missing');
+} else {
+  click(newFolder);
+  await flush();
+  if (!window.document.querySelector('.tree-create')) failures.push('inline folder input missing');
+}
+
+// Hash routing: a hashchange should open the target page (survives refresh).
+window.location.hash = '#/agents/a1';
+window.dispatchEvent(new window.HashChangeEvent('hashchange'));
+await flush();
+if (!window.document.body.innerHTML.includes('Instructions')) failures.push('hash route did not open the agent page');
 
 // Settings: provider presets, configured row, and the add-provider modal.
 click(byText('.nav-btn', 'Settings'));

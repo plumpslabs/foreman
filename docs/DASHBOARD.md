@@ -87,6 +87,20 @@ gain a mode plus a file tree.
 - **Engineering Lead**, **Architect**, **Implementer**, **Independent Reviewer** (deep-engineering)
 - **Quick Coordinator**, **Implementer** (quick-fix)
 
+## Room interaction
+
+- **Routing** — the dashboard uses hash routes (`#/rooms/:id`, `#/agents/:id`, …) so a refresh
+  returns to the same page.
+- **Runtime status** — rooms show Running/Paused/Idle from their runs. A running room exposes
+  *Pause run*; a room whose last run failed/timed out/cancelled exposes *Continue*, which starts
+  the same task again without retyping the prompt.
+- **Participants** — teams can be invited or kicked per room (`PUT /api/rooms/{id}/teams`).
+- **Agent questions** — an agent can request a decision by ending its reply with a fenced
+  `question` block whose first line is the question and whose `- ` lines are options. The runtime
+  stores it and the room shows a card with option buttons plus a custom answer. Answering records
+  the choice in the chat.
+- **Changes** — unified diffs from a room's runs render red/green with collapsible files.
+
 ## Permissions model (policy-based, reflected in UI)
 
 | Action | Who | Gate |

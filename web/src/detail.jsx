@@ -622,7 +622,7 @@ function buildTree(files) {
   return root;
 }
 
-function TreeView({ node, prefix, expanded, onToggle, selected, onSelect }) {
+function TreeView({ node, prefix, expanded, onToggle, selected, onSelect, onDelete }) {
   const dirs = [...node.dirs.values()].sort((a, b) => a.name.localeCompare(b.name));
   const files = [...node.files].sort((a, b) => a.name.localeCompare(b.name));
   return (
@@ -635,22 +635,29 @@ function TreeView({ node, prefix, expanded, onToggle, selected, onSelect }) {
             <button type="button" class={`tree-row tree-dir ${open ? 'open' : ''}`} onClick={() => onToggle(path)}>
               <Icon name="chevron-right" size={13} class="tree-caret" />
               <Icon name="folder" size={14} />
-              <span class="tree-name">{esc(dir.name)}</span>
+              <span class="tree-name" title={path}>{esc(dir.name)}</span>
               <span class="tree-count">{dir.files.length + dir.dirs.size}</span>
             </button>
-            {open && <div class="tree-children"><TreeView node={dir} prefix={path} expanded={expanded} onToggle={onToggle} selected={selected} onSelect={onSelect} /></div>}
+            {open && (
+              <div class="tree-children">
+                <TreeView node={dir} prefix={path} expanded={expanded} onToggle={onToggle}
+                  selected={selected} onSelect={onSelect} onDelete={onDelete} />
+              </div>
+            )}
           </div>
         );
       })}
       {files.map((file) => (
-        <button
-          type="button"
-          class={`tree-row tree-file ${selected === file.path ? 'on' : ''}`}
-          onClick={() => onSelect(file.path)}
-        >
-          <Icon name="file-text" size={13} />
-          <span class="tree-name">{esc(file.name)}</span>
-        </button>
+        <div class={`tree-file ${selected === file.path ? 'on' : ''}`}>
+          <button type="button" class="tree-file-main" onClick={() => onSelect(file.path)} title={file.path}>
+            <Icon name="file-text" size={13} />
+            <span class="tree-name">{esc(file.name)}</span>
+          </button>
+          <button type="button" class="tree-file-del" title={`Delete ${file.path}`}
+            onClick={() => onDelete(file.path)}>
+            <Icon name="trash" size={12} />
+          </button>
+        </div>
       ))}
     </div>
   );
@@ -678,25 +685,29 @@ export function SkillDetailPage({ skillId, state, notify, refresh, onBack }) {
   const file = form.files.find((f) => f.path === selected);
   const updateFile = (path, patch) => set('files', form.files.map((f) => (f.path === path ? { ...f, ...patch } : f)));
 
-  const addFile = () => {
-    let n = form.files.length + 1;
-    let path = `notes-${n}.md`;
-    while (form.files.some((f) => f.path === path)) { n += 1; path = `notes-${n}.md`; }
-    set('files', [...form.files, { path, content: '' }]);
-    setSelected(path);
-  };
+  const [creating, setCreating] = useState(null);
 
-  const addFolder = () => {
-    const name = prompt('Folder name');
-    if (!name) return;
-    const clean = name.trim().replace(/^\/+|\/+$/g, '').replace(/\s+/g, '-');
-    if (!clean) return;
-    let path = `${clean}/notes.md`;
-    let n = 1;
-    while (form.files.some((f) => f.path === path)) { n += 1; path = `${clean}/notes-${n}.md`; }
-    set('files', [...form.files, { path, content: `# ${clean}\n` }]);
-    setExpanded((prev) => new Set([...prev, clean]));
-    setSelected(path);
+  const startCreate = (type) => setCreating({ type, value: '' });
+
+  const submitCreate = () => {
+    const value = (creating?.value || '').trim();
+    if (!value) return;
+    if (creating.type === 'folder') {
+      const clean = value.replace(/^\/+|\/+$/g, '').replace(/\s+/g, '-');
+      if (!clean) return;
+      let path = `${clean}/notes.md`;
+      let n = 1;
+      while (form.files.some((f) => f.path === path)) { n += 1; path = `${clean}/notes-${n}.md`; }
+      set('files', [...form.files, { path, content: `# ${clean}\n` }]);
+      setExpanded((prev) => new Set([...prev, clean]));
+      setSelected(path);
+    } else {
+      let path = value.includes('.') ? value : `${value}.md`;
+      if (form.files.some((f) => f.path === path)) { notify('That path already exists'); return; }
+      set('files', [...form.files, { path, content: '' }]);
+      setSelected(path);
+    }
+    setCreating(null);
   };
 
   const removeFile = (path) => {
@@ -797,10 +808,27 @@ export function SkillDetailPage({ skillId, state, notify, refresh, onBack }) {
           <div class="file-sidebar-head">
             <span>Files</span>
             <div style="display:flex;gap:4px">
-              <button class="icon-btn" title="New file" onClick={addFile}><Icon name="file-text" size={14} /></button>
-              <button class="icon-btn" title="New folder" onClick={addFolder}><Icon name="folder" size={14} /></button>
+              <button class="icon-btn" title="New file" onClick={() => startCreate('file')}><Icon name="file-text" size={14} /></button>
+              <button class="icon-btn" title="New folder" onClick={() => startCreate('folder')}><Icon name="folder" size={14} /></button>
             </div>
           </div>
+          {creating && (
+            <div class="tree-create">
+              <Icon name={creating.type === 'folder' ? 'folder' : 'file-text'} size={13} />
+              <input
+                autoFocus
+                value={creating.value}
+                placeholder={creating.type === 'folder' ? 'folder-name' : 'path/to/file.md'}
+                onInput={(e) => setCreating({ ...creating, value: e.currentTarget.value })}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') { e.preventDefault(); submitCreate(); }
+                  if (e.key === 'Escape') setCreating(null);
+                }}
+              />
+              <button class="icon-btn" title="Create" onClick={submitCreate}><Icon name="check" size={13} /></button>
+              <button class="icon-btn" title="Cancel" onClick={() => setCreating(null)}><Icon name="x" size={13} /></button>
+            </div>
+          )}
           <TreeView
             node={tree}
             prefix=""
@@ -808,6 +836,7 @@ export function SkillDetailPage({ skillId, state, notify, refresh, onBack }) {
             onToggle={toggleDir}
             selected={selected}
             onSelect={setSelected}
+            onDelete={removeFile}
           />
         </div>
 

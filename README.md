@@ -58,6 +58,9 @@ Open `http://127.0.0.1:8080/?project=<project-dir>` — the UI is room-centric:
 - **Teams** — your imported teams first; open a team to edit its name, purpose, markdown instructions, main agent, and inspect every agent on it
 - **Settings** — tabbed: provider presets (TokenHarbor, OpenCode Zen/Go, DeepSeek, MiniMax, Anthropic, OpenAI, custom), execution policy, and appearance
 - **Markdown preview** — instructions and chat render formatted markdown, not raw text
+- **Routing** — hash routes (`#/rooms/:id`) keep your place across a refresh
+- **Room controls** — live runtime status with pause and continue, invite/kick teams, and agent questions with options or a custom answer
+- **Changes** — unified diffs render red/green with per-file collapse and show-all
 
 ## Architecture
 

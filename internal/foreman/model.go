@@ -113,13 +113,25 @@ type RunEvent struct {
 }
 
 type Room struct {
-	ID        string        `json:"id"`
-	Name      string        `json:"name"`
-	Goal      string        `json:"goal"`
-	TeamIDs   []string      `json:"teamIds"`
-	Status    string        `json:"status"`
-	Messages  []ChatMessage `json:"messages"`
-	CreatedAt time.Time     `json:"createdAt"`
+	ID        string          `json:"id"`
+	Name      string          `json:"name"`
+	Goal      string          `json:"goal"`
+	TeamIDs   []string        `json:"teamIds"`
+	Status    string          `json:"status"`
+	Messages  []ChatMessage   `json:"messages"`
+	Questions []AgentQuestion `json:"questions"`
+	CreatedAt time.Time       `json:"createdAt"`
+}
+
+// AgentQuestion is a decision the agent needs from the human before it can
+// continue. Options may be empty for an open-ended answer.
+type AgentQuestion struct {
+	ID         string    `json:"id"`
+	Prompt     string    `json:"prompt"`
+	Options    []string  `json:"options"`
+	Answer     string    `json:"answer,omitempty"`
+	AnsweredAt time.Time `json:"answeredAt,omitempty"`
+	CreatedAt  time.Time `json:"createdAt"`
 }
 
 type Team struct {
