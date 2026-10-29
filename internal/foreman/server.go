@@ -189,8 +189,13 @@ func (s *Server) engineStatus(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	installed, detail := s.runtime.EngineInstalled()
-	writeJSON(w, http.StatusOK, map[string]any{"installed": installed, "detail": detail})
+	diag := s.runtime.EngineDiagnostics()
+	writeJSON(w, http.StatusOK, map[string]any{
+		"installed":     diag.Installed,
+		"detail":        diag.ProbeDetail,
+		"pythonVersion": diag.PythonVersion,
+		"pipAvailable":  diag.PipAvailable,
+	})
 }
 
 func (s *Server) engineInstall(w http.ResponseWriter, r *http.Request) {
@@ -199,15 +204,26 @@ func (s *Server) engineInstall(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	out, err := s.runtime.InstallEngine(context.WithoutCancel(r.Context()))
+	diag := s.runtime.EngineDiagnostics()
+	reason := ""
+	hint := ""
 	if err != nil {
-		writeJSON(w, http.StatusBadGateway, map[string]any{
-			"ok": false, "output": out, "error": err.Error(),
-		})
-		return
+		reason, hint = classifyInstallError(err, out, diag.PythonVersion)
+		if reason == "" {
+			reason = "Installasi gagal — lihat log di bawah."
+		}
 	}
-	installed, _ := s.runtime.EngineInstalled()
+	if len(out) > 6000 {
+		out = out[:6000] + "\n… (log dipotong)"
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"ok": true, "output": out, "installed": installed,
+		"ok":            err == nil,
+		"installed":     diag.Installed,
+		"error":         reason,
+		"hint":          hint,
+		"output":        out,
+		"pythonVersion": diag.PythonVersion,
+		"pipAvailable":  diag.PipAvailable,
 	})
 }
 

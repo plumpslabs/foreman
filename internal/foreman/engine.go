@@ -64,9 +64,39 @@ func (e *Engine) sdkInstalled() (bool, string) {
 	return err == nil, strings.TrimSpace(out.String())
 }
 
-// installSDK installs the OpenHands SDK into the engine's Python via pip. On
-// PEP 668 "externally-managed-environment" errors it retries with
-// --break-system-packages. It returns the combined pip output.
+// pythonVersion returns the engine interpreter's version string.
+func (e *Engine) pythonVersion() string {
+	cmd := exec.Command(e.python, "--version")
+	var b bytes.Buffer
+	cmd.Stdout = &b
+	cmd.Stderr = &b
+	_ = cmd.Run()
+	return strings.TrimSpace(b.String())
+}
+
+// EngineDiag describes the engine environment for the dashboard.
+type EngineDiag struct {
+	PythonVersion string
+	PipAvailable  bool
+	Installed     bool
+	ProbeDetail   string
+}
+
+func (e *Engine) diagnostics() EngineDiag {
+	d := EngineDiag{PythonVersion: e.pythonVersion()}
+	pip := exec.Command(e.python, "-m", "pip", "--version")
+	var pb bytes.Buffer
+	pip.Stdout = &pb
+	pip.Stderr = &pb
+	d.PipAvailable = pip.Run() == nil
+	d.Installed, d.ProbeDetail = e.sdkInstalled()
+	return d
+}
+
+// installSDK installs the OpenHands SDK into the engine's Python via pip.
+// It ensures pip exists (booting it via ensurepip when missing), retries with
+// --break-system-packages on PEP 668 externally-managed environments, and
+// returns the combined command log.
 func (e *Engine) installSDK(ctx context.Context) (string, error) {
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Minute)
 	defer cancel()
@@ -78,14 +108,54 @@ func (e *Engine) installSDK(ctx context.Context) (string, error) {
 		err := cmd.Run()
 		return b.String(), err
 	}
-	out, err := run("-m", "pip", "install", "--upgrade", "openhands-sdk", "openhands-tools")
-	if err != nil && strings.Contains(strings.ToLower(out), "externally-managed") {
-		note := "\n[retried with --break-system-packages]\n"
-		out2, err2 := run("-m", "pip", "install", "--upgrade", "--break-system-packages",
-			"openhands-sdk", "openhands-tools")
-		return out + note + out2, err2
+
+	var log strings.Builder
+	if _, err := run("-m", "pip", "--version"); err != nil {
+		out, err2 := run("-m", "ensurepip", "--upgrade")
+		log.WriteString(fmt.Sprintf("$ %s -m pip --version (failed)\n%s\n", e.python, out))
+		if err2 != nil {
+			return log.String(), fmt.Errorf("pip unavailable: %v (%s)", err, strings.TrimSpace(out))
+		}
 	}
-	return out, err
+
+	attempts := [][]string{
+		{"-m", "pip", "install", "--upgrade", "openhands-sdk", "openhands-tools"},
+	}
+	for i, args := range attempts {
+		out, err := run(args...)
+		log.WriteString(fmt.Sprintf("$ %s %s\n%s\n", e.python, strings.Join(args, " "), strings.TrimSpace(out)))
+		if err == nil {
+			return log.String(), nil
+		}
+		if i == 0 && strings.Contains(strings.ToLower(out), "externally-managed") {
+			attempts = append(attempts, []string{
+				"-m", "pip", "install", "--upgrade", "--break-system-packages",
+				"openhands-sdk", "openhands-tools",
+			})
+			continue
+		}
+		return log.String(), err
+	}
+	return log.String(), errors.New("install failed with no attempt recorded")
+}
+
+// classifyInstallError turns a pip failure into a human-readable reason and
+// actionable hint. It returns empty strings when the raw log is more useful.
+func classifyInstallError(err error, out, pyVer string) (reason, hint string) {
+	low := strings.ToLower(out + "\n" + err.Error())
+	switch {
+	case strings.Contains(low, "externally-managed"):
+		return "Python environment ini dikelola sistem (PEP 668). Retry dengan --break-system-packages juga gagal.",
+			"Coba manual: python3 -m pip install --break-system-packages openhands-sdk openhands-tools"
+	case strings.Contains(low, "requires-python"):
+		return fmt.Sprintf("SDK OpenHands butuh Python >= 3.12; interpreter kamu: %s", pyVer),
+			"Pasang Python 3.12+ lalu set FOREMAN_PYTHON ke interpreter tersebut"
+	case strings.Contains(low, "no module named pip"):
+		return "pip tidak tersedia untuk interpreter ini.", "Jalankan: python3 -m ensurepip --upgrade"
+	case strings.Contains(low, "permission denied") || strings.Contains(low, "not permitted"):
+		return "Izin kurang untuk menulis ke site-packages.", "Coba: python3 -m pip install --user openhands-sdk openhands-tools"
+	}
+	return "", ""
 }
 
 // EngineRequest describes one bounded OpenHands run executed by the bridge.

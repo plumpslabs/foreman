@@ -42,9 +42,32 @@ func (rt *Runtime) EngineInstalled() (bool, string) {
 	return rt.engine.sdkInstalled()
 }
 
+// EngineDiagnostics summarizes the engine environment for the dashboard.
+func (rt *Runtime) EngineDiagnostics() EngineDiag {
+	return rt.engine.diagnostics()
+}
+
 // InstallEngine installs the OpenHands SDK into the engine's Python.
 func (rt *Runtime) InstallEngine(ctx context.Context) (string, error) {
 	return rt.engine.installSDK(ctx)
+}
+
+// Exported engine health helpers used by the CLI (cmd/foreman).
+
+// SDKInstalled reports whether the OpenHands SDK is importable.
+func (e *Engine) SDKInstalled() (bool, string) { return e.sdkInstalled() }
+
+// PythonVersion returns the engine interpreter's version string.
+func (e *Engine) PythonVersion() string { return e.pythonVersion() }
+
+// PipAvailable reports whether pip is available in the engine's Python.
+func (e *Engine) PipAvailable() bool {
+	return e.diagnostics().PipAvailable
+}
+
+// InstallSDK installs the OpenHands SDK (same as the dashboard's install).
+func (e *Engine) InstallSDK(ctx context.Context) (string, error) {
+	return e.installSDK(ctx)
 }
 
 func (rt *Runtime) StartTask(parent context.Context, taskID string) (AgentRun, error) {

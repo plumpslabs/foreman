@@ -226,21 +226,54 @@ export function RoomDetailHost({ room, state, notify, setModal, runTask, refresh
   const [mentionIdx, setMentionIdx] = useState(0);
   const [sdkHintDismissed, setSdkHintDismissed] = useState(false);
   const [engineBusy, setEngineBusy] = useState(false);
+  const [engineReason, setEngineReason] = useState('');
+  const [engineHint, setEngineHint] = useState('');
+  const [engineLog, setEngineLog] = useState('');
 
   useEffect(() => { setInvited(room.teamIds || []); }, [room.id, room.teamIds.join(',')]);
 
-  const { teams: allTeams, tasks, skills, runs, settings } = state;
+  const { teams: allTeams, tasks, skills, runs, settings, agents: allAgents = [] } = state;
   const teams = allTeams.filter((t) => room.teamIds.includes(t.id));
-  const composeAgents = [];
-  const seenAgents = new Set();
+
+  const roomAgentsList = [];
+  const seenAgentNames = new Set();
   for (const t of teams) {
+    if (t.mainAgent && !seenAgentNames.has(t.mainAgent)) {
+      seenAgentNames.add(t.mainAgent);
+      roomAgentsList.push({
+        name: t.mainAgent,
+        teamName: t.name,
+        isMain: true,
+        role: 'Main agent',
+      });
+    }
     for (const a of t.agents || []) {
-      if (!seenAgents.has(a.name)) {
-        seenAgents.add(a.name);
-        composeAgents.push([a.name, t.name]);
+      if (!seenAgentNames.has(a.name)) {
+        seenAgentNames.add(a.name);
+        roomAgentsList.push({
+          name: a.name,
+          teamName: t.name,
+          isMain: a.name === t.mainAgent,
+          role: a.role || (a.name === t.mainAgent ? 'Main agent' : 'Specialist'),
+        });
       }
     }
   }
+  if (!roomAgentsList.length && allAgents.length) {
+    for (const a of allAgents) {
+      if (!seenAgentNames.has(a.name)) {
+        seenAgentNames.add(a.name);
+        roomAgentsList.push({
+          name: a.name,
+          teamName: 'Library',
+          isMain: false,
+          role: a.role || 'Agent',
+        });
+      }
+    }
+  }
+
+  const composeAgents = roomAgentsList.map((a) => [a.name, a.teamName]);
   const allRoomTasks = tasks.filter((t) => t.roomId === room.id);
   const roomTasks = allRoomTasks.filter((t) => !t.hidden);
   const roomRuns = (runs || []).filter((r) => r.roomId === room.id);
@@ -257,7 +290,18 @@ export function RoomDetailHost({ room, state, notify, setModal, runTask, refresh
     const team = teams[0];
     return team ? team.mainAgent : 'Agent';
   };
+  const activeRunForAgent = (agentName) => runningRuns.find((run) => agentNameForRun(run) === agentName);
+  const activeAgentsCount = roomAgentsList.filter((a) => activeRunForAgent(a.name)).length;
   const pendingQuestions = (room.questions || []).filter((q) => !q.answer);
+
+  const chatScrollRef = useRef(null);
+
+  // Auto-scroll chat to bottom smoothly when messages, questions, or runs update
+  useEffect(() => {
+    if (tab === 'chat' && chatScrollRef.current) {
+      chatScrollRef.current.scrollTop = chatScrollRef.current.scrollHeight;
+    }
+  }, [tab, room.id, (room.messages || []).length, (room.questions || []).length, runningRuns.length]);
 
   // Realtime: while any chat run is active, poll so replies land in the chat
   // without manual refreshes.
@@ -281,16 +325,23 @@ export function RoomDetailHost({ room, state, notify, setModal, runTask, refresh
 
   const installEngine = async () => {
     setEngineBusy(true);
+    setEngineReason('');
+    setEngineHint('');
+    setEngineLog('');
     try {
       const data = await api('/api/engine/install', { method: 'POST', body: '{}' });
-      if (data && data.ok) {
+      if (data && data.ok && data.installed) {
         notify('OpenHands engine installed — send a message again');
         setSdkHintDismissed(true);
         await refresh();
       } else {
-        notify((data && data.error) || 'Engine install failed');
+        setEngineReason((data && data.error) || 'Installasi gagal — lihat log di bawah.');
+        setEngineHint((data && data.hint) || '');
+        setEngineLog((data && data.output) || '');
+        notify('Engine install tidak berhasil');
       }
     } catch (error) {
+      setEngineReason(error.message);
       notify(error.message);
     } finally {
       setEngineBusy(false);
@@ -467,7 +518,7 @@ export function RoomDetailHost({ room, state, notify, setModal, runTask, refresh
 
           {tab === 'chat' && (
             <div class="room-view active">
-              <div class="chat-scroll">
+              <div class="chat-scroll" ref={chatScrollRef}>
                 {teams.length ? (
                   <div class="invite-card">
                     <span class="invite-icon"><Icon name="users" size={15} /></span>
@@ -554,13 +605,28 @@ export function RoomDetailHost({ room, state, notify, setModal, runTask, refresh
                     <Icon name="info" size={15} class="icon" />
                     <div class="sdk-hint-body">
                       <b>OpenHands engine belum terpasang di Python environment.</b>
-                      <span>Klik Install — Foreman menjalankan:</span>
-                      <code>python3 -m pip install openhands-sdk openhands-tools</code>
+                      {!engineReason ? (
+                        <>
+                          <span>Klik Install — Foreman menjalankan:</span>
+                          <code>python3 -m pip install openhands-sdk openhands-tools</code>
+                        </>
+                      ) : (
+                        <>
+                          <div class="sdk-hint-reason">{esc(engineReason)}</div>
+                          {engineHint ? <div class="sdk-hint-hint">{esc(engineHint)}</div> : null}
+                          {engineLog ? (
+                            <details class="sdk-log">
+                              <summary>Lihat log instalasi</summary>
+                              <pre>{esc(engineLog)}</pre>
+                            </details>
+                          ) : null}
+                        </>
+                      )}
                     </div>
                     <div class="sdk-hint-actions">
                       <button type="button" class="btn small primary" disabled={engineBusy} onClick={installEngine}>
                         {engineBusy ? <span class="btn-spin"><Icon name="refresh" size={13} /></span> : <Icon name="refresh" size={13} />}
-                        {engineBusy ? 'Installing…' : 'Install engine'}
+                        {engineBusy ? 'Installing…' : engineReason ? 'Coba lagi' : 'Install engine'}
                       </button>
                       <button type="button" class="btn small" onClick={() => setSdkHintDismissed(true)}>Hide</button>
                     </div>
@@ -724,20 +790,59 @@ export function RoomDetailHost({ room, state, notify, setModal, runTask, refresh
                       <Icon name="x" size={13} />
                     </button>
                   </div>
-                  <div class="member-badges">
-                    {(t.agents || []).map((a) => (
-                      <span class={`member-badge ${a.name === t.mainAgent ? 'main' : ''}`} key={a.name}
-                        title={a.name === t.mainAgent ? `${esc(a.name)} (main agent)` : esc(a.name)}>
-                        {esc(a.name)}
-                      </span>
-                    ))}
-                  </div>
                 </div>
               ))
               : <div class="muted" style="font-size:11px;padding:4px 0">No teams invited yet.</div>}
             <button class="btn subtle" style="width:100%;margin-top:8px" onClick={() => setInviteOpen(true)}>
               <Icon name="users" size={14} />Manage participants
             </button>
+          </div>
+
+          <div class="rail-section">
+            <div class="rail-title">
+              <Icon name="bot" size={14} />
+              <span>Live agents</span>
+              <span class="rail-counter">{activeAgentsCount ? `${activeAgentsCount} active` : `${roomAgentsList.length} ready`}</span>
+            </div>
+            <div class="rail-agents-list">
+              {roomAgentsList.map((agent) => {
+                const run = activeRunForAgent(agent.name);
+                const isRunning = Boolean(run);
+                const lastEv = run ? (run.events || []).slice(-1)[0] : null;
+                const action = isRunning
+                  ? (lastEv?.type === 'tool' ? 'acting' : (lastEv?.message || '').includes('engine:') ? 'reasoning' : 'working')
+                  : 'ready';
+                return (
+                  <div
+                    class={`rail-agent-row ${isRunning ? 'active' : ''}`}
+                    key={agent.name}
+                    onClick={() => {
+                      setMentionAgent(agent.name);
+                      setDraft((prev) => (prev ? prev : `@${agent.name} `));
+                    }}
+                    title={`Click to mention @${esc(agent.name)}`}
+                  >
+                    <div class={`agent-avatar ${agent.isMain ? 'green' : 'blue'}`} style="border-radius:6px;width:26px;height:26px;font-size:10px">
+                      {avatarInitials(agent.name)}
+                    </div>
+                    <div class="agent-info">
+                      <div class="agent-name-row">
+                        <span class="agent-name">{esc(agent.name)}</span>
+                        {agent.isMain && <span class="tag green" style="font-size:9px;padding:1px 5px">main</span>}
+                      </div>
+                      <div class="agent-role">{esc(agent.role || agent.teamName)}</div>
+                    </div>
+                    <span class={`member-badge ${agent.isMain ? 'main' : ''} ${isRunning ? 'live-on active-badge' : 'idle-badge'}`}>
+                      <span class={`live-dot ${isRunning ? 'pulsing' : 'idle'}`} />
+                      <span class="badge-status-text">{action}</span>
+                    </span>
+                  </div>
+                );
+              })}
+              {!roomAgentsList.length && (
+                <div class="muted" style="font-size:11px;padding:4px 0">Invite a team to see active agents.</div>
+              )}
+            </div>
           </div>
 
           <div class="rail-section">
@@ -770,7 +875,7 @@ export function RoomDetailHost({ room, state, notify, setModal, runTask, refresh
             <div class="progress-track"><div class="progress-fill" style={`width:${pct}%`} /></div>
             <div style="margin-top:9px">
               {roomTasks.filter((t) => t.status !== 'done').slice(0, 4).map((t) => (
-                <div class="rail-task">
+                <div class="rail-task" key={t.id}>
                   <span style="color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{esc(t.title)}</span>
                   <span class={`tag ${t.status === 'in_progress' ? 'blue' : ''}`} style="margin-left:auto">{esc(t.status)}</span>
                 </div>
@@ -780,40 +885,6 @@ export function RoomDetailHost({ room, state, notify, setModal, runTask, refresh
             <button class="btn subtle" style="width:100%;margin-top:7px" onClick={() => setTab('board')}>
               Open Kanban <Icon name="arrow-up-right" size={14} />
             </button>
-          </div>
-
-          <div class="rail-section">
-            <div class="rail-title">Live activity</div>
-            <div class="activity-feed">
-              {roomRuns.slice(0, 3).map((run) => (
-                <div class="activity-row">
-                  <div class="activity-row-top">
-                    <b>{esc(run.status)}</b>
-                    <span>{timeAgo(run.startedAt)}</span>
-                  </div>
-                  {(() => {
-                    const last = (run.events || []).slice(-1)[0];
-                    const text = last?.message || run.error;
-                    return text ? <div class="activity-row-msg" title={esc(text)}>{esc(text)}</div> : null;
-                  })()}
-                </div>
-              ))}
-              {!roomRuns.length && (
-                <div class="activity-empty">
-                  {teams.length ? (
-                    <>
-                      <span class="live-dot idle" />
-                      <span>
-                        {teams.flatMap((t) => (t.agents || []).map((a) => a.name)).join(', ')
-                          || teams.map((t) => t.name).join(', ')}
-                      </span>
-                    </>
-                  ) : (
-                    <span>Invite a team to get started.</span>
-                  )}
-                </div>
-              )}
-            </div>
           </div>
 
           <div class="rail-section">
@@ -1448,12 +1519,81 @@ function ProvidersTab({ state, onPreset, onEdit, onDelete, onToggle }) {
   );
 }
 
+function EngineCard({ notify }) {
+  const [status, setStatus] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const [reason, setReason] = useState('');
+  const [log, setLog] = useState('');
+
+  const load = async () => {
+    try {
+      const d = await api('/api/engine/status');
+      setStatus(d);
+    } catch {
+      setStatus(null);
+    }
+  };
+  useEffect(() => { load(); }, []);
+
+  const install = async () => {
+    setBusy(true);
+    setReason('');
+    setLog('');
+    try {
+      const d = await api('/api/engine/install', { method: 'POST', body: '{}' });
+      setStatus({ installed: d.installed, pythonVersion: d.pythonVersion, pipAvailable: d.pipAvailable });
+      if (d.ok && d.installed) {
+        notify('OpenHands engine installed — send a message again');
+      } else {
+        setReason(d.error || 'Installasi gagal — lihat log di bawah.');
+        setLog(d.output || '');
+      }
+    } catch (error) {
+      setReason(error.message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div class="settings-card">
+      <div class="settings-card-head">
+        <div>
+          <h3>Agent engine</h3>
+          <p>
+            {status
+              ? `Python ${esc(status.pythonVersion || '?')} · pip ${status.pipAvailable ? 'tersedia' : 'tidak tersedia'}`
+              : 'Memeriksa environment…'}
+          </p>
+        </div>
+        <span class={`tag ${status?.installed ? 'green' : 'orange'}`}>
+          {status?.installed ? 'SDK terpasang' : 'SDK belum terpasang'}
+        </span>
+      </div>
+      {!status?.installed && status !== null && (
+        <div style="margin-top:10px">
+          <button class="btn primary small" disabled={busy} onClick={install}>
+            {busy ? <span class="btn-spin"><Icon name="refresh" size={13} /></span> : <Icon name="refresh" size={13} />}
+            {busy ? 'Installing…' : reason ? 'Coba lagi' : 'Install OpenHands SDK'}
+          </button>
+          {reason ? <div class="md-hint" style="color:#ffce9e;margin-top:8px">{esc(reason)}</div> : null}
+          {log ? (
+            <details class="sdk-log">
+              <summary>Lihat log instalasi</summary>
+              <pre>{esc(log)}</pre>
+            </details>
+          ) : null}
+        </div>
+      )}
+    </div>
+  );
+}
+
 export function SettingsPage({ state, notify, refresh }) {
   const settings = state.settings;
   const [tab, setTab] = useState('providers');
   const [policy, setPolicy] = useState(settings);
   const [providerModal, setProviderModal] = useState(null);
-
   useEffect(() => { setPolicy(settings); }, [JSON.stringify(settings)]);
 
   const setField = (field, value, numeric = false) => setPolicy((prev) => ({
@@ -1536,13 +1676,16 @@ export function SettingsPage({ state, notify, refresh }) {
       </div>
 
       {tab === 'providers' && (
-        <ProvidersTab
-          state={state}
-          onPreset={openPreset}
-          onEdit={(provider) => setProviderModal({ initial: provider, isNew: false })}
-          onDelete={deleteProvider}
-          onToggle={toggleProvider}
-        />
+        <>
+          <EngineCard notify={notify} />
+          <ProvidersTab
+            state={state}
+            onPreset={openPreset}
+            onEdit={(provider) => setProviderModal({ initial: provider, isNew: false })}
+            onDelete={deleteProvider}
+            onToggle={toggleProvider}
+          />
+        </>
       )}
 
       {tab === 'execution' && (

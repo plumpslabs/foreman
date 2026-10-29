@@ -31,16 +31,25 @@ curl -fsSL https://raw.githubusercontent.com/plumpslabs/foreman/main/scripts/ins
 ```
 
 The installer downloads the latest prebuilt binary, verifies its checksum, and installs it to
-`/usr/local/bin` (or `~/.local/bin`). It also checks whether your Python can run the agent engine.
+`/usr/local/bin` (or `~/.local/bin`), and adds an `fm` alias next to it. It then **bundles the
+OpenHands SDK**: if `python3` is 3.12+ and the SDK is missing, it installs `openhands-sdk` +
+`openhands-tools` automatically (skip with `FOREMAN_INSTALL_ENGINE=0`).
 
 ## Run
 
 ```sh
-foreman start                 # dashboard for the current project
+foreman start                 # dashboard for the current project (alias: fm start)
 foreman start --project DIR   # …or a specific project
 foreman start --port 8080     # preferred port (falls back to an available one)
 foreman start --no-open       # headless / remote terminal
+foreman start --install-engine # install the OpenHands SDK at startup if missing
+foreman doctor                 # check Python, pip, and the OpenHands SDK
+foreman doctor --install       # …and install the SDK if missing
 ```
+
+`foreman start` prints a startup summary (project, data dir, engine status, dashboard URL). If the
+OpenHands SDK is missing, it warns with an actionable hint; the dashboard also offers a one-click
+install if the SDK is absent at run time.
 
 Foreman binds to `127.0.0.1` only, rejects cross-origin POSTs, and never starts an agent or an
 external request on its own.
