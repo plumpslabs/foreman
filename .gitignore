@@ -84,3 +84,5 @@ Desktop.ini
 *.iml
 # Foreman web dashboard
 /web/node_modules/
+__pycache__/
+*.pyc
