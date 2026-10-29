@@ -775,6 +775,7 @@ select { cursor: pointer; }
   padding-top: 9px; margin-top: 2px; border-top: 1px solid var(--line);
 }
 .compose-selects { display: flex; gap: 6px; flex-wrap: wrap; min-width: 0; }
+.compose-route { display: inline-flex; align-items: center; gap: 5px; font-size: 10.5px; color: var(--muted); margin-left: auto; white-space: nowrap; }
 .compose-foot { font-size: 10.5px; color: var(--muted); margin-top: 8px; padding-left: 2px; }
 select.mini-select { appearance: none; -webkit-appearance: none; padding-right: 22px; cursor: pointer; color-scheme: dark; }
 

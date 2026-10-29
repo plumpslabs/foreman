@@ -222,7 +222,24 @@ func (s *Server) appendRoomMessage(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusUnprocessableEntity, err.Error())
 		return
 	}
-	writeJSON(w, http.StatusCreated, message)
+	// User chat messages trigger an agent run (routed to the mentioned agent or
+	// the team's main agent). If the room is not runnable, the message is still
+	// stored and a human-readable warning is returned to the sender.
+	var run *AgentRun
+	var warning string
+	if req.Role == "user" {
+		started, runErr := s.runtime.StartChatRun(context.WithoutCancel(r.Context()), r.PathValue("roomID"), req.Content)
+		if runErr != nil {
+			warning = runErr.Error()
+		} else {
+			run = &started
+		}
+	}
+	writeJSON(w, http.StatusCreated, map[string]any{
+		"message": message,
+		"run":     run,
+		"warning": warning,
+	})
 }
 
 func (s *Server) updateRoomTeams(w http.ResponseWriter, r *http.Request) {

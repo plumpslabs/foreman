@@ -159,7 +159,11 @@ func (rt *Runtime) execute(ctx context.Context, control *RunControl, run AgentRu
 		_ = rt.store.AppendRunEvent(run.ID, ev.Type, safeRuntimeError(errors.New(msg), secret))
 	}, control)
 	if err != nil {
-		return finish(result.Status, resultOrError(result.Message, err), err, result.Tokens, result.CostUSD)
+		final := finish(result.Status, resultOrError(result.Message, err), err, result.Tokens, result.CostUSD)
+		if task.Hidden && final.Result != "" {
+			_ = rt.store.AppendAgentReply(room.ID, final.Result)
+		}
+		return final
 	}
 	if result.Message == "" {
 		result.Message = "Agent run finished."
@@ -171,7 +175,11 @@ func (rt *Runtime) execute(ctx context.Context, control *RunControl, run AgentRu
 			_, _ = rt.store.AddRoomQuestion(room.ID, question)
 		}
 	}
-	return finish(result.Status, result.Message, nil, result.Tokens, result.CostUSD)
+	final := finish(result.Status, result.Message, nil, result.Tokens, result.CostUSD)
+	if task.Hidden && final.Result != "" {
+		_ = rt.store.AppendAgentReply(room.ID, final.Result)
+	}
+	return final
 }
 
 // parseAgentQuestions extracts fenced question blocks from an agent reply:

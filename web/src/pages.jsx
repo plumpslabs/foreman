@@ -213,7 +213,6 @@ export function RoomDetailHost({ room, state, notify, setModal, runTask, refresh
   const [tab, setTab] = useState('chat');
   const [draft, setDraft] = useState('');
   const [sending, setSending] = useState(false);
-  const [activeAgent, setActiveAgent] = useState(room.mainAgent || 'Atlas');
   const [inviteOpen, setInviteOpen] = useState(false);
   const [invited, setInvited] = useState(room.teamIds || []);
   const [answerDraft, setAnswerDraft] = useState({});
@@ -221,7 +220,6 @@ export function RoomDetailHost({ room, state, notify, setModal, runTask, refresh
   const sendingRef = useRef(false);
 
   useEffect(() => { setInvited(room.teamIds || []); }, [room.id, room.teamIds.join(',')]);
-  useEffect(() => { setActiveAgent(room.mainAgent || 'Atlas'); }, [room.id]);
 
   const { teams: allTeams, tasks, skills, runs, settings } = state;
   const teams = allTeams.filter((t) => room.teamIds.includes(t.id));
@@ -235,7 +233,8 @@ export function RoomDetailHost({ room, state, notify, setModal, runTask, refresh
       }
     }
   }
-  const roomTasks = tasks.filter((t) => t.roomId === room.id);
+  const allRoomTasks = tasks.filter((t) => t.roomId === room.id);
+  const roomTasks = allRoomTasks.filter((t) => !t.hidden);
   const roomRuns = (runs || []).filter((r) => r.roomId === room.id);
   const activeRun = roomRuns.find((r) => r.status === 'running');
   const lastRun = roomRuns[0];
@@ -245,17 +244,12 @@ export function RoomDetailHost({ room, state, notify, setModal, runTask, refresh
   const runningRuns = roomRuns.filter((r) => r.status === 'running');
   const pausedRuns = roomRuns.filter((r) => r.status === 'paused').slice(0, 2);
   const agentNameForRun = (run) => {
-    const task = roomTasks.find((t) => t.id === run.taskId);
+    const task = allRoomTasks.find((t) => t.id === run.taskId);
     if (task && task.agentName) return task.agentName;
     const team = teams[0];
     return team ? team.mainAgent : 'Agent';
   };
   const pendingQuestions = (room.questions || []).filter((q) => !q.answer);
-
-  const routeContent = (content) => {
-    const routed = activeAgent && activeAgent !== room.mainAgent ? `@${activeAgent} ${content}` : content;
-    return routed;
-  };
 
   const flushSendQueue = async () => {
     if (sendingRef.current) return;
@@ -265,10 +259,11 @@ export function RoomDetailHost({ room, state, notify, setModal, runTask, refresh
         const content = sendQueueRef.current.shift();
         setSending(true);
         try {
-          await api(`/api/rooms/${encodeURIComponent(room.id)}/messages`, {
+          const data = await api(`/api/rooms/${encodeURIComponent(room.id)}/messages`, {
             method: 'POST',
-            body: JSON.stringify({ role: 'user', content: routeContent(content) }),
+            body: JSON.stringify({ role: 'user', content }),
           });
+          if (data && data.warning) notify(data.warning);
           await refresh();
         } catch (error) {
           notify(error.message);
@@ -486,23 +481,13 @@ export function RoomDetailHost({ room, state, notify, setModal, runTask, refresh
                 <div class="compose-shell">
                   <textarea
                     rows="2"
-                    placeholder="Describe a task or ask for a decision… (Enter to send)"
+                    placeholder="Ask an agent… (mention @agent to route)"
                     value={draft}
                     onInput={(e) => setDraft(e.currentTarget.value)}
                     onKeyDown={onComposeKeyDown}
                   />
                   <div class="compose-toolbar">
                     <div class="compose-selects">
-                      {composeAgents.length ? (
-                        <select class="mini-select" value={activeAgent}
-                          onChange={(e) => setActiveAgent(e.currentTarget.value)}>
-                          {composeAgents.map(([name, teamName]) => (
-                            <option value={esc(name)}>{esc(name)} · {esc(teamName)}</option>
-                          ))}
-                        </select>
-                      ) : (
-                        <span class="mini-select muted">No team invited</span>
-                      )}
                       <button class="mini-select" type="button" onClick={() => setModal({ kind: 'attach' })}>
                         <Icon name="paperclip" size={13} />Attach
                       </button>
@@ -510,12 +495,15 @@ export function RoomDetailHost({ room, state, notify, setModal, runTask, refresh
                         <Icon name="shield-check" size={13} />Approval {settings.requireRunApproval ? 'on' : 'off'}
                       </button>
                     </div>
+                    <span class="compose-route" title="Messages run the room's main agent unless you mention @agent">
+                      <Icon name="bot" size={12} />@agent routes · default main
+                    </span>
                     <button class="send-btn" type="submit" disabled={sending} aria-label="Send message">
                       <Icon name="arrow-up" />
                     </button>
                   </div>
                 </div>
-                <div class="compose-foot">Messages are saved locally. A task only runs when you start it.</div>
+                <div class="compose-foot">Sending runs the agent now — the reply lands back here in chat.</div>
               </form>
             </div>
           )}
@@ -986,7 +974,7 @@ export function RunsPage({ state, cancelRun, pauseRun }) {
               <article class="room-row">
                 <div class={avatarClass(tone)} style="border-radius:6px"><Icon name="activity" size={14} /></div>
                 <div class="room-main">
-                  <div class="room-title">{esc(run.status)} · {esc(run.model)}</div>
+                  <div class="room-title">{esc(run.status)} · {esc(run.model)}{task?.hidden ? ' · chat' : ''}</div>
                   <div class="room-sub">{esc(task ? task.title : 'Unknown task')} · {esc(run.result || run.error || 'Run executing…')}</div>
                   <div class="room-foot">
                     <span class="tag">{esc(run.provider)}</span>

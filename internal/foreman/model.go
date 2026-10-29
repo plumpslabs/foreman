@@ -87,6 +87,7 @@ type Task struct {
 	UpdatedAt      time.Time `json:"updatedAt"`
 	LastRunID      string    `json:"lastRunId,omitempty"`
 	ManualOverride bool      `json:"manualOverride,omitempty"`
+	Hidden         bool      `json:"hidden,omitempty"`
 }
 
 type AgentRun struct {

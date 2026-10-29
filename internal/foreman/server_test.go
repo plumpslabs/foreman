@@ -131,6 +131,67 @@ func TestDeleteRoomRemovesItsTasksAndRuns(t *testing.T) {
 	}
 }
 
+func TestChatMessageCreatesHiddenTask(t *testing.T) {
+	server, project := newTestServer(t)
+	handler := server.Handler()
+	base := "?project=" + url.QueryEscape(project)
+
+	importBody := bytes.NewBufferString(`{"templateId":"quick-fix","name":"Chat Team"}`)
+	importReq := httptest.NewRequest(http.MethodPost, "/api/teams/import"+base, importBody)
+	importReq.Header.Set("Content-Type", "application/json")
+	importReq.RemoteAddr = "127.0.0.1:1234"
+	importReq.Host = "127.0.0.1:8080"
+	importRes := httptest.NewRecorder()
+	handler.ServeHTTP(importRes, importReq)
+	var team Team
+	if err := json.Unmarshal(importRes.Body.Bytes(), &team); err != nil {
+		t.Fatal(err)
+	}
+
+	roomBody := bytes.NewBufferString(fmt.Sprintf(`{"name":"Chat Room","teamIds":[%q]}`, team.ID))
+	roomReq := httptest.NewRequest(http.MethodPost, "/api/rooms"+base, roomBody)
+	roomReq.Header.Set("Content-Type", "application/json")
+	roomReq.RemoteAddr = "127.0.0.1:1234"
+	roomReq.Host = "127.0.0.1:8080"
+	roomRes := httptest.NewRecorder()
+	handler.ServeHTTP(roomRes, roomReq)
+	var room Room
+	if err := json.Unmarshal(roomRes.Body.Bytes(), &room); err != nil {
+		t.Fatal(err)
+	}
+
+	msgBody := bytes.NewBufferString(`{"role":"user","content":"@Quick Coordinator what changed?"}`)
+	msgReq := httptest.NewRequest(http.MethodPost, "/api/rooms/"+room.ID+"/messages"+base, msgBody)
+	msgReq.Header.Set("Content-Type", "application/json")
+	msgReq.RemoteAddr = "127.0.0.1:1234"
+	msgReq.Host = "127.0.0.1:8080"
+	msgRes := httptest.NewRecorder()
+	handler.ServeHTTP(msgRes, msgReq)
+	if msgRes.Code != http.StatusCreated {
+		t.Fatalf("message status = %d: %s", msgRes.Code, msgRes.Body.String())
+	}
+
+	stateReq := httptest.NewRequest(http.MethodGet, "/api/workspace"+base, nil)
+	stateReq.RemoteAddr = "127.0.0.1:1234"
+	stateReq.Host = "127.0.0.1:8080"
+	stateRes := httptest.NewRecorder()
+	handler.ServeHTTP(stateRes, stateReq)
+	var state WorkspaceState
+	if err := json.Unmarshal(stateRes.Body.Bytes(), &state); err != nil {
+		t.Fatal(err)
+	}
+	if len(state.Rooms[0].Messages) != 1 {
+		t.Fatalf("expected one chat message, got %d", len(state.Rooms[0].Messages))
+	}
+	if len(state.Tasks) != 1 {
+		t.Fatalf("expected one hidden chat task, got %d", len(state.Tasks))
+	}
+	task := state.Tasks[0]
+	if !task.Hidden || task.RoomID != room.ID || task.TeamID != team.ID || task.AgentName != "Quick Coordinator" {
+		t.Fatalf("unexpected chat task: %#v", task)
+	}
+}
+
 func TestImportTeamAndCreateRoomAPIs(t *testing.T) {
 	server, project := newTestServer(t)
 	handler := server.Handler()
@@ -178,10 +239,15 @@ func TestImportTeamAndCreateRoomAPIs(t *testing.T) {
 	if messageRes.Code != http.StatusCreated {
 		t.Fatalf("room message status = %d: %s", messageRes.Code, messageRes.Body.String())
 	}
-	var message ChatMessage
-	if err := json.Unmarshal(messageRes.Body.Bytes(), &message); err != nil {
+	var messageEnvelope struct {
+		Message ChatMessage `json:"message"`
+		Run     *AgentRun   `json:"run"`
+		Warning string      `json:"warning"`
+	}
+	if err := json.Unmarshal(messageRes.Body.Bytes(), &messageEnvelope); err != nil {
 		t.Fatal(err)
 	}
+	message := messageEnvelope.Message
 	if message.Role != "user" || message.Content != "Please inspect this project" {
 		t.Fatalf("unexpected chat message: %#v", message)
 	}

@@ -111,8 +111,14 @@ gain a mode plus a file tree.
   stores it and the room shows a card with option buttons plus a custom answer. Answering records
   the choice in the chat.
 - **Chat compose** — Enter sends, Shift+Enter adds a newline, and sends are queued so you can type
-  while an earlier message is still in flight (no spam/double submit). The agent selector lists
-  every agent across the invited teams; routing is via `@agent` mention.
+  while an earlier message is still in flight (no spam/double submit). There is no agent dropdown in
+  the composer: a message runs the room's main agent by default; prefix `@agent` to route it to a
+  specific agent.
+- **Send = run** — a user message is stored in chat **and** starts an agent run (a hidden task
+  spawned per message; implicit in the Kanban and task progress). The agent's reply is appended back
+  into the chat when the run finishes, and questions from the agent appear as decision cards. If the
+  room has no invited team (or no configured provider), the message is still stored and a warning is
+  returned to the sender.
 - **Live agents strip** — above the input, every invited agent shows as a chip with a status dot:
   pulsing while running, dimmed when paused, muted when idle.
 - **Room rail members** — each invited team in the right rail lists its member badges (main agent

@@ -90,6 +90,8 @@ if (!view.includes('Teams invited to this room')) failures.push('team-invited ca
 if (!view.includes('Smoke Team')) failures.push('invited team name missing from card');
 if (!window.document.querySelector('.live-agents .live-agent.live-on')) failures.push('live agent indicator missing');
 if (!window.document.querySelector('.member-badge.main')) failures.push('member badges missing from the room rail');
+if (window.document.querySelector('.compose-selects select')) failures.push('agent select should be removed from the composer');
+if (!window.document.querySelector('.compose-route')) failures.push('compose routing hint missing');
 if (window.location.hash !== '#/rooms/r1') failures.push('room route was not written to the hash');
 
 // Enter-to-send + send queue: typing and pressing Enter must POST a message.
