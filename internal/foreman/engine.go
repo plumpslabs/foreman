@@ -21,16 +21,17 @@ import (
 var bridgeScript []byte
 
 // EngineRequest describes one bounded OpenHands run executed by the bridge.
+// JSON tags must match the config keys read by bridge/agent_bridge.py.
 type EngineRequest struct {
-	Workspace            string
-	Prompt               string
-	Protocol             string
-	BaseURL              string
-	APIKey               string
-	Model                string
-	MaxIterations        int
-	BudgetUSD            float64
-	AllowProjectCommands bool
+	Workspace            string  `json:"workspace"`
+	Prompt               string  `json:"prompt"`
+	Protocol             string  `json:"protocol"`
+	BaseURL              string  `json:"baseUrl"`
+	APIKey               string  `json:"apiKey"`
+	Model                string  `json:"model"`
+	MaxIterations        int     `json:"maxIterations"`
+	BudgetUSD            float64 `json:"budgetUsd"`
+	AllowProjectCommands bool    `json:"allowProjectCommands"`
 }
 
 // EngineEvent is one streamed update from the bridge process.

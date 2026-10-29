@@ -1,10 +1,7 @@
 # Binaries & build output
-/brocode
-/brocode.exe
 /bin/
 /dist/
 /out/
-/brocode-*
 
 # Compiled binaries (cross-platform)
 *.exe
@@ -49,7 +46,6 @@ go.work.sum
 *.db-journal
 *.sqlite-shm
 *.sqlite-wal
-.brocode/
 .foreman/
 
 # Logs
@@ -86,3 +82,5 @@ Desktop.ini
 *.njsproj
 *.sln
 *.iml
+# Foreman web dashboard
+/web/node_modules/

@@ -1,6 +1,7 @@
 package foreman
 
 import (
+	"context"
 	"embed"
 	"encoding/json"
 	"errors"
@@ -15,7 +16,7 @@ import (
 	"time"
 )
 
-//go:embed web/*
+//go:embed all:web/dist
 var webFiles embed.FS
 
 type Server struct {
@@ -49,7 +50,10 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("PUT /api/settings", s.updateSettings)
 	mux.HandleFunc("POST /api/skills", s.saveSkill)
 	mux.HandleFunc("DELETE /api/skills/{skillID}", s.deleteSkill)
-	static, _ := fs.Sub(webFiles, "web")
+	static, err := fs.Sub(webFiles, "web/dist")
+	if err != nil {
+		panic("foreman: embedded dashboard is missing; run `make web` before building: " + err.Error())
+	}
 	mux.Handle("GET /", http.FileServer(http.FS(static)))
 	return s.localOnly(mux)
 }
@@ -196,7 +200,7 @@ func (s *Server) startTask(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	run, err := s.runtime.StartTask(r.Context(), r.PathValue("taskID"))
+	run, err := s.runtime.StartTask(context.WithoutCancel(r.Context()), r.PathValue("taskID"))
 	if err != nil {
 		writeError(w, http.StatusUnprocessableEntity, err.Error())
 		return

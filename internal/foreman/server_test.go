@@ -34,7 +34,7 @@ func TestDashboardServesEmbeddedUIAndWorkspaceAPI(t *testing.T) {
 	rootReq.RemoteAddr = "127.0.0.1:1234"
 	rootReq.Host = "127.0.0.1:8080"
 	handler.ServeHTTP(root, rootReq)
-	if root.Code != http.StatusOK || !strings.Contains(root.Body.String(), "Make the work visible.") {
+	if root.Code != http.StatusOK || !strings.Contains(root.Body.String(), "Foreman") {
 		t.Fatalf("dashboard response = %d %s", root.Code, root.Body.String())
 	}
 

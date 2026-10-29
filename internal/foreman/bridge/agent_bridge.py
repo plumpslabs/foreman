@@ -101,17 +101,28 @@ def read_metric(obj, names):
 
 
 def collect_usage(llm):
+    """Read token/cost totals from the SDK's Metrics object."""
     try:
         metrics = llm.metrics
     except Exception:
         return 0, 0.0
-    cost = read_metric(metrics, ("total_cost", "cost_usd", "cost"))
-    tokens = read_metric(metrics, ("total_tokens", "total_tokens_used"))
+    cost = 0.0
+    tokens = 0
+    try:
+        cost = float(getattr(metrics, "accumulated_cost", 0) or 0)
+    except Exception:
+        cost = 0.0
+    try:
+        usage = getattr(metrics, "accumulated_token_usage", None)
+        if usage is not None:
+            tokens = int(getattr(usage, "prompt_tokens", 0) or 0) + int(
+                getattr(usage, "completion_tokens", 0) or 0
+            )
+    except Exception:
+        tokens = 0
     if not tokens:
-        tokens = read_metric(metrics, ("prompt_tokens", "input_tokens")) + read_metric(
-            metrics, ("completion_tokens", "output_tokens")
-        )
-    return int(tokens), cost
+        tokens = int(read_metric(metrics, ("total_tokens", "total_tokens_used")) or 0)
+    return tokens, cost
 
 
 def extract_final_message(conversation):
@@ -192,21 +203,36 @@ def main():
 
     agent = Agent(llm=llm, tools=tools)
     max_iterations = int(config.get("maxIterations") or 30)
+    budget = float(config.get("budgetUsd") or 0)
+    # visualizer=None keeps the SDK's pretty-printer off stdout so the
+    # JSON-line protocol stays the only thing on the pipe.
+    conv_kwargs = {"visualizer": None}
+    if budget > 0:
+        conv_kwargs["max_budget_per_run"] = budget
     try:
-        conversation = Conversation(agent=agent, workspace=workspace, max_iterations=max_iterations)
+        conversation = Conversation(
+            agent=agent,
+            workspace=workspace,
+            max_iteration_per_run=max_iterations,
+            **conv_kwargs,
+        )
     except TypeError:
-        conversation = Conversation(agent=agent, workspace=workspace)
         try:
-            conversation.state.max_iterations = max_iterations
-        except Exception:
-            pass
+            conversation = Conversation(
+                agent=agent, workspace=workspace, max_iterations=max_iterations, **conv_kwargs
+            )
+        except TypeError:
+            conversation = Conversation(agent=agent, workspace=workspace, **conv_kwargs)
+            try:
+                conversation.state.max_iterations = max_iterations
+            except Exception:
+                pass
 
     prompt = config.get("prompt") or ""
     overview = project_overview(workspace)
     if overview:
         prompt += "\n\nWorkspace file overview:\n" + overview
 
-    budget = float(config.get("budgetUsd") or 0)
     state = {"over_budget": False, "done": False, "last_status": ""}
 
     def poll():
