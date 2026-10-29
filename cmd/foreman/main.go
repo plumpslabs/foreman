@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/plumpslabs/foreman/internal/foreman"
+	"github.com/plumpslabs/foreman/internal/version"
 )
 
 func main() {
@@ -30,7 +31,7 @@ func main() {
 			os.Exit(1)
 		}
 	case "version", "--version", "-v":
-		fmt.Println("Foreman dev")
+		fmt.Println(version.Info())
 	default:
 		usage()
 		os.Exit(2)

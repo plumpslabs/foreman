@@ -1,40 +1,86 @@
-# Foreman: foundation and roadmap
+# Foreman: architecture and status
 
-## Repository audit
+## What this repository is
 
-This repository is a Go 1.26 CLI application, not an empty static prototype. It has a Bubble Tea terminal UI, a tool-using agent loop, provider adapters, subagents, SQLite-backed session history, skills, and extensive unit tests. The supplied Foreman HTML is a visual/interaction prototype; its dashboard data and agent execution are simulated. The baseline `go test ./...` passed before Foreman changes. The working tree already contained unrelated local edits, so those files were not reverted or cleaned up.
+Foreman is a local-first agent workspace: a Go service with an embedded Preact dashboard, a
+versioned JSON workspace store, and an agent engine provided by the open-source
+[OpenHands Software Agent SDK](https://github.com/OpenHands/software-agent-sdk) (MIT).
+
+The former BroCode codebase (CLI, TUI, agent loop, provider adapters, tool registry, skills, MCP,
+SQLite session store) was removed in the restructure; the recovery checkpoint for everything that
+existed before it is commit `fd15882`.
 
 ## Architecture decision
 
-Keep the proven Go agent core and its existing tests intact while adding Foreman as a separate CLI and local application boundary. This avoids a destructive rewrite and lets later milestones explicitly connect stable provider, tool, and execution interfaces. The Foreman service owns the dashboard, local workspace persistence, future orchestration and policies. It binds only to loopback; browser code has no provider credentials or direct privileged execution access.
+Split the system at the layer Foreman actually differentiates on:
 
-Foreman workspace definitions are separate from BroCode's session/event database. Initial state lives in `<project>/.foreman/workspace.json` using a versioned schema, atomic replacement, and restrictive file permissions. This small store is suitable for the first team/room foundation; use SQLite migrations once durable runs, events, tasks, and approvals are introduced.
+| Layer | Owner |
+| --- | --- |
+| Rooms, Kanban, teams, skills, approvals, budgets, run history | Foreman (Go) |
+| Persistence, loopback-only API, policy validation | Foreman (Go) |
+| Dashboard UX | Foreman (Preact, `web/` → embedded `internal/foreman/web/dist`) |
+| Agent loop, tools, workspace execution, events | OpenHands SDK (Python, via embedded bridge) |
+| LLM provider connection | Foreman config → OpenHands `LLM(base_url=…)` |
 
-## Foundation milestone delivered
+This keeps Foreman's differentiating orchestration and UX as first-party code while avoiding a
+from-scratch rewrite of the hard, well-tested parts of a coding agent.
 
-- `foreman start [--project DIR] [--port PORT] [--no-open]` launches the embedded dashboard. Port 0 chooses an available port; a busy preferred port falls back safely.
-- The embedded dark dashboard is based on the supplied prototype's visual direction and clearly distinguishes working local workspace features from unavailable runtime features.
-- Three versioned team templates can be previewed and imported as editable copies. Users can create named rooms and invite the same reusable team into multiple room records.
-- Dashboard and local JSON APIs are project-scoped, loopback-only, and reject cross-origin POSTs. Workspace data is atomically saved with mode 0600.
-- No fake agents, provider calls, source-code transfer, or shell execution are presented as working features.
+## Engine bridge
 
-## Usage
+`internal/foreman/bridge/agent_bridge.py` is embedded in the binary and materialized to a temp
+dir per run. The Go runtime (`internal/foreman/engine.go`) spawns it as a subprocess:
 
-From this repository:
+- **stdin**: one JSON line — workspace, prompt, provider (protocol/base URL/key/model), iteration
+  budget, cost budget, project-command policy.
+- **stdout**: newline-delimited JSON events (`status`/`tool`/`message`) and a terminal `result`
+  (`completed`/`failed`/`blocked`, message, tokens, cost). The SDK's visualizer is disabled so
+  the stream stays pure JSON.
+- **cancellation**: the Go side owns the deadline (`MaxExecutionSeconds`) and kills the process;
+  status maps to `cancelled`/`timed_out`.
+- **budget**: enforced both by `max_budget_per_run` in the SDK and a polling guard in the bridge.
+- **secrets**: API keys are passed via the config line (never argv) and redacted from persisted
+  errors/events.
 
-```sh
-go run ./cmd/foreman start
-```
+Interpreter selection: `FOREMAN_PYTHON` env var, else `python3`, else `python`. The SDK requires
+Python 3.12+; when it is missing the run fails with an explicit install hint.
 
-Or build/install the `foreman` Go command from `./cmd/foreman`, then run `foreman start` inside a project. The command opens the dashboard automatically; use `--no-open` for headless/remote-terminal workflows.
+Verified end-to-end against OpenHands SDK v1.59.0: spawn → config → status events → LLM call →
+result → task transition to `review`, with token accounting.
+
+## Persistence
+
+Initial state lives in `<project>/.foreman/workspace.json` (versioned schema, atomic replace,
+mode 0600). Credentials live separately in `<project>/.foreman/credentials.json` (0600) and are
+never returned by the API — only a `hasApiKey` flag. Use SQLite migrations if durable runs,
+events, tasks, and approvals outgrow JSON.
+
+## Security posture
+
+- Loopback-only listener; non-loopback Host/RemoteAddr rejected.
+- Cross-origin POSTs rejected (Origin must match Host and be loopback).
+- Project path must match the server's workspace on every API call.
+- Request bodies capped at 1 MB with `DisallowUnknownFields`.
+- Provider URLs must be absolute HTTP(S) without credentials/query/fragment; plain HTTP only for
+  loopback endpoints; connection tests refuse private/link-local targets (SSRF guard).
+- Runs execute with workspace root as cwd; project commands are only enabled by explicit policy.
+
+## Dashboard
+
+Preact SPA in `web/`, built by Vite into `internal/foreman/web/dist` and embedded via
+`go:embed`. Pages: Home, Rooms (chat + tasks), Kanban (dependency-aware), Teams, Agents, Skills,
+Runs (events + cancel), Settings (providers, execution policy, theme).
+`npm run smoke` renders the built bundle in jsdom against a mocked API.
 
 ## Roadmap
 
-1. **Foundation and UX (current):** local CLI/service, project workspace persistence, dashboard navigation, team template import, and room creation. Remaining: editable agents/teams/skills, full theme system, global Kanban and filters.
-2. **Provider configuration:** typed provider/model capabilities, connection tests, safe secret handling, and per-agent routing; begin with adapters already present in the Go core.
-3. **Real local execution:** runtime interface and bounded harness, real logs/status/cancellation, workspace boundaries, and artifacts. Do not expose unrestricted shell execution through the dashboard.
-4. **Orchestration:** task/dependency model, bounded scheduling, approval/resource policies, isolated room runs, and explicit handoffs.
-5. **Safety and recovery:** verification/review, state-transition tests, restart recovery, and end-to-end coverage.
-6. **Optional integrations:** evaluate only after the local core is useful and safe.
+1. **Done — foundation:** CLI, workspace persistence, dashboard, team templates, rooms.
+2. **Done — provider configuration:** typed provider/model config, connection tests, separate
+   secret storage, per-run routing through the engine.
+3. **Done — real local execution:** bounded runs (iterations, wall time, cost), event stream,
+   status/cancellation, workspace cwd, artifacts in the project tree.
+4. **Next — orchestration:** parallel scheduling across rooms, explicit handoffs, richer
+   dependency transitions, restart recovery for runs interrupted by a crash.
+5. **Later — optional integrations:** Docker workspace isolation, MCP tools, multi-engine
+   adapters — evaluate only when the local core proves useful and safe.
 
-The legacy BroCode CLI remains available during migration. Remove or rename legacy components only after their replacement is implemented, tested, and no longer required by compatibility paths.
+The legacy BroCode CLI is gone; nothing in the tree references it.
