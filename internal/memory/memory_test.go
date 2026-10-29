@@ -352,3 +352,16 @@ func TestPruneCap(t *testing.T) {
 	}
 	_ = data
 }
+
+func TestRetainVerifiedLesson(t *testing.T) {
+	dir := t.TempDir()
+	s := NewStore(dir)
+	ok, err := s.RetainVerifiedLesson("Lessons Learned", "Avoid wide tests", "Run targeted package tests", "test_passed")
+	if err != nil || !ok {
+		t.Fatalf("failed to retain verified lesson: %v", err)
+	}
+	list := s.List()
+	if !strings.Contains(list, "Lessons Learned") || !strings.Contains(list, "test_passed") || !strings.Contains(list, "Avoid wide tests") {
+		t.Errorf("lesson not recorded properly:\n%s", list)
+	}
+}

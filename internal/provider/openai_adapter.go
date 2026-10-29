@@ -62,12 +62,21 @@ type openAITool struct {
 	} `json:"function"`
 }
 
+type openAIReasoning struct {
+	Effort  string `json:"effort,omitempty"`
+	Enabled *bool  `json:"enabled,omitempty"`
+}
+
 type openAIChatRequest struct {
-	Model       string              `json:"model"`
-	Messages    []openAIChatMessage `json:"messages"`
-	Tools       []openAITool        `json:"tools,omitempty"`
-	Temperature float64             `json:"temperature,omitempty"`
-	Stream      bool                `json:"stream,omitempty"`
+	Model           string              `json:"model"`
+	Messages        []openAIChatMessage `json:"messages"`
+	Tools           []openAITool        `json:"tools,omitempty"`
+	Temperature     float64             `json:"temperature,omitempty"`
+	Stream          bool                `json:"stream,omitempty"`
+	Reasoning       *openAIReasoning    `json:"reasoning,omitempty"`
+	ReasoningEffort string              `json:"reasoning_effort,omitempty"`
+	Think           *bool               `json:"think,omitempty"`
+	EnableThinking  *bool               `json:"enable_thinking,omitempty"`
 }
 
 type openAIChatResponse struct {
@@ -123,7 +132,7 @@ type openAIStreamChunk struct {
 	} `json:"usage"`
 }
 
-func buildOpenAIRequest(req CompletionRequest, stream bool) (*openAIChatRequest, error) {
+func (a *OpenAIAdapter) buildOpenAIRequest(req CompletionRequest, stream bool) (*openAIChatRequest, error) {
 	apiReq := &openAIChatRequest{
 		Model:       req.Model,
 		Temperature: req.Temperature,
@@ -131,8 +140,12 @@ func buildOpenAIRequest(req CompletionRequest, stream bool) (*openAIChatRequest,
 	}
 
 	for _, msg := range req.Messages {
+		role := msg.Role
+		if msg.ToolCallID != "" || role == "tool" {
+			role = "tool"
+		}
 		oMsg := openAIChatMessage{
-			Role:       msg.Role,
+			Role:       role,
 			Content:    msg.Content,
 			ToolCallID: msg.ToolCallID,
 		}
@@ -158,6 +171,34 @@ func buildOpenAIRequest(req CompletionRequest, stream bool) (*openAIChatRequest,
 		oTool.Function.Description = tool.Description
 		oTool.Function.Parameters = tool.Parameters
 		apiReq.Tools = append(apiReq.Tools, oTool)
+	}
+
+	isOpenAI := strings.Contains(a.BaseURL, "api.openai.com")
+	isOpenRouter := strings.Contains(a.BaseURL, "openrouter.ai")
+
+	if req.ReasoningEffort != "" {
+		if isOpenRouter {
+			if req.ReasoningEffort == "none" {
+				disabled := false
+				apiReq.Reasoning = &openAIReasoning{Effort: "none", Enabled: &disabled}
+			} else {
+				enabled := true
+				apiReq.Reasoning = &openAIReasoning{Effort: req.ReasoningEffort, Enabled: &enabled}
+			}
+		} else if isOpenAI {
+			// Official OpenAI reasoning models (o1, o3, etc.) accept reasoning_effort ("low", "medium", "high").
+			// For "none" or standard models (gpt-4o, etc.), omit reasoning_effort to prevent 400 Bad Request.
+			if req.ReasoningEffort != "none" {
+				apiReq.ReasoningEffort = req.ReasoningEffort
+			}
+		} else {
+			// Local / Ollama / vLLM / SGLang / custom OpenAI-compatible endpoints
+			if req.ReasoningEffort == "none" {
+				noThink := false
+				apiReq.Think = &noThink
+				apiReq.EnableThinking = &noThink
+			}
+		}
 	}
 
 	return apiReq, nil
@@ -199,7 +240,7 @@ func (a *OpenAIAdapter) doPost(ctx context.Context, apiReq *openAIChatRequest) (
 }
 
 func (a *OpenAIAdapter) Complete(ctx context.Context, req CompletionRequest) (*CompletionResponse, error) {
-	apiReq, err := buildOpenAIRequest(req, false)
+	apiReq, err := a.buildOpenAIRequest(req, false)
 	if err != nil {
 		return nil, err
 	}
@@ -278,11 +319,17 @@ func (a *OpenAIAdapter) Complete(ctx context.Context, req CompletionRequest) (*C
 }
 
 // StreamComplete implements StreamingAdapter: content deltas are forwarded via
-// onDelta while tool-call fragments accumulate across SSE chunks. The stream is
+// onDelta while tool-call fragments accumulate across SSE chunks.
+func (a *OpenAIAdapter) StreamComplete(ctx context.Context, req CompletionRequest, onDelta func(string)) (*CompletionResponse, error) {
+	return a.StreamCompleteWithReasoning(ctx, req, onDelta, nil)
+}
+
+// StreamCompleteWithReasoning implements ReasoningStreamingAdapter: both content deltas
+// and reasoning (thinking) deltas are forwarded in real-time. The stream is
 // bounded by the idle watchdog, NOT a total deadline — long generations that
 // keep emitting chunks are never cut off.
-func (a *OpenAIAdapter) StreamComplete(ctx context.Context, req CompletionRequest, onDelta func(string)) (*CompletionResponse, error) {
-	apiReq, err := buildOpenAIRequest(req, true)
+func (a *OpenAIAdapter) StreamCompleteWithReasoning(ctx context.Context, req CompletionRequest, onDelta func(string), onReasoning func(string)) (*CompletionResponse, error) {
+	apiReq, err := a.buildOpenAIRequest(req, true)
 	if err != nil {
 		return nil, err
 	}
@@ -342,6 +389,9 @@ func (a *OpenAIAdapter) StreamComplete(ctx context.Context, req CompletionReques
 		}
 		if d := choice.Delta.ReasoningContent; d != "" {
 			res.Reasoning += d
+			if onReasoning != nil {
+				onReasoning(d)
+			}
 		}
 		if choice.FinishReason != "" {
 			res.FinishReason = choice.FinishReason

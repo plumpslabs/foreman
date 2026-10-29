@@ -1,7 +1,6 @@
 package provider
 
 import (
-	"slices"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -9,6 +8,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -1055,6 +1055,46 @@ func TestOpenAIStreamCompleteContent(t *testing.T) {
 	}
 }
 
+func TestOpenAIStreamCompleteWithReasoning(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprint(w, `data: {"choices":[{"delta":{"reasoning_content":"Think"}}]}`+"\n\n")
+		fmt.Fprint(w, `data: {"choices":[{"delta":{"reasoning_content":"ing..."}}]}`+"\n\n")
+		fmt.Fprint(w, `data: {"choices":[{"delta":{"content":"Ans"}}]}`+"\n\n")
+		fmt.Fprint(w, `data: {"choices":[{"delta":{"content":"wer"}}]}`+"\n\n")
+		fmt.Fprint(w, `data: {"choices":[{"delta":{},"finish_reason":"stop"}]}`+"\n\n")
+		fmt.Fprint(w, "data: [DONE]\n\n")
+	}))
+	defer srv.Close()
+
+	a := NewOpenAIAdapter(srv.URL, "test-key")
+	var contentDeltas []string
+	var reasoningDeltas []string
+	res, err := a.StreamCompleteWithReasoning(context.Background(), CompletionRequest{
+		Model:    "test-model",
+		Messages: []Message{{Role: "user", Content: "hi"}},
+	}, func(d string) {
+		contentDeltas = append(contentDeltas, d)
+	}, func(r string) {
+		reasoningDeltas = append(reasoningDeltas, r)
+	})
+	if err != nil {
+		t.Fatalf("StreamCompleteWithReasoning failed: %v", err)
+	}
+	if res.Content != "Answer" {
+		t.Errorf("expected accumulated content Answer, got %q", res.Content)
+	}
+	if res.Reasoning != "Thinking..." {
+		t.Errorf("expected accumulated reasoning Thinking..., got %q", res.Reasoning)
+	}
+	if got := strings.Join(contentDeltas, ""); got != "Answer" {
+		t.Errorf("expected content deltas Answer, got %q", got)
+	}
+	if got := strings.Join(reasoningDeltas, ""); got != "Thinking..." {
+		t.Errorf("expected reasoning deltas Thinking..., got %q", got)
+	}
+}
+
 // TestOpenAIStreamCompleteMidStreamCut simulates a free-tier gateway
 // whose session/duration limit expires WHILE the answer is still
 // streaming: content arrives, then the connection just closes with no
@@ -1180,5 +1220,64 @@ func TestOpenCodeImportBringsAuthKey(t *testing.T) {
 	}
 	if p.APIKey != "oc-secret-key" {
 		t.Errorf("expected imported provider to borrow opencode auth key, got %q", p.APIKey)
+	}
+}
+
+func TestOpenAIAdapter_ReasoningControl(t *testing.T) {
+	// 1. OpenRouter test
+	var orCaptured openAIChatRequest
+	orSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&orCaptured)
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"choices":[{"message":{"role":"assistant","content":"ok"}}]}`)
+	}))
+	defer orSrv.Close()
+
+	orAdapter := NewOpenAIAdapter(orSrv.URL, "test-key")
+	orAdapter.BaseURL = "https://openrouter.ai/api/v1" // test provider detection
+
+	reqNone := CompletionRequest{Model: "poolside/laguna-s-2.1", ReasoningEffort: "none"}
+	apiReqNone, err := orAdapter.buildOpenAIRequest(reqNone, false)
+	if err != nil {
+		t.Fatalf("buildOpenAIRequest failed: %v", err)
+	}
+	if apiReqNone.Reasoning == nil || apiReqNone.Reasoning.Effort != "none" || apiReqNone.Reasoning.Enabled == nil || *apiReqNone.Reasoning.Enabled != false {
+		t.Errorf("expected OpenRouter reasoning disabled, got %+v", apiReqNone.Reasoning)
+	}
+
+	reqHigh := CompletionRequest{Model: "poolside/laguna-s-2.1", ReasoningEffort: "high"}
+	apiReqHigh, err := orAdapter.buildOpenAIRequest(reqHigh, false)
+	if err != nil {
+		t.Fatalf("buildOpenAIRequest failed: %v", err)
+	}
+	if apiReqHigh.Reasoning == nil || apiReqHigh.Reasoning.Effort != "high" || apiReqHigh.Reasoning.Enabled == nil || *apiReqHigh.Reasoning.Enabled != true {
+		t.Errorf("expected OpenRouter reasoning enabled high, got %+v", apiReqHigh.Reasoning)
+	}
+
+	// 2. Official OpenAI test (omit for none, set for high)
+	oaiAdapter := NewOpenAIAdapter("https://api.openai.com/v1", "test-key")
+	oaiReqNone, err := oaiAdapter.buildOpenAIRequest(reqNone, false)
+	if err != nil {
+		t.Fatalf("buildOpenAIRequest failed: %v", err)
+	}
+	if oaiReqNone.ReasoningEffort != "" || oaiReqNone.Reasoning != nil || oaiReqNone.Think != nil {
+		t.Errorf("expected official OpenAI to omit reasoning effort on none, got effort=%q reasoning=%+v", oaiReqNone.ReasoningEffort, oaiReqNone.Reasoning)
+	}
+	oaiReqHigh, err := oaiAdapter.buildOpenAIRequest(reqHigh, false)
+	if err != nil {
+		t.Fatalf("buildOpenAIRequest failed: %v", err)
+	}
+	if oaiReqHigh.ReasoningEffort != "high" {
+		t.Errorf("expected official OpenAI to set reasoning_effort=high, got %q", oaiReqHigh.ReasoningEffort)
+	}
+
+	// 3. Local / Ollama / vLLM test
+	localAdapter := NewOpenAIAdapter("http://localhost:11434/v1", "")
+	localReqNone, err := localAdapter.buildOpenAIRequest(reqNone, false)
+	if err != nil {
+		t.Fatalf("buildOpenAIRequest failed: %v", err)
+	}
+	if localReqNone.Think == nil || *localReqNone.Think != false || localReqNone.EnableThinking == nil || *localReqNone.EnableThinking != false {
+		t.Errorf("expected local Ollama/vLLM think: false, got think=%v enable_thinking=%v", localReqNone.Think, localReqNone.EnableThinking)
 	}
 }

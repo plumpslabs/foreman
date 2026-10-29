@@ -8,6 +8,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	tea "charm.land/bubbletea/v2"
 	bcontext "github.com/plumpslabs/bro-code/internal/context"
@@ -69,8 +70,8 @@ func TestTurnFlowKeepsHistoryAndSettlesStatus(t *testing.T) {
 			t.Fatalf("step progress update failed: %v", err)
 		}
 	}
-	if len(m.activity) != 4 {
-		t.Fatalf("expected 4 activity steps, got %d: %v", len(m.activity), m.activity)
+	if len(m.activity) != 3 {
+		t.Fatalf("expected 3 activity steps, got %d: %v", len(m.activity), m.activity)
 	}
 	if len(m.messages) != 2 { // 1 initial banner + 1 YOU — progress must not add more
 		t.Fatalf("progress polluted history: expected 2 messages, got %d", len(m.messages))
@@ -1200,7 +1201,6 @@ func TestMCPModalFlow(t *testing.T) {
 		t.Fatalf("modal should list the server:\n%s", view)
 	}
 
-
 	// 'a' starts the add wizard at the transport step.
 	_, _ = m.Update(tea.KeyPressMsg{Code: 'a', Text: "a"})
 	if !m.mcpAddActive || m.mcpAddStep != 0 {
@@ -1688,5 +1688,60 @@ func TestTodosLiveUpdateInTUI(t *testing.T) {
 	rendered := m.View().Content
 	if !strings.Contains(rendered, "TODOS") && !strings.Contains(rendered, "OBJECTIVES") {
 		t.Fatalf("expected rendered TUI to show TODOs card, got: %s", rendered)
+	}
+}
+
+func TestActivityCappedAtThreeAndTruncated(t *testing.T) {
+	m := newTestApp()
+	m.status = "Thinking..."
+	m.turnRunning = true
+	m.width = 80
+	m.height = 30
+
+	steps := []string{
+		"Step 1: Simple short step",
+		"Step 2: Another short step",
+		"Step 3: This is a very long file path command that should definitely exceed the length limit and get truncated cleanly /Users/mawa/Development/my_projects/bro-code/internal/provider/openai_adapter.go",
+		"Step 4: Yet another overly verbose process message with multi-line content\nthat needs to be flattened into a single clean line for terminal UI",
+		"Step 5: Final long step that should remain visible in the top three slots of activity",
+	}
+
+	for _, s := range steps {
+		_, err := m.Update(stepProgressMsg{info: s})
+		if err != nil {
+			t.Fatalf("Update failed: %v", err)
+		}
+	}
+
+	// 1. Must cap at 3 entries
+	if len(m.activity) != 3 {
+		t.Fatalf("expected activity capped at 3, got %d: %v", len(m.activity), m.activity)
+	}
+
+	// 2. Entries must be the last 3 (Step 3, Step 4, Step 5)
+	if !strings.Contains(m.activity[0], "Step 3:") {
+		t.Fatalf("expected first retained activity to contain 'Step 3:', got: %q", m.activity[0])
+	}
+	if !strings.Contains(m.activity[1], "Step 4:") {
+		t.Fatalf("expected second retained activity to contain 'Step 4:', got: %q", m.activity[1])
+	}
+	if !strings.Contains(m.activity[2], "Step 5:") {
+		t.Fatalf("expected third retained activity to contain 'Step 5:', got: %q", m.activity[2])
+	}
+
+	// 3. Length must be truncated with "..." and no newlines
+	for i, act := range m.activity {
+		if strings.Contains(act, "\n") {
+			t.Fatalf("activity [%d] contains newline: %q", i, act)
+		}
+		if utf8.RuneCountInString(act) > 65 {
+			t.Fatalf("activity [%d] longer than 65 runes: %q (runes=%d, bytes=%d)", i, act, utf8.RuneCountInString(act), len(act))
+		}
+	}
+
+	// 4. View() must render clean single lines with ellipsis
+	view := m.View().Content
+	if !strings.Contains(view, "...") {
+		t.Fatalf("expected view to contain truncated activity with '...', got: %s", view)
 	}
 }

@@ -84,3 +84,54 @@ Here is the verified translation.`
 		t.Fatalf("expected cleaned content, got %q", cleaned)
 	}
 }
+
+func TestExtractEmbeddedToolCallsAttribute(t *testing.T) {
+	rawContent := `Let me inspect the file.
+<tool_call name="read_file">
+{"path": "cmd/main.go",}
+</tool_call>
+Next step.`
+
+	calls, cleaned := ExtractEmbeddedToolCalls(rawContent)
+	if len(calls) != 1 {
+		t.Fatalf("expected 1 call, got %d", len(calls))
+	}
+	if calls[0].Name != "read_file" {
+		t.Errorf("call name = %s, want read_file", calls[0].Name)
+	}
+	var args map[string]any
+	if err := json.Unmarshal([]byte(calls[0].Arguments), &args); err != nil {
+		t.Fatalf("failed to unmarshal sanitized arguments %q: %v", calls[0].Arguments, err)
+	}
+	if args["path"] != "cmd/main.go" {
+		t.Errorf("path = %v, want cmd/main.go", args["path"])
+	}
+	if !strings.Contains(cleaned, "Let me inspect the file.") || !strings.Contains(cleaned, "Next step.") {
+		t.Errorf("unexpected cleaned content: %q", cleaned)
+	}
+}
+
+func TestExtractEmbeddedToolCallsMarkdownFenced(t *testing.T) {
+	rawContent := "```xml\n<tool_call>\n{\"name\": \"bash\", \"arguments\": {\"command\": \"ls -la\"}}\n</tool_call>\n```"
+	calls, cleaned := ExtractEmbeddedToolCalls(rawContent)
+	if len(calls) != 1 {
+		t.Fatalf("expected 1 call, got %d", len(calls))
+	}
+	if calls[0].Name != "bash" {
+		t.Errorf("call name = %s, want bash", calls[0].Name)
+	}
+	if strings.Contains(cleaned, "```") {
+		t.Errorf("cleaned should not retain empty markdown fencing: %q", cleaned)
+	}
+}
+
+func TestExtractEmbeddedReasoningThinking(t *testing.T) {
+	rawContent := "<thinking>\nStep 1: Check inputs.\nStep 2: Act.\n</thinking>\nAction ready."
+	reasoning, cleaned := ExtractEmbeddedReasoning(rawContent)
+	if !strings.Contains(reasoning, "Step 1: Check inputs") {
+		t.Fatalf("expected thinking extracted, got %q", reasoning)
+	}
+	if cleaned != "Action ready." {
+		t.Fatalf("expected cleaned content, got %q", cleaned)
+	}
+}

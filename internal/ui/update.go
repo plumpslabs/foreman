@@ -164,17 +164,33 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if useMode == "" {
 				useMode = m.mode
 			}
-			stamp := "BROCODE:" + useMode + ":" + m.activeModel + "\n" + strings.TrimSpace(m.pendingStream)
-			m.appendMessages(stamp)
+			trimmedPending := strings.TrimSpace(m.pendingStream)
+			isDup := false
+			for j := len(m.messages) - 1; j >= 0 && j >= len(m.messages)-5; j-- {
+				msgBody := m.messages[j]
+				if idx := strings.Index(msgBody, "\n"); idx != -1 {
+					msgBody = strings.TrimSpace(msgBody[idx+1:])
+				}
+				if msgBody == trimmedPending || (len(trimmedPending) > 20 && strings.Contains(msgBody, trimmedPending)) {
+					isDup = true
+					break
+				}
+			}
+			if !isDup {
+				stamp := "BROCODE:" + useMode + ":" + m.activeModel + "\n" + trimmedPending
+				m.appendMessages(stamp)
+			}
 			m.pendingStream = ""
 			m.streaming = false
 		}
+		m.reasoningPreview = ""
 
 		m.status = str
-		if len(m.activity) == 0 || m.activity[len(m.activity)-1] != str {
-			m.activity = append(m.activity, str)
-			if len(m.activity) > 5 {
-				m.activity = m.activity[len(m.activity)-5:]
+		cleanAct := truncateActivity(str, m.width)
+		if len(m.activity) == 0 || m.activity[len(m.activity)-1] != cleanAct {
+			m.activity = append(m.activity, cleanAct)
+			if len(m.activity) > 3 {
+				m.activity = m.activity[len(m.activity)-3:]
 			}
 		}
 		return m, nil
@@ -193,6 +209,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		partial := m.pendingStream
 		m.streaming = false
 		m.pendingStream = ""
+		m.reasoningPreview = ""
 		m.activity = nil
 		// The in-flight turn is done; the queue may start the next one.
 		m.turnRunning = false
@@ -219,10 +236,14 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				display = strings.TrimSpace(msg.content)
 			}
 			alreadyInHistory := false
-			if len(m.messages) > 0 {
-				last := m.messages[len(m.messages)-1]
-				if display != "" && strings.Contains(last, display) {
+			for i := len(m.messages) - 1; i >= 0 && i >= len(m.messages)-5; i-- {
+				msgBody := m.messages[i]
+				if idx := strings.Index(msgBody, "\n"); idx != -1 {
+					msgBody = strings.TrimSpace(msgBody[idx+1:])
+				}
+				if display != "" && (msgBody == display || strings.Contains(msgBody, display) || (len(display) > 20 && strings.Contains(display, msgBody))) {
 					alreadyInHistory = true
+					break
 				}
 			}
 			if display != "" && !alreadyInHistory {
@@ -318,7 +339,21 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		return m, nil
 
+	case reasoningChunkMsg:
+		if m.status == "Ready" || m.status == "Failed" {
+			return m, nil
+		}
+		m.reasoningPreview += string(msg)
+		clean := strings.ReplaceAll(strings.TrimSpace(m.reasoningPreview), "\n", " ")
+		clean = strings.Join(strings.Fields(clean), " ")
+		if len(clean) > 55 {
+			clean = "..." + clean[len(clean)-52:]
+		}
+		m.status = "🧠 Thinking: " + clean
+		return m, nil
+
 	case streamChunkMsg:
+		m.reasoningPreview = ""
 		if !m.streaming {
 			// A new answer is starting — drop out of the pager so the stream
 			// renders into the normal chat view.
@@ -335,6 +370,33 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case fileDiffMsg:
 		// Live per-edit red/green diff entry in the chat.
 		m.upsertDiffMessage(msg.path, msg.diff)
+		return m, nil
+
+	case agentEventMsg:
+		switch msg.Type {
+		case loop.EventFilePatch:
+			if p, ok := msg.Payload.(loop.FilePatchPayload); ok {
+				key := p.Path
+				if p.Seq > 0 {
+					key = fmt.Sprintf("%s#%d", p.Path, p.Seq)
+				}
+				m.upsertDiffMessage(key, p.Diff)
+			}
+		case loop.EventModeSwitched:
+			if newMode, ok := msg.Payload.(string); ok && newMode != "" {
+				m.mode = newMode
+				m.turnMode = newMode
+				m.persistMode()
+			}
+		case loop.EventVerification:
+			if v, ok := msg.Payload.(loop.VerificationPayload); ok {
+				if v.Passed {
+					m.status = "Verification passed"
+				} else {
+					m.status = "Verification failed — fixing"
+				}
+			}
+		}
 		return m, nil
 
 	case diagnoseResultMsg:

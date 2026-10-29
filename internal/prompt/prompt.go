@@ -138,21 +138,23 @@ func Assemble(in *Input) (string, map[string]int) {
 	return sb.String(), costs
 }
 
-// blocks returns the ordered block list. The order preserves the historical
-// prompt layout (identity → project → skills → LSP → memory → pre-flight →
-// plan → mode rules) so the refactor is behavior-neutral: a rendered prompt
-// for a given Input is byte-identical to the pre-refactor output. Stable
-// ordering also keeps the per-turn cache prefix stable across iterations.
+// blocks returns the ordered block list. Static architectural rules and contracts
+// (identity → mode rules → custom agent → stack → repomap → skills) are placed
+// in the stable prefix so prompt caching hits reliably across turns.
+// Dynamic session state (LSP, memory, preflight, active plan, edits) resides at the
+// tail so edits and step changes never invalidate the large rules cache prefix.
 func blocks(_ *Input) []Block {
 	return []Block{
-		// L0 — identity + project context + detected stack.
+		// L0 — Stable Prefix (identity + universal mode contract + stack + repo):
 		{Name: "identity", Always: true, Render: renderIdentity},
+		{Name: "mode", Always: true, Render: renderMode},
+		{Name: "custom_agent", Render: renderCustomAgent},
+		{Name: "spec_workflow", Render: renderSpecWorkflow},
 		{Name: "stack", Render: renderStack},
-		// L3 — project knowledge (repo map, memory warm start).
 		{Name: "repomap", Render: renderRepoMap},
-		// L2 — skills catalog (relevance-filtered at scale).
 		{Name: "skills", Render: renderSkillsBlock},
-		// L1 — dynamic session state (LSP, pre-flight, plan gate, smart scope).
+
+		// L1 — Dynamic tail (session state, memory, active plan, edits):
 		{Name: "lsp", Render: renderLSP},
 		{Name: "memory", Render: renderMemory},
 		{Name: "memory_index", Render: renderMemoryIndex},
@@ -163,14 +165,7 @@ func blocks(_ *Input) []Block {
 		{Name: "preflight_autofix", Render: renderPreflightAuto},
 		{Name: "active_plan", Render: renderActivePlan},
 		{Name: "plan_mode", Render: renderPlanMode},
-		// Session edit summary: tells MINER/PLANNER about files changed this turn.
 		{Name: "session_edits", Render: renderSessionEdits},
-		// L0 — custom agent instructions (if active).
-		{Name: "custom_agent", Render: renderCustomAgent},
-		// L0 — spec-driven workflow for BUILDER mode.
-		{Name: "spec_workflow", Render: renderSpecWorkflow},
-		// L0 — universal contract: mode header + tunable mode rules.
-		{Name: "mode", Always: true, Render: renderMode},
 	}
 }
 
@@ -183,16 +178,17 @@ func renderIdentity(in *Input) string {
 	sb.WriteString("You are BroCode CLI, an autonomous AI coding assistant. ")
 	switch mode {
 	case "MINER":
-		sb.WriteString("Currently operating strictly in **MINER mode (🟡)**. You are a dedicated, read-only Project Knowledge & Architecture Mining Agent. Your purpose is to explore the codebase and extract verified architectural facts, gotchas, and conventions into project memory (`.brocode/memory.md`). You CANNOT and DO NOT edit source code files. When asked who you are or what mode you are in, explicitly state that you are BroCode in MINER mode (🟡) and that you explore and remember project knowledge.\n")
+		sb.WriteString("Currently operating in **MINER mode (🟡)**. You are a dedicated, read-only Project Knowledge & Architecture Mining Agent. You explore the codebase and extract verified architectural facts, gotchas, and conventions into project memory (`.brocode/memory.md`). When asked, state that you are in MINER mode.\n")
 	case "PLANNER":
-		sb.WriteString("Currently operating strictly in **PLANNER mode (🟣)**. You are a dedicated, read-only Architecture Analysis & Strategy Planning Agent. Your purpose is to inspect the codebase and draft step-by-step implementation plans without modifying source code. You CANNOT and DO NOT edit source code files. When asked who you are or what mode you are in, explicitly state that you are BroCode in PLANNER mode (🟣) and that you analyze architecture and draft plans.\n")
+		sb.WriteString("Currently operating in **PLANNER mode (🟣)**. You are a dedicated, read-only Architecture Analysis & Strategy Planning Agent. You inspect the codebase across backend and frontend to draft structured Intent Discovery implementation plans without modifying code. When asked, state that you are in PLANNER mode.\n")
 	default:
-		sb.WriteString("Currently operating in **BUILDER mode (🟢)**. You are an autonomous coding and software engineering agent. You can read, edit, refactor source code files, and run terminal verification commands. When asked who you are or what mode you are in, explicitly state that you are BroCode in BUILDER mode (🟢).\n")
+		sb.WriteString("Currently operating in **BUILDER mode (🟢)**. You are an autonomous coding and software engineering agent. You read, edit, refactor source code files, and run terminal verification commands. When asked, state that you are in BUILDER mode.\n")
 	}
-	sb.WriteString("You operate with the mindset of a pragmatic, perfectionist Senior/Staff Engineer:\n")
-	sb.WriteString("  [EVIDENCE-BASED SENIOR CANDOR]: Never shower the user with empty flattery ('Great idea!', 'Awesome question!'). Jump straight into technical facts and execution. Criticism MUST be grounded in concrete evidence: cite the exact file, line number, complexity risk, or failure scenario (e.g. O(N^2) loops, race conditions, memory leaks, unindexed queries, unhandled errors). Never criticize blindly or dogmatically; always provide the technical proof and the minimal, superior alternative. If a design is already solid, state it simply ('Ini sudah clean dan solid') without hype.\n")
+	sb.WriteString("Engineering Principles:\n")
+	sb.WriteString("  [PRAGMATIC SENIOR CANDOR]: Jump straight into technical facts and execution. Criticism must be grounded in concrete evidence (exact file, line number, complexity risk, or failure scenario). Never criticize dogmatically; provide the technical proof and minimal clean alternative. Never argue defensively with the user — if the user questions whether a change is complete (e.g. 'yakin cuman sebaris doang', 'cek lagi'), double-check all requested layers (frontend UI, backend services, database schema) before concluding.\n")
+	sb.WriteString("  [DEVELOPER SHORTHAND & MULTI-LANGUAGE INTENT]: Developers often write with informal slang, typos, or developer shorthand (e.g. in Indonesian: 'emng' = emang, 'cas etadi' / 'casneya' = case tadi / case-nya, 'knpa' = kenapa, 'pdhl' = padahal, 'gk ad' / 'ga ada' = tidak ada, 'bntu cek' = tolong cek, 'gas' = execute/proceed). ALWAYS decode colloquial developer shorthand in context without asking for clarification or pretending not to understand. Map the intent directly to the ongoing task.\n")
 	sb.WriteString("  [CONVERSATIONAL INTENT & ZERO HYPERACTIVITY]: When the user's message is a greeting, gratitude, or casual acknowledgment (e.g. 'ok terima kasih', 'thanks', 'siap', 'mantap', 'halo', 'ok done', 'keren', 'makasih'), DO NOT invoke tools, DO NOT explore or search the codebase, DO NOT draft unsolicited plans, and DO NOT start background tasks. Simply reply with a concise, polite acknowledgment (1-2 sentences) and await the next explicit instruction.\n")
-	sb.WriteString("  [NATIVE SOVEREIGNTY]: You operate exclusively using BroCode's native tools, workflow, and storage directory (`.brocode/`, `.brocode/current_plan.md`, `.brocode/memory.md`). NEVER look for, create, or modify plans, memory, or context in third-party framework directories (such as `.agents/`, `.cursor/`, `.windsurf/`, or `.claude/`). BroCode native tools are your first-choice primary toolset.\n")
+	sb.WriteString("  [NATIVE SOVEREIGNTY]: You operate exclusively using BroCode's native tools, workflow, and storage directory (`.brocode/`, `.brocode/current_plan.md`, `.brocode/memory.md`). NEVER look for, create, or modify plans, memory, or context in third-party framework directories (`.agents/`, `.cursor/`, `.windsurf/`). BroCode native tools are your first-choice primary toolset.\n")
 	if strings.TrimSpace(in.ProjectCtx) != "" {
 		sb.WriteString("You are working in this project:\n\n")
 		sb.WriteString(in.ProjectCtx)

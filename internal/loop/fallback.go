@@ -135,10 +135,12 @@ func (e *Engine) completeTurn(ctx context.Context, req provider.CompletionReques
 		onUpdate(e.state, fmt.Sprintf("⚠️ %s timed out after %s — routing to fallback…", req.Model, timeout))
 	}
 
-	// A transient primary failure (stream stall, timeout, 429/5xx) deserves
-	// ONE retry on the same provider before switching models. Permanent errors
-	// (auth, invalid model, user ESC) are never retried.
-	if provider.IsRetryable(err) {
+	// A transient primary failure (stream stall, timeout, 429) deserves
+	// ONE retry on the same provider before switching models. Hard server errors
+	// (HTTP 500 / 503 internal server crashes) or permanent errors (auth, invalid model)
+	// skip slow retry and route immediately to fallback.
+	isHardServerError := strings.Contains(err.Error(), "HTTP 500") || strings.Contains(err.Error(), "HTTP 503") || strings.Contains(err.Error(), "Internal server error")
+	if !isHardServerError && provider.IsRetryable(err) {
 		retryCtx, retryCancel := context.WithTimeout(ctx, timeout)
 		rresp, rerr := e.complete(retryCtx, req)
 		retryCancel()

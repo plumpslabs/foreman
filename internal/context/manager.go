@@ -69,12 +69,12 @@ func (cs CompactionSummary) Format() string {
 
 // Manager maintains the live message context, token estimation, and event persistence.
 type Manager struct {
-	mu           sync.Mutex
-	sessionID    string
-	store        *store.Store
-	messages     []provider.Message
-	totalTokens  int
-	maxWindow    int
+	mu          sync.Mutex
+	sessionID   string
+	store       *store.Store
+	messages    []provider.Message
+	totalTokens int
+	maxWindow   int
 	// systemPromptTokens is the estimated size of the per-turn system prompt
 	// (repo map + warm-start memory + tool definitions). It is NOT part of the
 	// conversation messages but IS sent with every request, so it must count
@@ -90,17 +90,17 @@ type Manager struct {
 	// they count what was APPENDED this session, so user+assistant+tool can
 	// exceed the live window after a compact. Tool output is counted AFTER the
 	// truncate-and-pointer digest, i.e. the tokens actually re-sent each round.
-	userTokens    int
-	asstTokens    int
-	toolTokens    int// lastPromptHash stores a short hash of the last user prompt so the engine
-// can detect when a new user message is completely unrelated to the ongoing
-// conversation (stale context). When detected, partial context reset is
-// triggered instead of full-clear, preserving session metadata.
-lastPromptHash string
-// editedFiles tracks paths edited during the current session, so compaction
-// can truncate tool outputs about edited files less aggressively (preserving
-// more context for the deliverable).
-editedFiles []string
+	userTokens int
+	asstTokens int
+	toolTokens int // lastPromptHash stores a short hash of the last user prompt so the engine
+	// can detect when a new user message is completely unrelated to the ongoing
+	// conversation (stale context). When detected, partial context reset is
+	// triggered instead of full-clear, preserving session metadata.
+	lastPromptHash string
+	// editedFiles tracks paths edited during the current session, so compaction
+	// can truncate tool outputs about edited files less aggressively (preserving
+	// more context for the deliverable).
+	editedFiles []string
 }
 
 // SetEditedFiles updates the list of files edited this session so compaction
@@ -109,6 +109,15 @@ func (m *Manager) SetEditedFiles(files []string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.editedFiles = files
+}
+
+// EditedFiles returns a copy of the list of files edited this session.
+func (m *Manager) EditedFiles() []string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	res := make([]string, len(m.editedFiles))
+	copy(res, m.editedFiles)
+	return res
 }
 
 // NewManager creates a context manager connected to SQLite store.
@@ -128,91 +137,6 @@ func NewManager(sessionID string, st *store.Store, maxTokens int) *Manager {
 func promptHash(s string) string {
 	h := sha256.Sum256([]byte(s))
 	return hex.EncodeToString(h[:4])
-}
-
-// IsStaleContext returns true (and the old hash) if the new prompt is
-// semantically unrelated to the current conversation. "Stale" = the user
-// asked something completely different from the ongoing task. Detects this
-// by comparing keyword overlap: if <30% of significant words in the new
-// prompt appeared in the current conversation, the context is considered stale.
-// The engine uses this to trigger a partial context reset (keep the pinned
-// goal, drop the working trail) instead of charging ahead into a wrong
-// direction.
-func (m *Manager) IsStaleContext(newPrompt string) (bool, string) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	if m.lastPromptHash == "" {
-		return false, ""
-	}
-
-	oldHash := m.lastPromptHash
-	// Extract significant words from the new prompt (lenient tokenizer).
-	newWords := extractSignificantWords(newPrompt)
-	if len(newWords) == 0 {
-		return false, ""
-	}
-
-	// Gather words from current messages.
-	currWords := make(map[string]struct{}, len(newWords)*2)
-	for _, msg := range m.messages {
-		for w := range extractSignificantWords(msg.Content) {
-			currWords[w] = struct{}{}
-		}
-	}
-
-	overlap := 0
-	for w := range newWords {
-		if _, ok := currWords[w]; ok {
-			overlap++
-		}
-	}
-
-	ratio := float64(overlap) / float64(len(newWords))
-	// <0.30 overlap → semantically different task → stale context.
-	return ratio < 0.30, oldHash
-}
-
-// extractSignificantWords pulls lowercased tokens of length >3 from text,
-// filtering common stop-words. Cheap approximate semantic overlap.
-func extractSignificantWords(text string) map[string]bool {
-	stop := map[string]bool{
-		"this": true, "that": true, "with": true, "have": true, "from": true,
-		"will": true, "want": true, "need": true, "what": true, "when": true,
-		"where": true, "were": true, "they": true, "them": true,
-		"does": true, "been": true, "their": true,
-	}
-	words := strings.Fields(strings.ToLower(text))
-	out := make(map[string]bool)
-	for _, w := range words {
-		// strip punctuation
-		w = strings.TrimFunc(w, func(r rune) bool {
-			return (r < 'a' || r > 'z') && (r < '0' || r > '9')
-		})
-		if len(w) > 3 && !stop[w] {
-			out[w] = true
-		}
-	}
-	return out
-}
-
-// ResetStaleContext performs a PARTIAL context reset: drops the message
-// history but preserves session ID, model, and token counters. After this,
-// only the new prompt remains, so the next LLM call sees a clean slate
-// without losing session continuity.
-func (m *Manager) ResetStaleContext(newPrompt string) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	m.messages = []provider.Message{
-		{Role: "user", Content: newPrompt},
-	}
-	m.totalTokens = m.estimateTokens(newPrompt)
-	m.userTokens = m.totalTokens
-	m.asstTokens = 0
-	m.toolTokens = 0
-	m.compactCount = 0
-	m.lastPromptHash = promptHash(newPrompt)
 }
 
 // SetModel records the active model name so token estimation can use the
@@ -277,7 +201,6 @@ func (m *Manager) SetMaxWindow(max int) {
 		m.maxWindow = max
 	}
 }
-
 
 // Store returns connected SQLite store.
 func (m *Manager) Store() *store.Store {
@@ -480,6 +403,16 @@ func (m *Manager) AppendToolResult(toolCallID, content string) error {
 	return nil
 }
 
+// HasMessages reports whether the LLM conversation already holds any messages.
+// Used by the engine to decide whether a mode switch needs a recency-tail
+// correction (stale history exists to out-anchor) or not (fresh context —
+// the system prompt is then the first and only authority).
+func (m *Manager) HasMessages() bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return len(m.messages) > 0
+}
+
 // Messages returns a copy of current active messages for the LLM call.
 func (m *Manager) Messages() []provider.Message {
 	m.mu.Lock()
@@ -490,14 +423,25 @@ func (m *Manager) Messages() []provider.Message {
 	return cp
 }
 
-// LastUserPrompt returns the content of the most recent user prompt in context.
+// LastUserPrompt returns the content of the most recent user prompt in context,
+// skipping internal synthetic notifications injected by the engine watchdog.
 func (m *Manager) LastUserPrompt() string {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
 	for i := range slices.Backward(m.messages) {
 		if m.messages[i].Role == "user" && m.messages[i].ToolCallID == "" {
-			return m.messages[i].Content
+			c := m.messages[i].Content
+			if strings.HasPrefix(c, "• 🤖") ||
+				strings.HasPrefix(c, "⚠️ TOOL EXPLORATION BUDGET") ||
+				strings.HasPrefix(c, "Level 1 verification check failed") ||
+				strings.HasPrefix(c, "ℹ️ [EXPLORATION ADVISORY]") ||
+				strings.HasPrefix(c, "ℹ️ [IMPLEMENTATION") ||
+				strings.HasPrefix(c, "🛑 STOP REPEATING") ||
+				strings.HasPrefix(c, "🔄 LOOP DETECTED") {
+				continue
+			}
+			return c
 		}
 	}
 	return ""
@@ -906,8 +850,8 @@ func IsEngineReminder(text string) bool { return isEngineReminder(text) }
 // less aggressively (8000 chars) than irrelevant tool outputs (4000 chars).
 // This preserves context about the deliverable while still cutting noise.
 func (m *Manager) truncateLargeOutputs() {
-	const defaultMax = 4000  // cap for generic tool output
-	const editedMax = 8000   // higher cap for tool output about edited files
+	const defaultMax = 4000 // cap for generic tool output
+	const editedMax = 8000  // higher cap for tool output about edited files
 	for i := range m.messages {
 		if m.messages[i].Role != "tool" || len(m.messages[i].Content) <= defaultMax {
 			continue

@@ -35,10 +35,11 @@ type ToolDefinition struct {
 
 // CompletionRequest is the generic payload sent to any provider adapter.
 type CompletionRequest struct {
-	Model       string           `json:"model"`
-	Messages    []Message        `json:"messages"`
-	Tools       []ToolDefinition `json:"tools,omitempty"`
-	Temperature float64          `json:"temperature,omitempty"`
+	Model           string           `json:"model"`
+	Messages        []Message        `json:"messages"`
+	Tools           []ToolDefinition `json:"tools,omitempty"`
+	Temperature     float64          `json:"temperature,omitempty"`
+	ReasoningEffort string           `json:"reasoning_effort,omitempty"`
 }
 
 // CompletionResponse is the generic output returned by a provider adapter.
@@ -82,4 +83,11 @@ type StreamingAdapter interface {
 type ProgressingAdapter interface {
 	ProviderAdapter
 	CompleteWithProgress(ctx context.Context, req CompletionRequest, onProgress func(string)) (*CompletionResponse, error)
+}
+
+// ReasoningStreamingAdapter is an optional capability: providers that can emit both
+// content deltas and reasoning (thinking) deltas in real-time.
+type ReasoningStreamingAdapter interface {
+	ProviderAdapter
+	StreamCompleteWithReasoning(ctx context.Context, req CompletionRequest, onDelta func(string), onReasoning func(string)) (*CompletionResponse, error)
 }

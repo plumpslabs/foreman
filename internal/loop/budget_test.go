@@ -2,7 +2,9 @@ package loop
 
 import (
 	"context"
+	"fmt"
 	"math"
+	"os"
 	"strings"
 	"testing"
 
@@ -71,5 +73,86 @@ func TestNoBudgetStillRunsFullTurn(t *testing.T) {
 	}
 	if adapter.total <= 2 {
 		t.Fatalf("expected more than 2 completions without a budget, got %d", adapter.total)
+	}
+}
+
+type implementationFlowAdapter struct {
+	calls int
+}
+
+func (a *implementationFlowAdapter) Complete(ctx context.Context, req provider.CompletionRequest) (*provider.CompletionResponse, error) {
+	a.calls++
+	if len(req.Tools) == 0 {
+		return &provider.CompletionResponse{Content: "SYNTHESIS_CALLED"}, nil
+	}
+	f1 := "test_scratch_1.txt"
+	f2 := "test_scratch_2.txt"
+	if a.calls == 1 {
+		// Round 1: write test_scratch_1.txt
+		return &provider.CompletionResponse{
+			Reasoning: "writing file1",
+			ToolCalls: []provider.ToolCall{
+				{ID: "t1", Name: "write_file", Arguments: fmt.Sprintf(`{"path":%q,"content":"data1"}`, f1)},
+			},
+		}, nil
+	}
+	if a.calls <= 12 {
+		// Rounds 2-12 (11 consecutive reads): read chunks of test_scratch_2.txt
+		return &provider.CompletionResponse{
+			Reasoning: "reading file2",
+			ToolCalls: []provider.ToolCall{
+				{ID: "t2", Name: "read_file", Arguments: fmt.Sprintf(`{"path":%q,"start_line":%d,"end_line":%d}`, f2, (a.calls-1)*50, a.calls*50)},
+			},
+		}, nil
+	}
+	if a.calls == 13 {
+		// Round 13: write test_scratch_2.txt
+		return &provider.CompletionResponse{
+			Reasoning: "writing file2",
+			ToolCalls: []provider.ToolCall{
+				{ID: "t3", Name: "write_file", Arguments: fmt.Sprintf(`{"path":%q,"content":"data2"}`, f2)},
+			},
+		}, nil
+	}
+	// Round 14: Final answer
+	return &provider.CompletionResponse{
+		Content: "Implementation finished successfully for all files.",
+	}, nil
+}
+
+type mockBudgetTool struct {
+	name string
+}
+
+func (m *mockBudgetTool) Name() string               { return m.name }
+func (m *mockBudgetTool) Description() string        { return "mock" }
+func (m *mockBudgetTool) Parameters() map[string]any { return map[string]any{"type": "object"} }
+func (m *mockBudgetTool) Execute(ctx context.Context, args string) (string, error) {
+	return "ok", nil
+}
+
+func TestActiveImplementationNotCutByReadBudget(t *testing.T) {
+	defer os.Remove("test_scratch_1.txt")
+	defer os.Remove("test_scratch_2.txt")
+	tools := tool.NewRegistry()
+	tools.Register(&mockBudgetTool{name: "write_file"})
+	tools.Register(&mockBudgetTool{name: "read_file"})
+	ctxMgr := bcontext.NewManager("test_impl", nil, 128000)
+	adapter := &implementationFlowAdapter{}
+	e := NewEngine(adapter, tools, ctxMgr, "test-model")
+	e.SetMaxIterations(25)
+
+	res, err := e.RunTurn(context.Background(), "implement multi-file feature", nil)
+	if err != nil {
+		t.Fatalf("RunTurn failed: %v", err)
+	}
+	if strings.Contains(res, "SYNTHESIS_CALLED") || strings.Contains(res, "TOOL EXPLORATION BUDGET REACHED") {
+		t.Fatalf("active implementation turn was prematurely cut off by exploration budget: %q", res)
+	}
+	if !strings.Contains(res, "Implementation finished successfully") {
+		t.Fatalf("expected successful implementation completion, got: %q", res)
+	}
+	if len(ctxMgr.EditedFiles()) != 2 {
+		t.Fatalf("expected 2 edited files tracked in context manager, got %d: %v", len(ctxMgr.EditedFiles()), ctxMgr.EditedFiles())
 	}
 }

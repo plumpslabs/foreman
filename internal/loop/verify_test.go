@@ -265,6 +265,39 @@ func TestPlanVerificationMonorepoJS(t *testing.T) {
 	}
 }
 
+func TestPlanVerificationMonorepoPnpmRootLockfile(t *testing.T) {
+	// Monorepo with pnpm-workspace.yaml at root and subpackage with typecheck script
+	writeFixture(t, map[string]string{
+		"pnpm-workspace.yaml":       "packages:\n  - 'packages/*'\n",
+		"packages/web/package.json": `{"name":"web","scripts":{"typecheck":"tsc --noEmit"}}`,
+	})
+	pm := detectJSManagerIn("packages/web")
+	if pm != "pnpm" {
+		t.Errorf("expected pnpm detected from root pnpm-workspace.yaml, got %q", pm)
+	}
+	cmds := planVerificationForFiles([]string{"packages/web/src/App.tsx"})
+	if len(cmds) == 0 {
+		t.Fatal("subpackage checks must be planned")
+	}
+	if cmds[0].name != "pnpm" || cmds[0].dir != "packages/web" {
+		t.Errorf("expected pnpm check in packages/web, got %+v", cmds[0])
+	}
+}
+
+func TestPlanVerificationTargetedPythonTest(t *testing.T) {
+	writeFixture(t, map[string]string{
+		"pyproject.toml":     "[project]\n",
+		"tests/test_auth.py": "def test_ok(): pass\n",
+	})
+	cmds := planVerificationForFiles([]string{"tests/test_auth.py"})
+	if len(cmds) < 2 {
+		t.Fatalf("expected compileall + targeted pytest, got %+v", cmds)
+	}
+	if cmds[1].name != "pytest" || len(cmds[1].args) < 2 || cmds[1].args[1] != "tests/test_auth.py" {
+		t.Errorf("expected targeted pytest for tests/test_auth.py, got %+v", cmds[1])
+	}
+}
+
 func TestPlanVerificationSkipsHeavyDirs(t *testing.T) {
 	// node_modules with a package.json must not be mistaken for a project.
 	writeFixture(t, map[string]string{"node_modules/foo/package.json": "{}"})

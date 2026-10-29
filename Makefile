@@ -9,15 +9,21 @@ DATE    ?= $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
 LDFLAGS := -s -w -X main.version=$(VERSION) -X main.commit=$(COMMIT) -X main.date=$(DATE)
 
 BINARY := bin/brocode
+FOREMAN_BINARY := bin/foreman
 BINDIR ?= $(shell $(GO) env GOPATH)/bin
+FOREMAN_BINDIR ?= $(BINDIR)
 
-.PHONY: all build build-all test race vet fmt fmt-check lint tidy check run coverage bench measure install uninstall clean help
+.PHONY: all build build-foreman build-all test race vet fmt fmt-check lint tidy check run run-foreman coverage bench measure install install-foreman uninstall uninstall-foreman clean help
 
 all: check build
 
 ## build: compile binary for current platform
 build:
 	CGO_ENABLED=0 $(GO) build -trimpath -ldflags "$(LDFLAGS)" -o $(BINARY) ./cmd/brocode
+
+## build-foreman: compile the Foreman local workspace CLI
+build-foreman:
+	CGO_ENABLED=0 $(GO) build -trimpath -o $(FOREMAN_BINARY) ./cmd/foreman
 
 ## build-all: cross-compile for Linux, Windows, and macOS
 build-all:
@@ -26,6 +32,10 @@ build-all:
 	GOOS=windows GOARCH=amd64 CGO_ENABLED=0 $(GO) build -trimpath -ldflags "$(LDFLAGS)" -o bin/brocode-windows-amd64.exe ./cmd/brocode
 	GOOS=darwin GOARCH=amd64 CGO_ENABLED=0 $(GO) build -trimpath -ldflags "$(LDFLAGS)" -o bin/brocode-darwin-amd64 ./cmd/brocode
 	GOOS=darwin GOARCH=arm64 CGO_ENABLED=0 $(GO) build -trimpath -ldflags "$(LDFLAGS)" -o bin/brocode-darwin-arm64 ./cmd/brocode
+
+## run-foreman: launch Foreman for the current project
+run-foreman:
+	$(GO) run ./cmd/foreman start
 
 ## test: run unit tests
 test:
@@ -81,9 +91,18 @@ install: build
 	install -d $(BINDIR)
 	install -m 0755 $(BINARY) $(BINDIR)/brocode
 
-## uninstall: remove installed binary
+## install-foreman: build and install Foreman to $(FOREMAN_BINDIR)
+install-foreman: build-foreman
+	install -d $(FOREMAN_BINDIR)
+	install -m 0755 $(FOREMAN_BINARY) $(FOREMAN_BINDIR)/foreman
+
+## uninstall: remove installed BroCode CLI
 uninstall:
 	rm -f $(BINDIR)/brocode
+
+## uninstall-foreman: remove installed Foreman CLI
+uninstall-foreman:
+	rm -f $(FOREMAN_BINDIR)/foreman
 
 ## clean: remove build artifacts and coverage files
 clean:

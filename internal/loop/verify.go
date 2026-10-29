@@ -245,9 +245,23 @@ func detectJSManagerIn(dir string) string {
 		return "pnpm"
 	case fileExistsIn(dir, "yarn.lock"):
 		return "yarn"
-	default:
+	case fileExistsIn(dir, "package-lock.json"):
 		return "npm"
 	}
+	// In monorepos, lockfiles and workspace configs often reside at the root:
+	if dir != "." {
+		switch {
+		case fileExistsIn(".", "bun.lock"), fileExistsIn(".", "bun.lockb"):
+			return "bun"
+		case fileExistsIn(".", "pnpm-lock.yaml"), fileExistsIn(".", "pnpm-workspace.yaml"):
+			return "pnpm"
+		case fileExistsIn(".", "yarn.lock"):
+			return "yarn"
+		case fileExistsIn(".", "package-lock.json"):
+			return "npm"
+		}
+	}
+	return "npm"
 }
 
 // scriptExistsIn reports whether dir/package.json declares the given non-empty
@@ -271,6 +285,12 @@ func scriptExistsIn(dir, name string) bool {
 func tscAvailableIn(dir, pm string) bool {
 	if _, err := os.Stat(filepath.Join(dir, "node_modules", ".bin", "tsc")); err == nil {
 		return true
+	}
+	// In monorepos, typescript is often hoisted to the repository root node_modules:
+	if dir != "." {
+		if _, err := os.Stat(filepath.Join(".", "node_modules", ".bin", "tsc")); err == nil {
+			return true
+		}
 	}
 	// bun/pnpm sometimes resolve tsc without node_modules/.bin — accept the
 	// runner; a missing compiler will fail fast and be reported to the model.
@@ -334,6 +354,27 @@ func planVerificationForFiles(editedFiles []string) []checkCmd {
 							checkCmd{"go", []string{"test", p}, dir},
 						)
 					}
+					continue
+				}
+			}
+
+			if anyExistsIn(dir, "pyproject.toml", "setup.py", "requirements.txt", "Pipfile") {
+				// Targeted Python test execution: if specific test files were edited, run pytest on those directly
+				var editedTests []string
+				for _, f := range editedFiles {
+					base := filepath.Base(f)
+					if (strings.HasPrefix(base, "test_") || strings.HasSuffix(base, "_test.py")) && fileExistsIn(dir, f) {
+						rel, err := filepath.Rel(dir, f)
+						if err == nil && !strings.HasPrefix(rel, "..") {
+							editedTests = append(editedTests, rel)
+						}
+					}
+				}
+				if len(editedTests) > 0 {
+					subCmds = append(subCmds,
+						checkCmd{"python3", []string{"-m", "compileall", "-q", "."}, dir},
+						checkCmd{"pytest", append([]string{"-q"}, editedTests...), dir},
+					)
 					continue
 				}
 			}
@@ -555,7 +596,3 @@ func AttachErrorSourceSnippets(repoRoot string, vetErr string, editedFiles []str
 	}
 	return vetErr
 }
-
-
-
-

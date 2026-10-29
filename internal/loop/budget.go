@@ -1,6 +1,7 @@
 package loop
 
 import (
+	"regexp"
 	"strings"
 	"time"
 )
@@ -22,44 +23,33 @@ func (e *Engine) SetToolDescBudget(n int) {
 // the agent answers instead of reading itself in circles.
 const (
 	// toolWarnRounds — first "stop and answer" reminder.
-	toolWarnRounds = 6
+	toolWarnRounds = 8
 	// toolFinalWarnRounds — second, firmer warning.
-	toolFinalWarnRounds = 8
+	toolFinalWarnRounds = 12
 	// maxToolOnlyRounds — abort once a spinning model stalls. Still well below
 	// the 25-iteration cap.
-	maxToolOnlyRounds = 14
+	maxToolOnlyRounds = 16
 	// maxToolOnlyAbsolute — unconditional abort even for a model that keeps
-	// discovering new files (freedom is bounded, never infinite). 16 leaves
-	// room for the final-warning pattern (ONE last targeted read, then the
-	// answer) to complete instead of being cut right after the read.
-	maxToolOnlyAbsolute = 16
+	// discovering new files (freedom is bounded, never infinite). 20 leaves
+	// room for the final-warning pattern to complete instead of being cut right after read.
+	maxToolOnlyAbsolute = 20
 	// finalWarnHardStop — after the FINAL WARNING the model may make at most this
-	// many more tool rounds before it is forced to synthesize. The warning is
-	// otherwise toothless: the model kept reading "one more section" forever.
+	// many more tool rounds before it is forced to synthesize.
 	finalWarnHardStop = 2
 	// exploredWarnCap — once the agent has read this many DISTINCT files/paths in
-	// a row without answering, accelerate the final warning. Reading several
-	// files for a codebase task is normal exploration, but unbounded reading is capped.
-	exploredWarnCap = 12
+	// a row without answering, accelerate the final warning.
+	exploredWarnCap = 18
 )
 
 // Read-only budget: separates exploration (reads) from execution (edits/writes)
-// so a model that reads 12 files still has budget to edit. Without this,
-// read_file and edit_file share one pool — aggressive exploration Starves
-// execution and the agent reports findings without shipping code.
+// so a model that reads multiple files still has budget to edit. Without this,
+// aggressive exploration starves execution and the agent reports findings without shipping code.
 const (
 	// readOnlyWarnRounds — first "stop reading, start editing" reminder.
-	// After this many consecutive read-only rounds, inject a prompt that
-	// forces the model to act on what it already knows.
-	readOnlyWarnRounds = 6
-	// readOnlyHardStop — hard cap on consecutive read-only rounds. The model
-	// MUST switch to editing or answering after this many reads. This is
-	// separate from the total tool budget so reads never consume the full pool.
-	readOnlyHardStop = 10
+	readOnlyWarnRounds = 8
+	// readOnlyHardStop — hard cap on consecutive read-only rounds before advisory.
+	readOnlyHardStop = 14
 	// minWriteBudget — minimum number of tool rounds reserved for mutations
-	// (edit/write/bash). When the read-only counter hits this threshold, the
-	// model is told to stop exploring and start implementing, regardless of
-	// the total tool budget remaining.
 	minWriteBudget = 6
 )
 
@@ -89,49 +79,71 @@ const (
 	tierComplex
 )
 
-// classifyTaskComplexity scores a user query into simple / medium / complex.
+var (
+	// Structural signals of complex multi-part specification
+	multiStepListRe = regexp.MustCompile(`(?m)^(\s*[-*+]|\s*\d+\.|\s*\[[ xX]\])\s+`)
+	filePathRe      = regexp.MustCompile(`[\w.-]+/(?:[\w.-]+/)*[\w.-]+\.\w+`)
+	codeFenceRe     = regexp.MustCompile("```")
+
+	// Construction & modification roots (multilingual: English, Indonesian, developer stems).
+	// Word boundaries ensure matching meaningful words/stems rather than arbitrary letter collisions.
+	complexStemRe = regexp.MustCompile(`(?i)\b(implement\w*|implements?ikan\w*|imolements?\w*|refactor\w*|migrat\w*|integrat\w*|architect\w*|arsitektur\w*|schema\w*|skema\w*|feature\w*|fitur\w*|service\w*|controller\w*|endpoint\w*|webhook\w*|pipeline\w*|blueprint\w*|step-by-step|bertahap\w*|rombak\w*|rancang\w*|buatkan\w*|bikin\w*|tambah\w*|perbaiki\w*|monorepo\w*|cross-module\w*|end-to-end\w*|audit\w*|rewrite\w*|backward-compat\w*)\b`)
+
+	// Trivial / Informational roots
+	simpleStemRe = regexp.MustCompile(`(?i)\b(typo|rename|spelling|ejaan|format|comment|komentar|docstring|fix the doc)\b`)
+)
+
+// classifyTaskComplexity scores a user query into simple / medium / complex
+// using language-agnostic structural signals, stem taxonomy, and word volume.
 func classifyTaskComplexity(query string) complexityTier {
-	p := strings.ToLower(strings.TrimSpace(query))
-	words := len(strings.Fields(p))
-
-	simpleHits := 0
-	for _, kw := range []string{"typo", "rename", "explain", "what does", "why does", "what is", "why is", "format", "comment", "spelling", "fix the doc"} {
-		if strings.Contains(p, kw) {
-			simpleHits++
-		}
-	}
-	complexHits := 0
-	for _, kw := range []string{"refactor", "migrate", "migration", "audit", "architecture", "implement", "feature", "rewrite", "integrate", "add support", "end-to-end", "multi-file", "multiple files", "schema", "cross-module", "monorepo"} {
-		if strings.Contains(p, kw) {
-			complexHits++
-		}
-	}
-
-	// Multi-part task lists (bulleted/numbered lines) signal real scope.
-	multiPart := strings.Contains(p, "\n-") || strings.Contains(p, "\n*") || strings.Contains(p, "\n1.")
-
-	switch {
-	case complexHits >= 2 || (complexHits >= 1 && words >= 25) || (complexHits >= 1 && multiPart):
-		return tierComplex
-	case (simpleHits >= 2 && complexHits == 0) || (simpleHits >= 1 && words <= 8 && complexHits == 0):
-		return tierSimple
-	default:
+	p := strings.TrimSpace(query)
+	if p == "" {
 		return tierMedium
 	}
+	words := len(strings.Fields(p))
+
+	hasCodeFences := codeFenceRe.MatchString(p)
+	hasFilePaths := filePathRe.MatchString(p)
+	hasMultiStepList := multiStepListRe.MatchString(p)
+
+	complexMatches := complexStemRe.FindAllString(p, -1)
+	complexHits := len(complexMatches)
+
+	simpleMatches := simpleStemRe.FindAllString(p, -1)
+	simpleHits := len(simpleMatches)
+
+	// Structural complexity: code snippets, multi-step checklists, or files with modification actions
+	if hasCodeFences || (hasFilePaths && complexHits >= 1) || hasMultiStepList {
+		return tierComplex
+	}
+
+	// Semantic & lexical volume complexity
+	if complexHits >= 2 || (complexHits >= 1 && words >= 20) || words >= 30 {
+		return tierComplex
+	}
+
+	// Strict & safe simple gate: only classified as simple when prompt is short (<= 8 words),
+	// has zero file paths, zero code fences, zero multi-step lists, zero complex stems,
+	// and matches an explicit minor fix stem.
+	if simpleHits >= 1 && complexHits == 0 && words <= 8 && !hasFilePaths && !hasCodeFences {
+		return tierSimple
+	}
+
+	return tierMedium
 }
 
 // iterationsForComplexity maps a task tier to its per-turn iteration budget.
 // Simple tasks get a tight runway (finish fast, no ceremony); complex tasks
-// keep the historical 25; the autonomous extension still adds +15 on top when
-// the model proves the task needs more room.
+// get 25; autonomous momentum extension adds +15 repeatedly when
+// active tasks or plans need more room to finish.
 func iterationsForComplexity(t complexityTier) int {
 	switch t {
 	case tierSimple:
-		return 10
+		return 12
 	case tierComplex:
 		return 25
 	default:
-		return 16
+		return 24
 	}
 }
 
@@ -152,17 +164,16 @@ func ClassifyTaskComplexity(query string) ComplexityTier {
 }
 
 // timeoutForComplexity maps a task tier to a wall-clock timeout for the turn
-// watchdog. Simple tasks should finish fast; complex cross-module refactors
-// need more room. The autonomous extension (+15 iterations) is separate and
-// does NOT extend the time budget — time is the real safety net.
+// watchdog. Simple tasks finish quickly; complex cross-module refactors
+// get ample time.
 func timeoutForComplexity(t complexityTier) time.Duration {
 	switch t {
 	case tierSimple:
 		return 5 * time.Minute
 	case tierComplex:
-		return 15 * time.Minute
+		return 20 * time.Minute
 	default:
-		return 10 * time.Minute
+		return 12 * time.Minute
 	}
 }
 
@@ -182,33 +193,35 @@ func (e *Engine) explorationBudget() (warnRounds, finalWarnRounds, maxAbsolute, 
 	if mode == "PLANNER" || mode == "MINER" {
 		// Deep research & architectural discovery modes need wider runway.
 		if tier == tierComplex {
-			return 14, 18, 24, 25
+			return 16, 22, 28, 30
 		}
-		return 10, 14, 20, 18
+		return 12, 18, 24, 22
 	}
 
-	// BUILDER mode: keep standard coding turns snappy and focused on shipping edits.
+	// BUILDER mode:
 	if tier == tierComplex {
-		return 10, 14, 18, 18
+		return 14, 18, 24, 24
 	}
 	return toolWarnRounds, toolFinalWarnRounds, maxToolOnlyAbsolute, exploredWarnCap
 }
 
 func CalculateAdaptiveToolBudget(prompt string, mode string) int {
-	base := 16
+	base := 18
 	if mode == "MINER" || mode == "PLANNER" {
-		base = 20
+		base = 24
 	}
-	p := strings.ToLower(prompt)
-	words := len(strings.Fields(p))
-	if words > 30 || strings.Contains(p, "refactor") || strings.Contains(p, "audit") || strings.Contains(p, "migrate") || strings.Contains(p, "architecture") || strings.Contains(p, "fix") {
+	tier := classifyTaskComplexity(prompt)
+	switch tier {
+	case tierComplex:
 		base += 6
+	case tierMedium:
+		base += 2
 	}
-	if base > 28 {
-		return 28
+	if base > 30 {
+		return 30
 	}
-	if base < 10 {
-		return 10
+	if base < 12 {
+		return 12
 	}
 	return base
 }
@@ -253,12 +266,12 @@ func isMutatingTool(name string) bool {
 type taskType int
 
 const (
-	taskGeneric taskType = iota
-	taskBugFix          // error, crash, not working, regression
-	taskExplore         // explain, what does, how does, architecture
-	taskImplement       // add, create, implement, build
-	taskRefactor        // refactor, clean up, simplify, optimize
-	taskTest            // test, coverage, spec, assertion
+	taskGeneric   taskType = iota
+	taskBugFix             // error, crash, not working, regression
+	taskExplore            // explain, what does, how does, architecture
+	taskImplement          // add, create, implement, build
+	taskRefactor           // refactor, clean up, simplify, optimize
+	taskTest               // test, coverage, spec, assertion
 )
 
 func classifyTaskType(query string) taskType {

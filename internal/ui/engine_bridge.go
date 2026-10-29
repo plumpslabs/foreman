@@ -78,9 +78,6 @@ func (m *Model) upsertDiffMessage(path, diff string) {
 func (m *Model) upsertTodosMessage(todosContent string) {
 	m.historyVersion++
 	for i := len(m.messages) - 1; i >= 0; i-- {
-		if strings.HasPrefix(m.messages[i], "YOU:\n") || strings.HasPrefix(m.messages[i], "👤 ") {
-			break
-		}
 		if strings.HasPrefix(m.messages[i], "TODOS:\n") {
 			m.messages[i] = todosContent
 			return
@@ -137,6 +134,15 @@ func (m *Model) startTurn(userQuery string) (tea.Model, tea.Cmd) {
 		}
 		if m.prog != nil {
 			m.prog.Send(streamChunkMsg(delta))
+		}
+	})
+
+	m.engine.SetReasoningHandler(func(delta string) {
+		if m.quitting {
+			return
+		}
+		if m.prog != nil {
+			m.prog.Send(reasoningChunkMsg(delta))
 		}
 	})
 
@@ -216,10 +222,12 @@ type stepProgressMsg struct {
 	info  string
 }
 type streamChunkMsg string
+type reasoningChunkMsg string
 type fileDiffMsg struct {
 	path string
 	diff string
 }
+type agentEventMsg loop.AgentEvent
 type diagnoseResultMsg string
 type diagnoseFixMsg string
 type ephemeralAskResultMsg string
@@ -248,7 +256,7 @@ func isEmojiRune(r rune) bool {
 		(r >= 0x2600 && r <= 0x27BF) || // Miscellaneous Symbols (⚙️, ⚠️, ⚡), Dingbats (✓, ✖)
 		(r >= 0x2300 && r <= 0x23FF) || // Miscellaneous Technical (⏳, ⌛)
 		(r >= 0x2B00 && r <= 0x2BFF) || // Miscellaneous Symbols and Arrows
-		(r >= 0x2000 && r <= 0x32FF)    // General punctuation, letterlike symbols, enclosed CJK, box drawing
+		(r >= 0x2000 && r <= 0x32FF) // General punctuation, letterlike symbols, enclosed CJK, box drawing
 }
 
 // startsWithEmoji reports whether the string leads with an emoji/symbol glyph.
@@ -707,6 +715,14 @@ func (m *Model) rebuildEngine() {
 			m.prog.Send(fileDiffMsg{path: path, diff: diff})
 		}
 	})
+	m.engine.Subscribe(func(ev loop.AgentEvent) {
+		if m.quitting {
+			return
+		}
+		if m.prog != nil {
+			m.prog.Send(agentEventMsg(ev))
+		}
+	})
 	skill.EnsureGlobalDefaultsInstalled()
 	m.engine.SetSkillCatalog(skillEntries(cwd))
 
@@ -776,7 +792,6 @@ func (m *Model) rebuildEngine() {
 		m.engine.SetLearner(learn.NewLearner(lp))
 	}
 }
-
 
 // embedderFor returns an embeddings endpoint for the active provider.
 func embedderFor(p provider.DetectedProvider) *search.Embedder {

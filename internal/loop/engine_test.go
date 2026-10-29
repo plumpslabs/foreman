@@ -352,8 +352,8 @@ func TestPreambleRepetitionLoopDetectionInBuilderMode(t *testing.T) {
 }
 
 type modeConfusionAdapter struct {
-	calls    int
-	target   string
+	calls  int
+	target string
 }
 
 func (a *modeConfusionAdapter) Complete(ctx context.Context, req provider.CompletionRequest) (*provider.CompletionResponse, error) {
@@ -381,26 +381,27 @@ func TestBuilderModeConfusionAutoRecovery(t *testing.T) {
 	engine := NewEngine(adapter, tools, ctxMgr, "test-model")
 	engine.SetMode("BUILDER")
 
-	_, err := engine.RunTurn(context.Background(), "terapkan perubahan di Layout.tsx", nil)
+	// Turn result: with the mode-override interception removed, the model's
+	// prose answer is the final answer — capture it for the assertions below.
+	res, err := engine.RunTurn(context.Background(), "terapkan perubahan di Layout.tsx", nil)
 	if err != nil {
 		t.Fatalf("RunTurn failed: %v", err)
 	}
 
-	msgs := ctxMgr.Messages()
-	foundOverride := false
-	for _, msg := range msgs {
+	// The mode-override interception was removed (P0-4d): a mode claim in
+	// the model's prose is no longer intercepted or re-prompted. The system
+	// prompt already states the active mode and permissions, and matching
+	// nouns in the model's own text over-triggered and drove repetition.
+	for _, msg := range ctxMgr.Messages() {
 		if strings.Contains(msg.Content, "MODE OVERRIDE") {
-			foundOverride = true
-			break
+			t.Errorf("engine injected a MODE OVERRIDE message; interception should be removed")
 		}
 	}
 
-	if !foundOverride {
-		t.Errorf("expected MODE OVERRIDE message when model falsely claims to be in PLANNER mode while BUILDER mode is active")
-	}
-
-	if adapter.calls < 2 {
-		t.Errorf("expected engine to prompt model again after mode correction, got %d calls", adapter.calls)
+	// A hallucinated-mode monologue must not crash the turn: it surfaces
+	// verbatim as the final answer so the user (or a retry) can handle it.
+	if !strings.Contains(res, "PLANNER") {
+		t.Errorf("expected the model's text response to surface as the final answer, got %q", res)
 	}
 }
 
@@ -864,16 +865,16 @@ func TestProportionalIterationBudget(t *testing.T) {
 	if _, err := e.RunTurn(context.Background(), "fix the typo in the comment", nil); err != nil {
 		t.Fatalf("simple RunTurn failed: %v", err)
 	}
-	if e.maxIterations != 10 {
-		t.Fatalf("simple task: expected 10 iterations, got %d", e.maxIterations)
+	if e.maxIterations != 12 {
+		t.Fatalf("simple task: expected 12 iterations, got %d", e.maxIterations)
 	}
 
 	// Medium ask -> 16.
 	if _, err := e.RunTurn(context.Background(), "add a new endpoint to the api", nil); err != nil {
 		t.Fatalf("medium RunTurn failed: %v", err)
 	}
-	if e.maxIterations != 16 {
-		t.Fatalf("medium task: expected 16 iterations, got %d", e.maxIterations)
+	if e.maxIterations != 24 {
+		t.Fatalf("medium task: expected 24 iterations, got %d", e.maxIterations)
 	}
 
 	// Complex cross-module refactor -> full 25.
@@ -933,6 +934,85 @@ func (c *captureAdapter) Complete(_ context.Context, req provider.CompletionRequ
 		c.sysPrompt = req.Messages[0].Content
 	}
 	return &provider.CompletionResponse{Content: "Done"}, nil
+}
+
+// msgCaptureAdapter records the full non-system message list so tests can
+// assert the conversation TAIL (what the model reads last).
+type msgCaptureAdapter struct {
+	captureAdapter
+	lastNonSystem string // content of the final non-system message
+}
+
+func (c *msgCaptureAdapter) Complete(ctx context.Context, req provider.CompletionRequest) (*provider.CompletionResponse, error) {
+	c.captureAdapter.Complete(ctx, req)
+	for i := len(req.Messages) - 1; i >= 0; i-- {
+		if req.Messages[i].Role != "system" {
+			c.lastNonSystem = req.Messages[i].Content
+			break
+		}
+	}
+	return &provider.CompletionResponse{Content: "Done"}, nil
+}
+
+// TestModeSwitchNoticeOutAnchorsStaleHistory pins the self-anchoring fix:
+// after a MID-CONVERSATION SetMode, the next turn's request must carry a
+// [HARD MODE FACT] message positioned AFTER the user query, so it — not the
+// model's own stale "I am in BUILDER mode" messages — is the last thing the
+// model reads. Fresh contexts (no history) must NOT queue a notice: there is
+// nothing to out-anchor there.
+func TestModeSwitchNoticeOutAnchorsStaleHistory(t *testing.T) {
+	tools := tool.NewRegistry()
+	ctxMgr := bcontext.NewManager("test_sess", nil, 128000)
+	adapter := &msgCaptureAdapter{}
+
+	engine := NewEngine(adapter, tools, ctxMgr, "test-model")
+
+	// Turn 1 in default BUILDER mode: populates conversation history.
+	if _, err := engine.RunTurn(context.Background(), "halo", nil); err != nil {
+		t.Fatalf("first RunTurn failed: %v", err)
+	}
+
+	engine.SetMode("PLANNER") // mid-conversation switch → queued for next turn
+	if engine.pendingModeNotice == "" {
+		t.Fatal("mid-conversation SetMode must queue a mode notice for the next turn")
+	}
+
+	if _, err := engine.RunTurn(context.Background(), "halo, siapa kamu?", nil); err != nil {
+		t.Fatalf("RunTurn failed: %v", err)
+	}
+
+	if !strings.Contains(adapter.lastNonSystem, "[HARD MODE FACT]") {
+		t.Fatalf("expected mode notice at the conversation tail, got %q", adapter.lastNonSystem)
+	}
+	if !strings.Contains(adapter.lastNonSystem, "PLANNER") {
+		t.Errorf("mode notice must name the new mode PLANNER, got %q", adapter.lastNonSystem)
+	}
+	if strings.Index(adapter.lastNonSystem, "[HARD MODE FACT]") < strings.LastIndex(adapter.lastNonSystem, "siapa kamu") {
+		t.Errorf("mode notice must sit AFTER the user query (recency tail), got %q", adapter.lastNonSystem)
+	}
+
+	// One-shot: later turns must not re-inject it.
+	adapter.lastNonSystem = ""
+	if _, err := engine.RunTurn(context.Background(), "lanjut", nil); err != nil {
+		t.Fatalf("second RunTurn failed: %v", err)
+	}
+	if strings.Contains(adapter.lastNonSystem, "[HARD MODE FACT]") {
+		t.Error("mode notice is one-shot and must not re-appear on later turns")
+	}
+}
+
+// TestFreshContextModeSwitchSkipsNotice verifies the noise guard: a subagent or
+// new session that SetModes before its first turn has no stale history to
+// out-anchor, so no notice is queued (keeps subagent/swarm prompts clean).
+func TestFreshContextModeSwitchSkipsNotice(t *testing.T) {
+	tools := tool.NewRegistry()
+	ctxMgr := bcontext.NewManager("fresh_sess", nil, 128000)
+	engine := NewEngine(&captureAdapter{}, tools, ctxMgr, "test-model")
+
+	engine.SetMode("PLANNER") // no history yet → nothing to correct
+	if engine.pendingModeNotice != "" {
+		t.Errorf("fresh context must not queue a mode notice, got %q", engine.pendingModeNotice)
+	}
 }
 
 func TestSkillsInjectedIntoSystemPrompt(t *testing.T) {
@@ -1030,7 +1110,7 @@ func TestSkillLoadTracing(t *testing.T) {
 	adapter := &mockAdapter{toolCalls: []provider.ToolCall{
 		{Name: "read_file", Arguments: `{"path": ".brocode/skills/go-workflow/SKILL.md"}`},
 		{Name: "read_file", Arguments: `{"path": ".brocode/skills/go-workflow/SKILL.md"}`}, // duplicate must dedupe
-		{Name: "read_file", Arguments: `{"path": "main.go"}`}, // not a skill file
+		{Name: "read_file", Arguments: `{"path": "main.go"}`},                              // not a skill file
 	}}
 	engine := NewEngine(adapter, tool.NewRegistry(), ctxMgr, "test-model")
 	engine.SetSkillCatalog([]prompt.SkillEntry{
@@ -1103,11 +1183,11 @@ func TestSkillForRead(t *testing.T) {
 		{Name: "ts-workflow", Path: "/abs/ws/.brocode/skills/ts-workflow/SKILL.md"},
 	}
 	cases := map[string]string{
-		".brocode/skills/go-workflow/SKILL.md":      "go-workflow",
+		".brocode/skills/go-workflow/SKILL.md":         "go-workflow",
 		"/abs/ws/.brocode/skills/go-workflow/SKILL.md": "go-workflow",
 		"/abs/ws/.brocode/skills/ts-workflow/SKILL.md": "ts-workflow",
-		"main.go":                                     "",
-		"/abs/ws/internal/loop/engine.go":              "",
+		"main.go":                         "",
+		"/abs/ws/internal/loop/engine.go": "",
 	}
 	for path, want := range cases {
 		if got := eng.skillForRead(path); got != want {
@@ -1294,9 +1374,9 @@ type fakeTool struct {
 	desc string
 }
 
-func (f fakeTool) Name() string                                { return f.name }
-func (f fakeTool) Description() string                        { return f.desc }
-func (f fakeTool) Parameters() map[string]any                 { return map[string]any{} }
+func (f fakeTool) Name() string                                          { return f.name }
+func (f fakeTool) Description() string                                   { return f.desc }
+func (f fakeTool) Parameters() map[string]any                            { return map[string]any{} }
 func (f fakeTool) Execute(ctx context.Context, a string) (string, error) { return "", nil }
 
 // TestToolDescBudgetTrims verifies the tool-description lean budget (P5) trims
@@ -1428,8 +1508,8 @@ func TestLooksLikeImplTask(t *testing.T) {
 		"explain how the cache works",
 		"what does read_file do?",
 		"show me the parser",
-		"fix all the lint warnings",            // handled by pre-flight, not plan
-		"add a small helper",                   // small edit: runs directly
+		"fix all the lint warnings",              // handled by pre-flight, not plan
+		"add a small helper",                     // small edit: runs directly
 		"refactor main.go to add a small helper", // single-file: runs directly
 		"list the files in internal/loop",
 		"how do I run the tests?",
@@ -1455,8 +1535,6 @@ func TestPlanModeDirectiveInSystemPrompt(t *testing.T) {
 		t.Errorf("expected plan-mode to instruct ask_user confirmation")
 	}
 }
-
-
 
 func TestGuardPreflightRedundant(t *testing.T) {
 	e := &Engine{}
@@ -1598,5 +1676,53 @@ func TestAutonomousModeSwitchInEngine(t *testing.T) {
 	// Engine mode must now be dynamically updated to MINER
 	if eng.Mode() != "MINER" {
 		t.Errorf("expected engine mode to switch to MINER, got %s", eng.Mode())
+	}
+}
+
+// TestDynamicToolMasking verifies that repeating tools are dynamically masked from
+// the exposed tool surface to prevent autoregressive attention loops.
+func TestDynamicToolMasking(t *testing.T) {
+	reg := tool.NewRegistry()
+	reg.Register(&stubTool{name: "read_file"})
+	reg.Register(&stubTool{name: "bash"})
+
+	ctxMgr := bcontext.NewManager("test_sess", nil, 10000)
+	eng := NewEngine(&scriptedAdapter{}, reg, ctxMgr, "test-model")
+	eng.SetMode("BUILDER")
+
+	// Initially read_file must be exposed in BUILDER mode
+	toolsInitial := eng.toolsForMode("BUILDER")
+	hasReadFile := false
+	for _, td := range toolsInitial {
+		if td.Name == "read_file" {
+			hasReadFile = true
+			break
+		}
+	}
+	if !hasReadFile {
+		t.Fatal("read_file should be exposed initially")
+	}
+
+	// Mask read_file for 1 round
+	eng.maskedTools = map[string]int{"read_file": 1}
+	toolsMasked := eng.toolsForMode("BUILDER")
+	for _, td := range toolsMasked {
+		if td.Name == "read_file" {
+			t.Fatal("read_file should be masked from tool surface")
+		}
+	}
+
+	// Unmask
+	delete(eng.maskedTools, "read_file")
+	toolsUnmasked := eng.toolsForMode("BUILDER")
+	hasReadFileAgain := false
+	for _, td := range toolsUnmasked {
+		if td.Name == "read_file" {
+			hasReadFileAgain = true
+			break
+		}
+	}
+	if !hasReadFileAgain {
+		t.Fatal("read_file should be restored after unmasking")
 	}
 }

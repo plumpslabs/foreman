@@ -311,6 +311,15 @@ func TestMemoryToolRecallRetainList(t *testing.T) {
 		t.Errorf("list = %q, want fact listed", out)
 	}
 
+	// lesson records a verified lesson.
+	out, err = mt.Execute(context.Background(), `{"action":"lesson","title":"Use pnpm in monorepo","description":"Always run pnpm instead of npm","source":"test_verified"}`)
+	if err != nil {
+		t.Fatalf("lesson: %v", err)
+	}
+	if !strings.Contains(out, "Verified lesson stored") {
+		t.Errorf("lesson = %q, want confirmation", out)
+	}
+
 	// nil store reports unavailable.
 	mtNil := &MemoryTool{}
 	out, _ = mtNil.Execute(context.Background(), `{"action":"list"}`)
@@ -1151,7 +1160,7 @@ func TestSwitchModeTool(t *testing.T) {
 	toolWithDeclined := &SwitchModeTool{
 		Ask: func(ctx context.Context, questions []AskQuestion) ([]AskResult, error) {
 			return []AskResult{
-				{Answers: []string{"❌ Tidak, tetap di mode sekarang"}},
+				{Answers: []string{"🚫 Keep current mode"}},
 			}, nil
 		},
 	}

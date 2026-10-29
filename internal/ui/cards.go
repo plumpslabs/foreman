@@ -185,21 +185,25 @@ func formatMessage(msg string, width int, filesExpanded bool) string {
 			trimmed := strings.TrimSpace(l)
 			if strings.HasPrefix(trimmed, "✓") || strings.HasPrefix(trimmed, "[x]") {
 				desc := strings.TrimSpace(strings.TrimPrefix(strings.TrimPrefix(trimmed, "✓"), "[x]"))
+				desc = formatInlineMarkdown(desc)
 				checkGlyph := lipgloss.NewStyle().Foreground(lipgloss.Color("42")).Bold(true).Render("  ✓  ")
 				strikethroughText := lipgloss.NewStyle().Foreground(lipgloss.Color("242")).Strikethrough(true).Render(desc)
 				formatted = append(formatted, checkGlyph+strikethroughText)
 			} else if strings.HasPrefix(trimmed, "⏳") || strings.HasPrefix(trimmed, "[/]") {
 				desc := strings.TrimSpace(strings.TrimPrefix(strings.TrimPrefix(trimmed, "⏳"), "[/]"))
+				desc = formatInlineMarkdown(desc)
 				inProgGlyph := lipgloss.NewStyle().Foreground(lipgloss.Color("214")).Bold(true).Render("  ⏳ ")
 				activeText := lipgloss.NewStyle().Foreground(lipgloss.Color("220")).Bold(true).Render(desc)
 				formatted = append(formatted, inProgGlyph+activeText)
 			} else if strings.HasPrefix(trimmed, "✖") {
 				desc := strings.TrimSpace(strings.TrimPrefix(trimmed, "✖"))
+				desc = formatInlineMarkdown(desc)
 				cancelGlyph := lipgloss.NewStyle().Foreground(lipgloss.Color("196")).Render("  ✖  ")
 				cancelText := lipgloss.NewStyle().Foreground(lipgloss.Color("240")).Strikethrough(true).Render(desc)
 				formatted = append(formatted, cancelGlyph+cancelText)
 			} else {
 				desc := strings.TrimSpace(strings.TrimPrefix(strings.TrimPrefix(trimmed, "○"), "[ ]"))
+				desc = formatInlineMarkdown(desc)
 				pendingGlyph := lipgloss.NewStyle().Foreground(lipgloss.Color("244")).Render("  ○  ")
 				pendingText := lipgloss.NewStyle().Foreground(lipgloss.Color("250")).Render(desc)
 				formatted = append(formatted, pendingGlyph+pendingText)
@@ -573,4 +577,36 @@ func extractRecentSessionContext(messages []string, maxCount int) string {
 		return ""
 	}
 	return "Active Conversation Context (for resolving references like 'itu', 'masalah tadi', or recent fixes):\n" + strings.Join(snippets, "\n") + "\n\n"
+}
+
+var (
+	boldRe   = regexp.MustCompile(`\*\*(.*?)\*\*`)
+	codeRe   = regexp.MustCompile("`([^`]+)`")
+	italicRe = regexp.MustCompile(`\*([^*]+)\*`)
+)
+
+func formatInlineMarkdown(text string) string {
+	boldStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("255"))
+	codeStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("141")).Background(lipgloss.Color("236")).Padding(0, 1)
+	italicStyle := lipgloss.NewStyle().Italic(true).Foreground(lipgloss.Color("246"))
+
+	// Replace **bold**
+	text = boldRe.ReplaceAllStringFunc(text, func(m string) string {
+		inner := m[2 : len(m)-2]
+		return boldStyle.Render(inner)
+	})
+
+	// Replace `code`
+	text = codeRe.ReplaceAllStringFunc(text, func(m string) string {
+		inner := m[1 : len(m)-1]
+		return codeStyle.Render(inner)
+	})
+
+	// Replace *italic*
+	text = italicRe.ReplaceAllStringFunc(text, func(m string) string {
+		inner := m[1 : len(m)-1]
+		return italicStyle.Render(inner)
+	})
+
+	return text
 }

@@ -134,17 +134,18 @@ type FileActionDecision struct {
 
 // Registry holds all registered tools plus the permission gate state.
 type Registry struct {
-	mu       sync.RWMutex // guards tools for concurrent async registration (e.g. MCP deferred startup)
-	tools    map[string]Tool
-	repoRoot string          // anchors the cd/pushd escape check
-	allow    map[string]bool // session allow-list (keys from AllowKey)
+	mu                sync.RWMutex // guards tools for concurrent async registration (e.g. MCP deferred startup)
+	tools             map[string]Tool
+	repoRoot          string          // anchors the cd/pushd escape check
+	workspaceBoundary string          // optional canonical root for tool path enforcement
+	allow             map[string]bool // session allow-list (keys from AllowKey)
 	// allowExact remembers commands the user already approved this session. An
 	// "Allow once" on command X therefore does NOT re-prompt when the model runs
 	// the SAME command again — previously a re-run popped a fresh gated prompt
 	// every time, which is exactly the "Allow once / Allow once" loop users hit.
 	allowExact map[string]bool
-	askFunc  func(context.Context, []AskQuestion) ([]AskResult, error)
-	sandbox  *Sandbox // granular per-tool policy (.brocode/sandbox.json)
+	askFunc    func(context.Context, []AskQuestion) ([]AskResult, error)
+	sandbox    *Sandbox // granular per-tool policy (.brocode/sandbox.json)
 
 	// readOnly / readOnlyBash enforce a mode at the EXECUTOR level, not just
 	// in the engine loop: mutating tools (and bash, for PLANNER) are hard
@@ -273,6 +274,13 @@ func (r *Registry) SetAskHandler(fn func(context.Context, []AskQuestion) ([]AskR
 	}
 }
 
+// SetModeGetter wires the active mode resolver to tools that depend on current mode.
+func (r *Registry) SetModeGetter(fn func() string) {
+	if t, ok := r.tools["switch_mode"].(*SwitchModeTool); ok {
+		t.CurrentMode = fn
+	}
+}
+
 // SetSearchEmbedder wires an OpenAI-compatible embeddings endpoint onto the
 // registered search_code tool (BM25 stays the fallback when it is nil).
 func (r *Registry) SetSearchEmbedder(e *search.Embedder) {
@@ -282,6 +290,23 @@ func (r *Registry) SetSearchEmbedder(e *search.Embedder) {
 			return
 		}
 	}
+}
+
+// SetWorkspaceBoundary restricts path-bearing tool calls to one project root.
+// It is intended for unattended local runtimes that cannot request approval.
+func (r *Registry) SetWorkspaceBoundary(path string) error {
+	root, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		return fmt.Errorf("resolve workspace boundary: %w", err)
+	}
+	abs, err := filepath.Abs(root)
+	if err != nil {
+		return err
+	}
+	r.mu.Lock()
+	r.workspaceBoundary = filepath.Clean(abs)
+	r.mu.Unlock()
+	return nil
 }
 
 // SetRepoRoot anchors the out-of-repo escape check for cd/pushd gates and
@@ -536,19 +561,19 @@ func (r *Registry) gateFileAction(ctx context.Context, kind, path string) (bool,
 // commandDescriptions maps common gated commands to human-readable explanations
 // so the approval modal shows WHAT will happen, not just the raw command.
 var commandDescriptions = map[string]string{
-	"git commit":      "📦 Commit staged changes to git history",
-	"git push":        "🚀 Push commits to remote repository",
-	"git reset":       "⏪ Undo recent commits (destructive)",
-	"git checkout":    "🔀 Switch branch or restore files",
-	"git branch -d":   "🗑️ Delete a branch",
-	"rm":              "🗑️ Delete files permanently",
-	"rm -rf":          "🗑️ Delete files/directories recursively (destructive)",
-	"npm install":     "📥 Install npm dependencies",
-	"yarn install":    "📥 Install yarn dependencies",
-	"pnpm install":    "📥 Install pnpm dependencies",
-	"pip install":     "📥 Install Python packages",
-	"go install":      "📥 Install Go binaries",
-	"cargo install":   "📥 Install Rust binaries",
+	"git commit":           "📦 Commit staged changes to git history",
+	"git push":             "🚀 Push commits to remote repository",
+	"git reset":            "⏪ Undo recent commits (destructive)",
+	"git checkout":         "🔀 Switch branch or restore files",
+	"git branch -d":        "🗑️ Delete a branch",
+	"rm":                   "🗑️ Delete files permanently",
+	"rm -rf":               "🗑️ Delete files/directories recursively (destructive)",
+	"npm install":          "📥 Install npm dependencies",
+	"yarn install":         "📥 Install yarn dependencies",
+	"pnpm install":         "📥 Install pnpm dependencies",
+	"pip install":          "📥 Install Python packages",
+	"go install":           "📥 Install Go binaries",
+	"cargo install":        "📥 Install Rust binaries",
 	"curl outbound-upload": "🌐 Transmit data payload / files to external URL via curl",
 	"wget outbound-upload": "🌐 Transmit data payload / files to external URL via wget",
 }
@@ -708,6 +733,13 @@ func (r *Registry) Execute(ctx context.Context, name, argsJSON string) (result s
 	// seconds) so concurrent Register calls (e.g. async MCP startup) are
 	// not blocked for the entire tool execution duration.
 	r.mu.RLock()
+	boundary := r.workspaceBoundary
+	if boundary != "" {
+		if err := checkWorkspacePathArgs(boundary, argsJSON); err != nil {
+			r.mu.RUnlock()
+			return "", err
+		}
+	}
 	if r.toolFilter != nil && !r.toolFilter(name) {
 		r.mu.RUnlock()
 		return "", fmt.Errorf("tool '%s' is disabled by active agent policy", name)
@@ -1237,19 +1269,32 @@ func (t *WriteTodosTool) Execute(ctx context.Context, argsJSON string) (string, 
 func detectFileLanguage(path string) string {
 	ext := strings.ToLower(filepath.Ext(path))
 	switch ext {
-	case ".go": return "go"
-	case ".ts", ".tsx", ".js", ".jsx": return "ts"
-	case ".py": return "python"
-	case ".rs": return "rust"
-	case ".rb": return "ruby"
-	case ".java": return "java"
-	case ".c", ".h": return "c"
-	case ".cpp", ".cc", ".cxx", ".hpp": return "cpp"
-	case ".php": return "php"
-	case ".sql": return "sql"
-	case ".html", ".htm", ".vue", ".svelte", ".astro": return "web"
-	case ".sh": return "bash"
-	default: return "text"
+	case ".go":
+		return "go"
+	case ".ts", ".tsx", ".js", ".jsx":
+		return "ts"
+	case ".py":
+		return "python"
+	case ".rs":
+		return "rust"
+	case ".rb":
+		return "ruby"
+	case ".java":
+		return "java"
+	case ".c", ".h":
+		return "c"
+	case ".cpp", ".cc", ".cxx", ".hpp":
+		return "cpp"
+	case ".php":
+		return "php"
+	case ".sql":
+		return "sql"
+	case ".html", ".htm", ".vue", ".svelte", ".astro":
+		return "web"
+	case ".sh":
+		return "bash"
+	default:
+		return "text"
 	}
 }
 
@@ -1285,7 +1330,10 @@ func readLineSpan(path string, start, end int) (string, int, error) {
 		return "", total, err
 	}
 	if start >= total {
-		return "", total, fmt.Errorf("start_line %d out of bounds (%d lines)", start+1, total)
+		if total == 0 {
+			return fmt.Sprintf("[File '%s' is empty (0 lines). No lines to read.]", filepath.Base(path)), 0, nil
+		}
+		return fmt.Sprintf("[End of file reached. File '%s' has %d lines total (requested start_line %d). No more lines to read.]", filepath.Base(path), total, start+1), total, nil
 	}
 	return b.String(), total, nil
 }
@@ -1293,8 +1341,10 @@ func readLineSpan(path string, start, end int) (string, int, error) {
 // WriteFileTool
 type WriteFileTool struct{}
 
-func (t *WriteFileTool) Name() string        { return "write_file" }
-func (t *WriteFileTool) Description() string { return "Write or overwrite a file with new content. Set append=true to ADD content to the end of an existing file instead of replacing it." }
+func (t *WriteFileTool) Name() string { return "write_file" }
+func (t *WriteFileTool) Description() string {
+	return "Write or overwrite a file with new content. Set append=true to ADD content to the end of an existing file instead of replacing it."
+}
 func (t *WriteFileTool) Parameters() map[string]any {
 	return map[string]any{
 		"type": "object",
@@ -1407,16 +1457,16 @@ func (t *EditFileTool) Parameters() map[string]any {
 }
 func (t *EditFileTool) Execute(ctx context.Context, argsJSON string) (string, error) {
 	var args struct {
-		Path         string `json:"path"`
-		Target       string `json:"target"`
-		OldStr       string `json:"old_str"`
-		Search       string `json:"search"`
-		Replacement  string `json:"replacement"`
-		NewStr       string `json:"new_str"`
-		Replace      string `json:"replace"`
-		StartLine    int    `json:"start_line"`
-		EndLine      int    `json:"end_line"`
-		Edits        []struct {
+		Path        string `json:"path"`
+		Target      string `json:"target"`
+		OldStr      string `json:"old_str"`
+		Search      string `json:"search"`
+		Replacement string `json:"replacement"`
+		NewStr      string `json:"new_str"`
+		Replace     string `json:"replace"`
+		StartLine   int    `json:"start_line"`
+		EndLine     int    `json:"end_line"`
+		Edits       []struct {
 			Target      string `json:"target"`
 			OldStr      string `json:"old_str"`
 			Search      string `json:"search"`
@@ -2139,6 +2189,9 @@ func (t *BashTool) Execute(ctx context.Context, argsJSON string) (string, error)
 	} else {
 		cmd = SafeCommandContext(tctx, "sh", "-c", cmdStr)
 	}
+	if t.WorkDir != "" {
+		cmd.Dir = t.WorkDir
+	}
 	out, err := cmd.CombinedOutput()
 	result := strings.TrimSpace(string(out))
 	if tctx.Err() == context.DeadlineExceeded {
@@ -2626,7 +2679,8 @@ func (t *DocLookupTool) Execute(ctx context.Context, argsJSON string) (string, e
 // SwitchModeTool allows the agent to autonomously propose switching operational modes (BUILDER, PLANNER, MINER)
 // with interactive user confirmation when the task characteristics demand a different mode.
 type SwitchModeTool struct {
-	Ask func(ctx context.Context, questions []AskQuestion) ([]AskResult, error)
+	Ask         func(ctx context.Context, questions []AskQuestion) ([]AskResult, error)
+	CurrentMode func() string
 }
 
 func (t *SwitchModeTool) Name() string { return "switch_mode" }
@@ -2662,6 +2716,10 @@ func (t *SwitchModeTool) Execute(ctx context.Context, argsJSON string) (string, 
 	args.TargetMode = strings.ToUpper(strings.TrimSpace(args.TargetMode))
 	if args.TargetMode != "BUILDER" && args.TargetMode != "PLANNER" && args.TargetMode != "MINER" {
 		return "", fmt.Errorf("invalid target_mode %q: must be BUILDER, PLANNER, or MINER", args.TargetMode)
+	}
+
+	if t.CurrentMode != nil && strings.EqualFold(args.TargetMode, t.CurrentMode()) {
+		return fmt.Sprintf("Already in %s mode — no switch needed. Proceed directly with your implementation or task.", args.TargetMode), nil
 	}
 
 	if t.Ask == nil {

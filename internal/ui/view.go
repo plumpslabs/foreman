@@ -166,6 +166,24 @@ func truncatePrompt(s string) string {
 	return one
 }
 
+// truncateActivity flattens an activity entry to a single line and caps its length,
+// appending "..." if it exceeds the limit to keep the live status slot clean and single-line.
+func truncateActivity(s string, maxWidth int) string {
+	one := strings.Join(strings.Fields(s), " ")
+	maxLen := 65
+	if maxWidth > 20 && maxWidth-10 < maxLen {
+		maxLen = maxWidth - 10
+	}
+	if maxLen < 20 {
+		maxLen = 20
+	}
+	runes := []rune(one)
+	if len(runes) > maxLen {
+		return string(runes[:maxLen-3]) + "..."
+	}
+	return one
+}
+
 // buildLog renders the message history + live streaming block. The history
 // part is cached (renderedHistory) and rebuilt only when the messages change,
 // so every streamed chunk re-renders just the cheap streaming box instead of
@@ -381,7 +399,8 @@ func (m *Model) buildLogChrome() (string, int) {
 		}
 		actStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("244")).Italic(true)
 		for _, act := range m.activity {
-			sb.WriteString(actStyle.Render("  · "+normalizeEmojiSpacing(act)) + "\n")
+			dispAct := truncateActivity(act, m.width)
+			sb.WriteString(actStyle.Render("  · "+normalizeEmojiSpacing(dispAct)) + "\n")
 		}
 		sb.WriteString("\n")
 	} else {

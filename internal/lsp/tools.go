@@ -4,8 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"path/filepath"
+	"strings"
 
+	"github.com/plumpslabs/bro-code/internal/search"
 	"github.com/plumpslabs/bro-code/internal/tool"
 )
 
@@ -75,7 +78,25 @@ func (t *DefinitionTool) Execute(ctx context.Context, argsJSON string) (string, 
 	if err != nil {
 		return "", err
 	}
-	return t.m.Definition(ctx, args.Path, args.Line, args.Col)
+	res, err := t.m.Definition(ctx, args.Path, args.Line, args.Col)
+	if err == nil && res != "No definition found." {
+		return res, nil
+	}
+	// Progressive degradation fallback:
+	// When LSP is not installed or returns no definition, extract the identifier
+	// at (args.Line, args.Col) and attempt local AST symbol resolution or provide
+	// high-signal guidance so the model continues smoothly.
+	word := extractIdentifierAt(args.Path, args.Line, args.Col)
+	if word != "" {
+		if match := findSymbolDefinition(word, filepath.Dir(args.Path)); match != "" {
+			return fmt.Sprintf("Definition for %q (resolved via AST fallback):\n%s", word, match), nil
+		}
+		return fmt.Sprintf("No LSP definition found for %q at %s:%d:%d.\nFallback: use grep(pattern: %q) or code_locate(name: %q) to locate definitions.", word, args.Path, args.Line, args.Col, word, word), nil
+	}
+	if err != nil {
+		return "", err
+	}
+	return res, nil
 }
 
 // ReferencesTool — find every place a symbol is used.
@@ -91,7 +112,87 @@ func (t *ReferencesTool) Execute(ctx context.Context, argsJSON string) (string, 
 	if err != nil {
 		return "", err
 	}
-	return t.m.References(ctx, args.Path, args.Line, args.Col)
+	res, err := t.m.References(ctx, args.Path, args.Line, args.Col)
+	if err == nil && res != "No references found." {
+		return res, nil
+	}
+	// Progressive degradation fallback for references:
+	word := extractIdentifierAt(args.Path, args.Line, args.Col)
+	if word != "" {
+		return fmt.Sprintf("Language server not available for references. Symbol identified: %q at %s:%d:%d.\nFallback: use grep(pattern: %q) or code_locate(name: %q) to locate usages across the workspace.", word, args.Path, args.Line, args.Col, word, word), nil
+	}
+	if err != nil {
+		return "", err
+	}
+	return res, nil
+}
+
+// extractIdentifierAt extracts the word token under line/col in a source file.
+func extractIdentifierAt(path string, line, col int) string {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return ""
+	}
+	lines := strings.Split(string(data), "\n")
+	if line < 1 || line > len(lines) {
+		return ""
+	}
+	l := lines[line-1]
+	if len(l) == 0 {
+		return ""
+	}
+	colIdx := col - 1
+	if colIdx < 0 {
+		colIdx = 0
+	}
+	if colIdx >= len(l) {
+		colIdx = len(l) - 1
+	}
+	isIdent := func(b byte) bool {
+		return (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') || (b >= '0' && b <= '9') || b == '_'
+	}
+	if !isIdent(l[colIdx]) {
+		if colIdx > 0 && isIdent(l[colIdx-1]) {
+			colIdx--
+		} else if colIdx+1 < len(l) && isIdent(l[colIdx+1]) {
+			colIdx++
+		} else {
+			return ""
+		}
+	}
+	start := colIdx
+	for start > 0 && isIdent(l[start-1]) {
+		start--
+	}
+	end := colIdx
+	for end+1 < len(l) && isIdent(l[end+1]) {
+		end++
+	}
+	return l[start : end+1]
+}
+
+// findSymbolDefinition searches sibling files in dir for an AST definition of name.
+func findSymbolDefinition(name, dir string) string {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return ""
+	}
+	for _, e := range entries {
+		if e.IsDir() || strings.HasPrefix(e.Name(), ".") {
+			continue
+		}
+		path := filepath.Join(dir, e.Name())
+		syms, err := search.ExtractSymbols(path)
+		if err != nil || len(syms) == 0 {
+			continue
+		}
+		for _, s := range syms {
+			if s.Name == name {
+				return fmt.Sprintf("%s:%d (%s %s)", path, s.Line, s.Kind, s.Name)
+			}
+		}
+	}
+	return ""
 }
 
 // HoverTool — documentation and type info for a symbol.

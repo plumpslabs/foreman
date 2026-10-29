@@ -18,12 +18,11 @@ import (
 // 1 + 5 — every persistent store has a lifetime).
 const (
 	// artifactMaxLines: outputs longer than this (or artifactMaxBytes) spill
-	// to disk. 120 lines ≈ a focused test run; a 500-line stack trace is far
-	// past it.
-	artifactMaxLines = 120
-	artifactMaxBytes = 12000
+	// to disk. 40 lines ≈ a focused test run; a long log spills to artifacts.
+	artifactMaxLines = 40
+	artifactMaxBytes = 4096
 	// artifactHeadTail lines preserved from each end of a truncated output.
-	artifactHeadTail = 40
+	artifactHeadTail = 20
 )
 
 // artifactDir returns the turn-scoped artifacts directory under the repo.

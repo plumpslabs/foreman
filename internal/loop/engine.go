@@ -28,6 +28,11 @@ import (
 	"github.com/plumpslabs/bro-code/internal/tool"
 )
 
+var (
+	readOnlyClaimRe = regexp.MustCompile(`(?i)\b(planner mode|mode planner|switch to builder|beralih ke mode builder|read-only mode|only read-only|cannot edit in planner|hanya read-only|hanya bisa membaca)\b`)
+	planApprovalRe  = regexp.MustCompile(`(?i)\b(approve|approved|approval|setuju|ya|yes|gas|lanjut|lanjutkan|proceed|confirm|ok|oke|siap|acc)\b`)
+)
+
 // LoopState defines explicit state machine phases (§2.1).
 type LoopState int
 
@@ -98,8 +103,6 @@ type AgentTurn struct {
 	Answer    string              `json:"answer,omitempty"`
 }
 
-
-
 // defaultModelCallTimeout bounds a single LLM call. Without it a slow/free
 // provider can hang the whole turn for minutes with no feedback (the engine
 // sits silently inside one completeTurn call). On timeout the adaptive router
@@ -118,15 +121,15 @@ type ScoutDrainer interface {
 
 // Engine orchestrates the ReAct loop and verification ladder.
 type Engine struct {
-	adapter           provider.ProviderAdapter
-	tools             *tool.Registry
-	context           *bcontext.Manager
-	model             string
+	adapter provider.ProviderAdapter
+	tools   *tool.Registry
+	context *bcontext.Manager
+	model   string
 	// compactModel optionally routes the (frequent, low-stakes) compaction
 	// summarization to a cheaper/faster model than the main synthesis model.
 	// Empty = use e.model. This is the model-routing lever: exploration and
 	// housekeeping should not burn the premium model's tokens.
-	compactModel      string
+	compactModel string
 	// toolDescBudget caps each tool's description length sent in the request
 	// (0 = no trimming). Trimming verbose tool schemas shrinks the per-turn
 	// system payload so more of the window is spent on real task context.
@@ -139,8 +142,8 @@ type Engine struct {
 	// exceeds it, the loop stops synthesizing a final answer (no extension
 	// prompt). 0 disables cost accounting enforcement (but accumulation still
 	// runs when a budget is set, and CostUSD always returns the total).
-	costUSD         float64
-	budgetUSD       float64
+	costUSD   float64
+	budgetUSD float64
 	// turnTokens accumulates the raw token count of this turn's completions
 	// (for the per-turn HUD, P2 #3). lastChangeEmit tracks how many file
 	// changes have already been surfaced to the activity slot this turn, so
@@ -173,7 +176,7 @@ type Engine struct {
 	// so a path that gained a change this round re-emits its cumulative diff.
 	lastChangeEmit     int
 	lastChangeDiffEmit int
-	state           LoopState
+	state              LoopState
 	// lastTier records the complexity tier of the most recent turn so the UI
 	// can derive an adaptive timeout without re-classifying the query.
 	lastTier complexityTier
@@ -188,14 +191,15 @@ type Engine struct {
 	phaseEdits int
 	// phaseReads counts consecutive reads in the current phase. Used to detect
 	// when the model is stuck in research when it should be executing.
-	phaseReads int
-	fallbacks       []Fallback
-	streamHandler   func(delta string)
-	progressHandler TurnOutputHandler
+	phaseReads       int
+	fallbacks        []Fallback
+	streamHandler    func(delta string)
+	reasoningHandler func(delta string)
+	progressHandler  TurnOutputHandler
 	// lspAvailable is the count of language servers reachable this session,
 	// set by the UI at startup so the system prompt can tell the model whether
 	// lsp_scan is usable (and steer it away from installing external linters).
-	lspAvailable    int
+	lspAvailable int
 	// preflightBlock holds diagnostics/context the engine gathered proactively at
 	// turn start (pre-flight packing) so the model sees them in the FIRST prompt
 	// instead of spending tool rounds discovering them. Empty unless the task
@@ -217,9 +221,9 @@ type Engine struct {
 	// the model researches and proposes a plan, then confirms via ask_user before
 	// any file is mutated. planApproved flips the session to BUILDER once approved.
 	// planGateEnabled toggles the whole behavior (on by default).
-	planMode         bool
-	planApproved     bool
-	planGateEnabled  bool
+	planMode        bool
+	planApproved    bool
+	planGateEnabled bool
 	// Adaptive routing state: primaryID/primaryProtocol identify the active
 	// provider for health tracking and cross-vendor confirmation; health is the
 	// per-provider circuit breaker; fallbackPolicy is the user's routing
@@ -260,6 +264,11 @@ type Engine struct {
 	// turnToolCallCounts tracks per-turn invocation counts of normalized tool calls
 	// to detect multi-tool cycles (e.g. A -> B -> C -> A -> B -> C).
 	turnToolCallCounts map[string]int
+	// maskedTools maps tool name -> rounds remaining to temporarily exclude
+	// from the LLM prompt schema. Used to cleanly break autoregressive tool
+	// repetition loops (e.g. model re-reading the same range) without aborting
+	// or strangling the turn.
+	maskedTools map[string]int
 	// toolOnlyRounds counts consecutive loop iterations where the model only
 	// called tools and never produced an answer. Once it exceeds
 	// maxToolOnlyRounds the loop stops so a tool-happy model cannot burn all
@@ -287,6 +296,8 @@ type Engine struct {
 	readOnlyRounds int
 	// readOnlyReminderSent guards the "stop reading, start editing" reminder.
 	readOnlyReminderSent bool
+	// readOnlyAdvisorySent guards the "proceed to implementation" hard advisory.
+	readOnlyAdvisorySent bool
 	// readCounts tracks how many times each file has been read this turn.
 	// When a file reaches the cap (maxReadsPerFile), further reads are blocked
 	// and the model is forced to edit or answer instead of spinning.
@@ -294,7 +305,7 @@ type Engine struct {
 	// lastTextResponse tracks the model's most recent text-only response
 	// (no tool calls). When the model repeats the same text N times without
 	// calling any tools, a loop-break message is injected.
-	lastTextResponse     string
+	lastTextResponse      string
 	lastTextResponseCount int
 	// modeGuardTrippedCount counts consecutive rounds where tool calls
 	// were blocked by read-only mode guards (PLANNER/MINER).
@@ -432,6 +443,13 @@ type Engine struct {
 	// lessonFiles snapshots the files involved in a successful repair, taken
 	// before the review resets editedFiles, so distillLesson can name them.
 	lessonFiles []string
+	// pendingModeNotice carries a one-line "hard mode fact" set by SetMode and
+	// injected into the LLM context at the START of the next turn. The mode
+	// switch already rewrites the system prompt, but the model's own recent
+	// assistant messages may still claim the old mode — and for small models
+	// that self-anchored tail out-weighs a system header it rarely re-reads.
+	// A fresh message at the conversation tail wins the recency battle.
+	pendingModeNotice string
 	// sysPromptCached is the system prompt built ONCE per turn and reused for
 	// every loop iteration. Without this, the prompt was re-rendered each
 	// round and — because the warm-start memory excerpt keyed off the evolving
@@ -483,6 +501,36 @@ type Engine struct {
 	// usually means downstream calls will error too. Cutting them saves ~2-5
 	// rounds of error spam per failure.
 	earlyExitOnError bool
+	// eventListeners receives real-time AgentEvents during task execution.
+	eventListeners []EventListener
+	eventMu        sync.RWMutex
+}
+
+// Subscribe registers an event listener to receive live AgentEvent streams.
+func (e *Engine) Subscribe(listener EventListener) {
+	if listener == nil {
+		return
+	}
+	e.eventMu.Lock()
+	defer e.eventMu.Unlock()
+	e.eventListeners = append(e.eventListeners, listener)
+}
+
+// emit dispatches an AgentEvent to all registered listeners.
+func (e *Engine) emit(eventType EventType, payload any) {
+	ev := AgentEvent{
+		Type:      eventType,
+		Timestamp: time.Now(),
+		Payload:   payload,
+	}
+	e.eventMu.RLock()
+	listeners := make([]EventListener, len(e.eventListeners))
+	copy(listeners, e.eventListeners)
+	e.eventMu.RUnlock()
+
+	for _, l := range listeners {
+		l(ev)
+	}
 }
 
 // SetAgentPrompt sets the custom instructions for the active custom agent.
@@ -508,8 +556,6 @@ func (e *Engine) SetEarlyExitOnError(v bool) {
 func (e *Engine) SetScoutManager(sm ScoutDrainer) {
 	e.scouts = sm
 }
-
-
 
 // SetLearner attaches the self-improving control layer. It immediately applies
 // the learned compaction ratio so the session starts with the tuned threshold
@@ -551,8 +597,6 @@ func (e *Engine) LearnerStats() string {
 	}
 	return e.learner.Stats()
 }
-
-
 
 // SetUsageRecorder wires a callback that receives the files the model touched
 // each turn (read, searched, edited) so usage can persist across sessions.
@@ -610,8 +654,11 @@ func (e *Engine) localizeVerifyFailure() string {
 	var sb strings.Builder
 	for _, p := range e.editedFiles {
 		if out := e.diagFn(p); out != "" && !strings.HasPrefix(out, "No diagnostics") {
-			sb.WriteString("• ");sb.WriteString(p);sb.WriteString("\n")
-			sb.WriteString(out);sb.WriteString("\n")
+			sb.WriteString("• ")
+			sb.WriteString(p)
+			sb.WriteString("\n")
+			sb.WriteString(out)
+			sb.WriteString("\n")
 		}
 	}
 	return strings.TrimSuffix(sb.String(), "\n")
@@ -652,12 +699,16 @@ func (e *Engine) SessionCostUSD() float64 {
 	return e.usage.TotalCost()
 }
 
-
-
 // SetStreamHandler wires a callback receiving content deltas while the model
 // streams its answer. Nil disables streaming (adapters fall back to Complete).
 func (e *Engine) SetStreamHandler(fn func(delta string)) {
 	e.streamHandler = fn
+}
+
+// SetReasoningHandler wires a callback receiving reasoning deltas while the model
+// generates its internal deliberation (thinking tokens).
+func (e *Engine) SetReasoningHandler(fn func(delta string)) {
+	e.reasoningHandler = fn
 }
 
 // SetAskHandler wires an interactive question handler for turn extensions.
@@ -678,13 +729,13 @@ func NewEngine(adapter provider.ProviderAdapter, tools *tool.Registry, ctxMgr *b
 	if ctxMgr != nil {
 		ctxMgr.SetModel(model)
 	}
-	return &Engine{
-		adapter:           adapter,
-		tools:             tools,
-		context:           ctxMgr,
-		model:             model,
-		mode:              "BUILDER",
-		maxIterations:     25,
+	eng := &Engine{
+		adapter:       adapter,
+		tools:         tools,
+		context:       ctxMgr,
+		model:         model,
+		mode:          "BUILDER",
+		maxIterations: 25,
 		// baseMaxIterations 0 = unset: the per-turn reset then derives the
 		// iteration budget from the task's complexity tier (simple 10 / medium
 		// 16 / complex 25) instead of a flat 25. SetMaxIterations (config,
@@ -699,8 +750,12 @@ func NewEngine(adapter provider.ProviderAdapter, tools *tool.Registry, ctxMgr *b
 		repoRoot:          tools.RepoRoot(),
 		planGateEnabled:   false,
 		tuning:            prompt.DefaultTuning(),
-		earlyExitOnError: true, // default: stop on mutating tool failure
+		earlyExitOnError:  true, // default: stop on mutating tool failure
 	}
+	if tools != nil {
+		tools.SetModeGetter(func() string { return eng.Mode() })
+	}
+	return eng
 }
 
 func (e *Engine) SetMode(m string) {
@@ -709,6 +764,13 @@ func (e *Engine) SetMode(m string) {
 		e.mode = m
 		e.sysPromptCached = "" // invalidate cached system prompt on mode switch
 		e.applyModePolicy()
+		// Queue a tail-position correction for the next turn — but only when the
+		// conversation already has history. Fresh contexts (new sessions,
+		// subagents, swarm roles) have no stale "I am in X mode" messages to
+		// out-anchor, and an extra injected message there is pure noise.
+		if e.context != nil && e.context.HasMessages() {
+			e.pendingModeNotice = fmt.Sprintf("[HARD MODE FACT]: The active engine mode is NOW %s. Any earlier message stating a different mode is outdated — the current mode is %s. When asked about your mode, answer %s.", m, m, m)
+		}
 		if e.context != nil && oldMode != "" {
 			_ = e.context.AppendSystemNote(fmt.Sprintf("[SYSTEM NOTICE]: Active engine mode changed from %s to %s. You are now operating strictly in %s mode.", oldMode, m, m))
 		}
@@ -799,6 +861,37 @@ type TurnOutputHandler func(state LoopState, info string)
 // count and estimated cost attributed to it. Both are available on the error
 // path too, so callers (sub-agents, phase attribution) can bill partial work
 // when a turn fails partway through.
+// RunTask executes an autonomous agent task and returns a structured AgentResult.
+// It acts as the headless, interface-agnostic entrypoint for the Agent Core.
+func (e *Engine) RunTask(ctx context.Context, taskPrompt string) (*AgentResult, error) {
+	start := time.Now()
+	res, err := e.RunTurn(ctx, taskPrompt, nil)
+	duration := time.Since(start)
+
+	status := "completed"
+	if err != nil {
+		status = "failed"
+	} else if e.state == StateBlocked {
+		status = "blocked"
+	}
+
+	result := &AgentResult{
+		Success:          err == nil && e.state != StateBlocked,
+		Status:           status,
+		Message:          res,
+		ModifiedFiles:    append([]string(nil), e.editedFiles...),
+		TotalTokens:      e.turnTokens,
+		ProductiveTokens: e.turnProductiveTokens,
+		CostUSD:          e.costUSD,
+		Duration:         duration,
+		Rounds:           e.toolOnlyRounds,
+		Mode:             e.Mode(),
+		FallbackModel:    e.lastFallback,
+	}
+
+	return result, err
+}
+
 func (e *Engine) RunTurnWithUsage(ctx context.Context, userQuery string, onUpdate TurnOutputHandler) (answer string, tokens int, cost float64, compactions int, err error) {
 	answer, err = e.RunTurn(ctx, userQuery, onUpdate)
 	e.turnCompactions = e.context.CompactCount() - e.compactionBaseline
@@ -810,6 +903,34 @@ func (e *Engine) RunTurn(ctx context.Context, userQuery string, onUpdate TurnOut
 	// utilization and nudge the compaction ratio toward the high-signal band.
 	// Runs on every return path via defer.
 	defer e.learnObserve()
+
+	e.emit(EventTurnStart, userQuery)
+	defer func() {
+		if err != nil {
+			e.emit(EventTurnError, err.Error())
+		} else {
+			e.emit(EventTurnComplete, AgentResult{
+				Success:          e.state != StateBlocked,
+				Status:           e.State().String(),
+				Message:          answer,
+				ModifiedFiles:    append([]string(nil), e.editedFiles...),
+				TotalTokens:      e.turnTokens,
+				ProductiveTokens: e.turnProductiveTokens,
+				CostUSD:          e.costUSD,
+				Rounds:           e.toolOnlyRounds,
+				Mode:             e.Mode(),
+				FallbackModel:    e.lastFallback,
+			})
+		}
+	}()
+
+	rawUpdate := onUpdate
+	onUpdate = func(state LoopState, info string) {
+		e.emit(EventProgress, ProgressPayload{State: state, Info: info})
+		if rawUpdate != nil {
+			rawUpdate(state, info)
+		}
+	}
 
 	e.progressHandler = onUpdate
 	// Reset the fallback marker for this turn (set when a fallback provider
@@ -837,6 +958,7 @@ func (e *Engine) RunTurn(ctx context.Context, userQuery string, onUpdate TurnOut
 	e.toolReminder2Sent = false
 	e.readOnlyRounds = 0
 	e.readOnlyReminderSent = false
+	e.readOnlyAdvisorySent = false
 	e.execPhase = phaseResearch
 	e.phaseEdits = 0
 	e.phaseReads = 0
@@ -844,6 +966,7 @@ func (e *Engine) RunTurn(ctx context.Context, userQuery string, onUpdate TurnOut
 	e.lastExploredTarget = ""
 	e.lastToolCall = provider.ToolCall{}
 	e.lastToolCallRepeats = 0
+	e.maskedTools = make(map[string]int)
 	e.explored = nil
 	e.readCounts = make(map[string]int)
 	e.lastTextResponse = ""
@@ -980,19 +1103,10 @@ func (e *Engine) RunTurn(ctx context.Context, userQuery string, onUpdate TurnOut
 	e.cleanupArtifacts()
 
 	if userQuery != "" {
-		// Stale-context detection: if the new prompt is semantically unrelated
-		// to the ongoing conversation (keyword overlap < 30%), do a partial
-		// context reset (keep session metadata, drop the message thread) to
-		// avoid the model charging ahead in the wrong direction.
-		if e.context != nil && e.context.Len() > 5 {
-			stale, _ := e.context.IsStaleContext(userQuery)
-			if stale {
-				e.context.ResetStaleContext(userQuery)
-				if onUpdate != nil {
-					onUpdate(e.state, "🔄 Stale context detected — partial reset (new topic)")
-				}
-			}
-		}
+		// Continuous Context Continuity:
+		// Industry standards (Claude Code, OpenHands) do NOT drop message history on heuristic guesses.
+		// Context preservation is maintained across turns, and managed gracefully by sliding-window
+		// compaction when token limits are reached, preserving conversation intent without amnesia.
 
 		// Smart scope & AST Pre-Retrieval: if the prompt contains recognizable
 		// keywords/symbols, pre-compute relevance-ranked files and pre-locate
@@ -1050,6 +1164,15 @@ func (e *Engine) RunTurn(ctx context.Context, userQuery string, onUpdate TurnOut
 		if err := e.context.AppendUserMessage(userQuery); err != nil {
 			return "", err
 		}
+		// Deliver a queued mode-switch correction AFTER the user message so it
+		// is the most recent signal the model sees this turn — it must
+		// out-anchor the model's own stale "I am in X mode" assistant messages,
+		// which a system header alone consistently fails to beat on small
+		// models (self-anchoring: the tail of the context wins).
+		if e.pendingModeNotice != "" {
+			e.context.InjectContextMessage(e.pendingModeNotice)
+			e.pendingModeNotice = ""
+		}
 		// TSR REPRODUCE gate: arm only when the task looks like a genuine RUNTIME
 		// bug fix (panic/crash/regression/"not working") that must be reproduced
 		// before fixing. Diagnostic/LSP-fix tasks (warnings, errors, lint,
@@ -1099,10 +1222,30 @@ func (e *Engine) RunTurn(ctx context.Context, userQuery string, onUpdate TurnOut
 			}
 
 			if iteration <= hardCap {
-				if e.autoExtendSession {
+				hasEdits := len(e.editedFiles) > 0 || (e.context != nil && len(e.context.EditedFiles()) > 0)
+				hasUnverified := hasEdits && !e.hasPassedVerification
+				hasPendingPlan := false
+				if activePlan, err := plan.LoadCurrentPlan(e.repoRoot); err == nil && activePlan != nil {
+					if !activePlan.IsAllStepsDone() {
+						hasPendingPlan = true
+					}
+				}
+
+				// Forward momentum guarantee: when the model is actively implementing code,
+				// repairing verification failures, working through plan steps, or when auto-extend is on,
+				// do NOT choke or halt abruptly. Grant +15 iterations autonomously up to hardCap!
+				if e.autoExtendSession || hasEdits || hasUnverified || hasPendingPlan {
 					e.maxIterations += 15
 					if onUpdate != nil {
-						onUpdate(e.state, fmt.Sprintf("⚡ Autonomous Mode Active: Auto-extending turn limit to %d iterations", e.maxIterations))
+						reason := "active task momentum"
+						if hasPendingPlan {
+							reason = "pending plan steps"
+						} else if hasUnverified {
+							reason = "verification in progress"
+						} else if hasEdits {
+							reason = "multi-file implementation active"
+						}
+						onUpdate(e.state, fmt.Sprintf("⚡ Autonomous Momentum: Auto-extending turn limit to %d iterations (%s)", e.maxIterations, reason))
 					}
 					continue
 				}
@@ -1135,7 +1278,7 @@ func (e *Engine) RunTurn(ctx context.Context, userQuery string, onUpdate TurnOut
 			}
 
 			// Iteration budget exhausted: graceful synthesis (no extension).
-			return e.finalSynth(ctx, fmt.Sprintf("MAXIMUM ITERATIONS REACHED (%d): You have reached the maximum iteration limit for this task.", e.maxIterations), "Batas Maksimal 25 Ronde Tercapai")
+			return e.finalSynth(ctx, fmt.Sprintf("MAXIMUM ITERATIONS REACHED (%d): You have reached the maximum iteration limit for this task.", e.maxIterations), "Maximum Rounds Reached")
 		}
 
 		// Hard cost budget: once the estimated spend exceeds the per-task USD
@@ -1174,46 +1317,60 @@ func (e *Engine) RunTurn(ctx context.Context, userQuery string, onUpdate TurnOut
 		// what it knows and what context is still missing.
 		warnRounds, finalWarnRounds, maxAbsolute, _ := e.explorationBudget()
 
+		hasEdits := len(e.editedFiles) > 0
+
 		// Inject non-intrusive budget reminders when exploration milestones are reached
 		if e.toolOnlyRounds >= warnRounds && !e.toolReminderSent {
 			e.toolReminderSent = true
-			e.context.InjectContextMessage(fmt.Sprintf("⚠️ You have called tools %d times in a row without answering, and already examined %d files. Synthesize your findings or proceed to edits."+e.exploredSummary(), e.toolOnlyRounds, len(e.explored)))
-			if onUpdate != nil {
-				onUpdate(e.state, "🔍 Continuing codebase analysis...")
+			if hasEdits {
+				e.context.InjectContextMessage(fmt.Sprintf("ℹ️ [IMPLEMENTATION PROGRESS]: You have already modified %d file(s) (%s). You have called read tools %d rounds consecutively. When you have sufficient context, proceed to edit remaining target files or run verification.", len(e.editedFiles), strings.Join(e.editedFiles, ", "), e.toolOnlyRounds))
+				if onUpdate != nil {
+					onUpdate(e.state, "ℹ️ Reviewing context for next implementation edits...")
+				}
+			} else {
+				e.context.InjectContextMessage(fmt.Sprintf("⚠️ You have called tools %d times in a row without answering, and already examined %d files. Synthesize your findings or proceed to edits."+e.exploredSummary(), e.toolOnlyRounds, len(e.explored)))
+				if onUpdate != nil {
+					onUpdate(e.state, "🔍 Continuing codebase analysis...")
+				}
 			}
 		} else if e.toolOnlyRounds >= finalWarnRounds && !e.toolReminder2Sent {
 			e.toolReminder2Sent = true
-			e.context.InjectContextMessage("⚠️ Final exploration round: conclude your findings or execute edits now." + e.exploredSummary())
-			if onUpdate != nil {
-				onUpdate(e.state, "⚠️ Approaching exploration budget — wrapping up findings")
+			if hasEdits {
+				e.context.InjectContextMessage(fmt.Sprintf("ℹ️ [IMPLEMENTATION GUIDANCE]: %d consecutive read rounds since last edit. Target files modified: %s. Focus on completing remaining code modifications or verifying.", e.toolOnlyRounds, strings.Join(e.editedFiles, ", ")))
+				if onUpdate != nil {
+					onUpdate(e.state, "ℹ️ Ready to continue implementation edits")
+				}
+			} else {
+				e.context.InjectContextMessage("⚠️ Final exploration round: conclude your findings or execute edits now." + e.exploredSummary())
+				if onUpdate != nil {
+					onUpdate(e.state, "⚠️ Approaching exploration budget — wrapping up findings")
+				}
 			}
 		}
 		// Read-only budget: when the model has spent too many rounds purely
-		// exploring (read_file, grep, glob, etc.) without any mutation, force
-		// it to act on what it already knows. This prevents the "read 12 files,
-		// run out of budget, report findings without editing" pattern.
-		if e.readOnlyRounds >= readOnlyWarnRounds && !e.readOnlyReminderSent {
+		// exploring (read_file, grep, glob, etc.) without any mutation, guide
+		// it to act on what it already knows.
+		if e.Mode() == "BUILDER" && e.readOnlyRounds >= readOnlyWarnRounds && !e.readOnlyReminderSent {
 			e.readOnlyReminderSent = true
-			e.context.InjectContextMessage(
-				fmt.Sprintf("⚠️ STOP EXPLORING. You have read files %d rounds in a row without editing. "+
-					"You ALREADY have enough context. Use edit_file or write_file NOW to implement the changes. "+
-					"Do NOT read any more files. Act on what you know."+e.exploredSummary(),
-					e.readOnlyRounds))
-			if onUpdate != nil {
-				onUpdate(e.state, "⚠️ Read budget warning — switching to implementation")
+			if hasEdits {
+				e.context.InjectContextMessage(
+					fmt.Sprintf("ℹ️ You have read files %d rounds since your last edit. "+
+						"If you have identified the target code, please proceed to implement your remaining changes with edit_file or write_file."+e.exploredSummary(),
+						e.readOnlyRounds))
+			} else {
+				e.context.InjectContextMessage(
+					fmt.Sprintf("ℹ️ You have read files %d rounds in a row without editing. "+
+						"If you have identified the target code, please proceed to implement your changes with edit_file or write_file."+e.exploredSummary(),
+						e.readOnlyRounds))
 			}
-		} else if e.readOnlyRounds >= readOnlyHardStop {
-			// Hard stop: force the model to use remaining budget for mutations.
-			e.context.InjectContextMessage(
-				fmt.Sprintf("🚫 READ BUDGET EXHAUSTED (%d consecutive read-only rounds). "+
-					"Tool calls are RESTRICTED to edit_file, write_file, bash, and git only. "+
-					"You MUST implement the changes now with the context you have gathered. "+
-					"Do NOT call read_file, grep, glob, or any other read-only tool."+e.exploredSummary(),
-					e.readOnlyRounds))
 			if onUpdate != nil {
-				onUpdate(e.state, "🚫 Read budget exhausted — implementation mode enforced")
+				onUpdate(e.state, "ℹ️ Read budget advisory — consider switching to implementation")
 			}
 		}
+		// (The old read-only "hard stop" advisory tier was removed: one
+		// early advisory is enough — repeated escalations degrade the
+		// context and often CAUSE the dithering they try to prevent.)
+
 		// 1. Thinking State
 		e.state = StateThinking
 		if onUpdate != nil {
@@ -1234,19 +1391,28 @@ func (e *Engine) RunTurn(ctx context.Context, userQuery string, onUpdate TurnOut
 		// overflow the model window.
 		e.context.SetSystemPromptTokens(bcontext.EstimateTokens(sysPrompt))
 
-	// Deliver any scout findings that finished since the last iteration —
-	// a scout started mid-turn reaches the model at the NEXT reasoning step
-	// instead of only at the next turn's start. (Turn start also drains, so
-	// findings parked while the loop was idle still arrive.)
-	e.drainScouts(onUpdate)
+		// Deliver any scout findings that finished since the last iteration —
+		// a scout started mid-turn reaches the model at the NEXT reasoning step
+		// instead of only at the next turn's start. (Turn start also drains, so
+		// findings parked while the loop was idle still arrive.)
+		e.drainScouts(onUpdate)
 
 		adaptiveCap := CalculateAdaptiveToolBudget(e.context.LastUserPrompt(), e.Mode())
 		// Hard stop after the FINAL WARNING: the model was already told "one more
 		// read, then answer" — if it is still only calling tools after the grace
 		// rounds, force synthesis instead of letting it read in circles.
-		toolBudgetExhausted := e.toolOnlyRounds >= adaptiveCap && (e.exploredStalls >= 4 || e.toolOnlyRounds >= maxAbsolute)
-		if e.toolReminder2Sent && e.toolOnlyRounds >= finalWarnRounds+finalWarnHardStop {
-			toolBudgetExhausted = true
+		//
+		// CRITICAL INTEGRITY GUARANTEE: An active implementation turn (hasEdits == true)
+		// must NEVER have its tool execution cut off by exploration limits!
+		// Disabling tools mid-implementation leaves files in a broken half-edited
+		// state and prevents the model from completing multi-file plans.
+		// Implementation turns are safely bounded by e.maxIterations and context timeout.
+		toolBudgetExhausted := false
+		if !hasEdits {
+			toolBudgetExhausted = e.toolOnlyRounds >= adaptiveCap && (e.exploredStalls >= 3 || e.toolOnlyRounds >= maxAbsolute)
+			if e.toolReminder2Sent && e.toolOnlyRounds >= finalWarnRounds+finalWarnHardStop && (e.exploredStalls >= 2 || e.toolOnlyRounds >= maxAbsolute) {
+				toolBudgetExhausted = true
+			}
 		}
 		if toolBudgetExhausted {
 			if onUpdate != nil {
@@ -1287,13 +1453,14 @@ func (e *Engine) RunTurn(ctx context.Context, userQuery string, onUpdate TurnOut
 
 			reqMessages := append([]provider.Message{
 				{Role: "system", Content: sysPrompt},
-	}, e.fitMessages(sysPrompt)...)
+			}, e.fitMessages(sysPrompt)...)
 
 			synthReq := provider.CompletionRequest{
-				Model:       e.model,
-				Messages:    reqMessages,
-				Tools:       nil, // DISABLE TOOLS to force text response!
-				Temperature: 0.2,
+				Model:           e.model,
+				Messages:        reqMessages,
+				Tools:           nil, // DISABLE TOOLS to force text response!
+				Temperature:     0.2,
+				ReasoningEffort: "none",
 			}
 
 			synthResp, synthErr := e.complete(ctx, synthReq)
@@ -1339,15 +1506,15 @@ func (e *Engine) RunTurn(ctx context.Context, userQuery string, onUpdate TurnOut
 			// blocks the turn.
 			summary, ok := e.modelCompactionSummary(ctx)
 			if !ok {
-			summary = bcontext.CompactionSummary{
-				Goal:           "Continue active conversation",
-				FilesTouched:   []string{"codebase"},
-				DecisionsMade:  []string{"Compacted older context turns to preserve memory window"},
-				NextAction:     "Proceed with the current user request",
-				Constraints:    "Preserve verified facts; do not re-run work already done",
-				OpenQuestions:  []string{"Proceed with user request"},
-				LastKnownState: "Context compacted successfully",
-			}
+				summary = bcontext.CompactionSummary{
+					Goal:           "Continue active conversation",
+					FilesTouched:   []string{"codebase"},
+					DecisionsMade:  []string{"Compacted older context turns to preserve memory window"},
+					NextAction:     "Proceed with the current user request",
+					Constraints:    "Preserve verified facts; do not re-run work already done",
+					OpenQuestions:  []string{"Proceed with user request"},
+					LastKnownState: "Context compacted successfully",
+				}
 			}
 			_ = e.context.Compact(summary)
 			if onUpdate != nil {
@@ -1384,6 +1551,17 @@ func (e *Engine) RunTurn(ctx context.Context, userQuery string, onUpdate TurnOut
 			e.lastFallback = fbModel
 		}
 
+		// Decrement rounds for any tools that were temporarily masked in this round
+		if len(e.maskedTools) > 0 {
+			for name, rounds := range e.maskedTools {
+				if rounds > 1 {
+					e.maskedTools[name] = rounds - 1
+				} else {
+					delete(e.maskedTools, name)
+				}
+			}
+		}
+
 		// Normalize think tags and pseudo-XML tool calls emitted in Content by models like Poolside laguna / DeepSeek
 		if resp.Content != "" {
 			if r, cleaned := provider.ExtractEmbeddedReasoning(resp.Content); r != "" {
@@ -1395,11 +1573,23 @@ func (e *Engine) RunTurn(ctx context.Context, userQuery string, onUpdate TurnOut
 				resp.Content = cleaned
 			}
 		}
+		if resp.Reasoning != "" {
+			e.emit(EventThinking, resp.Reasoning)
+		}
 		if len(resp.ToolCalls) == 0 && resp.Content != "" {
 			if extracted, cleaned := provider.ExtractEmbeddedToolCalls(resp.Content); len(extracted) > 0 {
 				resp.ToolCalls = extracted
 				resp.Content = cleaned
+			} else {
+				e.emit(EventContentDelta, resp.Content)
 			}
+		}
+		for _, tc := range resp.ToolCalls {
+			e.emit(EventToolCall, ToolCallPayload{
+				CallID:    tc.ID,
+				ToolName:  tc.Name,
+				Arguments: tc.Arguments,
+			})
 		}
 		// North-star metric: a completion that ends the turn with an answer
 		// (no further tool calls) is productive — credit its tokens now.
@@ -1421,104 +1611,69 @@ func (e *Engine) RunTurn(ctx context.Context, userQuery string, onUpdate TurnOut
 			reasoning = "Analyzing request and context."
 		}
 
-		// Append assistant turn to store and context
-		if err := e.context.AppendAssistantTurn(e.Mode(), e.model, reasoning, resp.Content, resp.ToolCalls); err != nil {
-			return "", err
-		}
-
-		// Automatic Mode Confusion & Unexecuted Plan Interception:
-		// When the user is in BUILDER mode and requested an implementation/fix, but the model
-		// emits a text response outlining a plan without making any edits or tool calls (or claims
-		// to be read-only), intercept it immediately and force direct tool execution.
-		if len(resp.ToolCalls) == 0 && e.Mode() == "BUILDER" && iteration <= 2 && resp.Content != "" {
-			lower := strings.ToLower(resp.Content)
-			isClaimingReadOnly := strings.Contains(lower, "mode planner") ||
-				strings.Contains(lower, "beralih ke mode builder") ||
-				strings.Contains(lower, "read-only") ||
-				strings.Contains(lower, "hanya read-only") ||
-				strings.Contains(lower, "hanya bisa membaca")
-			isEmittingPurePlan := (strings.Contains(lower, "rencana implementasi") ||
-				strings.Contains(lower, "langkah implementasi") ||
-				strings.Contains(lower, "berikut rencana") ||
-				strings.Contains(lower, "akan menambahkan") ||
-				strings.Contains(lower, "akan mengubah")) &&
-				(strings.Contains(lower, "- [ ]") || strings.Contains(lower, "1.") || strings.Contains(lower, "2."))
-
-			if isClaimingReadOnly || (isEmittingPurePlan && looksLikeImplTask(e.context.LastUserPrompt())) {
-				e.context.InjectContextMessage("⚡ [MODE OVERRIDE & BUILDER EXECUTION MANDATE]: You are ALREADY in BUILDER mode (🟢) with full permission to edit and write files. Do NOT output unimplemented plans, bulleted checklists, or commentary without action. Take immediate action NOW: invoke 'edit_file' or 'write_file' to apply the required code modifications directly.")
-				if onUpdate != nil {
-					onUpdate(e.state, "⚡ Mode correction: direct action enforcement — instructing model to apply edits")
-				}
-				continue
+		// Append assistant turn to store and context.
+		// When the model issues tool calls, intermediate narration or preamble
+		// text (e.g. "Saya akan menelusuri...") is not saved in the LLM assistant
+		// turn content. This prevents the autoregressive echo loop where the model
+		// parrots its own previous preamble on every subsequent tool iteration.
+		contentToStore := resp.Content
+		if len(resp.ToolCalls) > 0 {
+			contentToStore = ""
+			if onUpdate != nil && strings.TrimSpace(resp.Content) != "" {
+				onUpdate(e.state, "💬 "+strings.TrimSpace(resp.Content))
 			}
 		}
+		if err := e.context.AppendAssistantTurn(e.Mode(), e.model, reasoning, contentToStore, resp.ToolCalls); err != nil {
+			return "", err
+		}
+		// Mode Confusion Interception: REMOVED. The system prompt already
+		// states the active mode and permissions, and this interception
+		// matched user-task nouns ("switch to builder" in the user's own
+		// request) far too broadly, injecting a mandate that often DROVE the
+		// exact repetition it tried to prevent.
 
-		// TEXT RESPONSE LOOP DETECTION: when the model generates the same
+		// TEXT RESPONSE LOOP DETECTION: when the model generates the exact same
 		// text response multiple times without calling any tools, inject a
 		// loop-break message. This catches the "I have enough context, I
 		// will now..." infinite loop where the model keeps repeating itself
-		// without ever editing files.
-		// TEXT & PREAMBLE REPETITION DETECTION: when the model generates the same
-		// text response or preamble multiple times across rounds, inject a loop-break message.
+		// without ever editing files. Exact-match detection only — the old
+		// 80-char prefix tier fired on legitimate iterations ("Let me check
+		// X..." over and over) and degraded real multi-round work.
 		if resp.Content != "" {
 			trimmed := strings.TrimSpace(resp.Content)
-			// Two detection tiers: exact match (identical text) vs prefix match
-			// (80-char leading overlap). Exact repeats are more concerning and
-			// break earlier (2 occurrences); prefix matches are more lenient
-			// (3 occurrences) to avoid false positives on slightly different
-			// responses that happen to share a long preamble.
 			isExactRepeat := (trimmed == e.lastTextResponse)
-			isPrefixRepeat := false
-			if !isExactRepeat && len(trimmed) > 60 && len(e.lastTextResponse) > 60 {
-				prefixLen := 80
-				if len(trimmed) < prefixLen {
-					prefixLen = len(trimmed)
-				}
-				if len(e.lastTextResponse) < prefixLen {
-					prefixLen = len(e.lastTextResponse)
-				}
-				if trimmed[:prefixLen] == e.lastTextResponse[:prefixLen] {
-					isPrefixRepeat = true
-				}
-			}
-
-			if isExactRepeat || isPrefixRepeat {
+			if isExactRepeat {
 				e.lastTextResponseCount++
-				// Exact match: break at 2 occurrences (count >= 1)
-				// Prefix match: break at 3 occurrences (count >= 2)
-				breakThreshold := 1
-				if isPrefixRepeat {
-					breakThreshold = 2
-				}
+				// Break at 3 occurrences (count >= 2): a single identical
+				// repeat is often a legitimate restatement.
+				breakThreshold := 2
 				if e.lastTextResponseCount >= breakThreshold {
-					// Model repeated same text 2+ times — force it to act or stop
+					// Model repeated same text 3+ times — force it to act or stop
 					e.lastTextResponseCount = 0 // reset to avoid spam
 					var loopBreakMsg string
 					if e.Mode() == "PLANNER" {
 						loopBreakMsg = fmt.Sprintf(
 							"🔄 LOOP DETECTED: You have repeated the same explanation text %d times. "+
-							"STOP repeating this text. You are in PLANNER mode (read-only architecture planning): "+
-							"provide your complete, step-by-step implementation plan in text now without calling write tools.",
+								"STOP repeating this text. You are in PLANNER mode (read-only architecture planning): "+
+								"provide your complete, step-by-step implementation plan in text now without calling write tools.",
 							e.lastTextResponseCount+1)
 					} else if e.Mode() == "MINER" {
 						loopBreakMsg = fmt.Sprintf(
 							"🔄 LOOP DETECTED: You have repeated the same explanation text %d times. "+
-							"STOP repeating this text. You are in MINER mode (knowledge extraction): "+
-							"provide your extracted findings and conclusions in text now.",
+								"STOP repeating this text. You are in MINER mode (knowledge extraction): "+
+								"provide your extracted findings and conclusions in text now.",
 							e.lastTextResponseCount+1)
 					} else if len(resp.ToolCalls) > 0 {
 						loopBreakMsg = "🛑 STOP REPEATING INTENT: You keep stating that you have enough context and will fix the issue, but continue repeating the same monologue before calling read tools. STOP repeating this text. Use 'edit_file' to apply your fix NOW."
 					} else {
 						loopBreakMsg = fmt.Sprintf(
 							"🔄 LOOP DETECTED: You have responded with the exact same text %d times without calling any tools or making edits. "+
-							"STOP generating this text. Either: (1) call edit_file/write_file to actually implement the changes, "+
-							"(2) call a different tool to gather NEW information, or (3) provide a DIFFERENT answer. "+
-							"Do NOT repeat this response again.",
+								"STOP generating this text. Either: (1) call edit_file/write_file to actually implement the changes, "+
+								"(2) call a different tool to gather NEW information, or (3) provide a DIFFERENT answer. "+
+								"Do NOT repeat this response again.",
 							e.lastTextResponseCount+1)
 					}
 					e.context.InjectContextMessage(loopBreakMsg)
-					// Also count as tool-only round to trigger existing budget warnings
-					e.toolOnlyRounds++
 					if onUpdate != nil {
 						onUpdate(e.state, "🔄 Repetitive text loop detected — forcing direct action")
 					}
@@ -1599,18 +1754,13 @@ func (e *Engine) RunTurn(ctx context.Context, userQuery string, onUpdate TurnOut
 						pending[i] = pendingTool{tc: tc, output: guardMsg}
 						continue
 					}
-				}				// Read-only hard stop: when the model has exhausted its read budget
-				// (readOnlyRounds >= readOnlyHardStop), block read-only tools so the
-				// agent is forced to act on what it already knows instead of reading
-				// more files and running out of budget before editing.
-				if e.readOnlyRounds >= readOnlyHardStop && isReadOnlyTool(tc.Name) {
-					guardMsg := fmt.Sprintf("🚫 [READ BUDGET]: Read budget exhausted (%d consecutive read-only rounds). "+
-						"Use edit_file, write_file, bash, or git NOW. Do NOT read more files.", e.readOnlyRounds)
+				} // Read-only budget advisory: when the model has had extensive read rounds
+				// in BUILDER mode, advise it to transition to implementation without
+				// hard-blocking read tools (which blinds the model and forces broken bash hacks).
+				if e.Mode() == "BUILDER" && e.readOnlyRounds >= readOnlyHardStop && isReadOnlyTool(tc.Name) && e.exploredStalls >= 2 {
 					if onUpdate != nil {
-						onUpdate(e.state, guardMsg)
+						onUpdate(e.state, fmt.Sprintf("ℹ️ Read budget note: %d consecutive read rounds — consider editing", e.readOnlyRounds))
 					}
-					pending[i] = pendingTool{tc: tc, output: guardMsg}
-					continue
 				}
 
 				// TSR contract: for bug-fix tasks, block any edit until the failure
@@ -1625,18 +1775,18 @@ func (e *Engine) RunTurn(ctx context.Context, userQuery string, onUpdate TurnOut
 				// without editing (it may honestly report it cannot reproduce).
 				if e.reproGateArmed && !e.reproEstablished &&
 					(tc.Name == "write_file" || tc.Name == "edit_file" || tc.Name == "delete_file") {
-					var reproGuard string
 					if !e.reproReminderSent {
 						e.reproReminderSent = true
-						reproGuard = "⚠️ [TSR REPRODUCE GATE]: You tried to change code, but the reported failure has NOT been reproduced yet. TSR contract: REPRODUCE first — run the relevant test/command and OBSERVE it fail (that confirms the bug and gives you a verification baseline), THEN fix it. Do not edit before reproducing. If you cannot reproduce the failure, do not edit — answer directly and state that the bug could not be reproduced."
-					} else {
-						reproGuard = "⚠️ [TSR REPRODUCE GATE]: Still no reproduction observed. Edit blocked. Reproduce the failure first (run the test/command and see it fail), or answer directly explaining that you cannot reproduce it — do not edit blind."
+						reproGuard := "⚠️ [TSR REPRODUCE GATE]: You tried to change code, but the reported failure has NOT been reproduced yet. TSR contract: REPRODUCE first — run the relevant test/command and OBSERVE it fail (that confirms the bug and gives you a verification baseline), THEN fix it. Do not edit before reproducing. If you cannot reproduce the failure or have localized the root cause, proceed with your edit."
+						if onUpdate != nil {
+							onUpdate(e.state, "⚠️ TSR reproduce gate: edit blocked until failure is reproduced")
+						}
+						pending[i] = pendingTool{tc: tc, output: reproGuard}
+						continue
 					}
-					if onUpdate != nil {
-						onUpdate(e.state, "⚠️ TSR reproduce gate: edit blocked until failure is reproduced")
-					}
-					pending[i] = pendingTool{tc: tc, output: reproGuard}
-					continue
+					// If the model persists after the advisory (or reproduction is impossible),
+					// allow the edit to proceed so we never choke the model into an unrecoverable dead-end loop.
+					e.reproEstablished = true
 				}
 
 				toolInfo := formatToolCallInfo(tc.Name, tc.Arguments)
@@ -1658,13 +1808,31 @@ func (e *Engine) RunTurn(ctx context.Context, userQuery string, onUpdate TurnOut
 					var am map[string]any
 					if json.Unmarshal([]byte(tc.Arguments), &am) == nil {
 						if p, _ := am["path"].(string); p != "" {
-						if name := e.skillForRead(p); name != "" && !e.loadedSkills[name] {
-							e.loadedSkills[name] = true
-							e.skillDirs[name] = filepath.Dir(p)
+							if name := e.skillForRead(p); name != "" && !e.loadedSkills[name] {
+								e.loadedSkills[name] = true
+								e.skillDirs[name] = filepath.Dir(p)
+								if onUpdate != nil {
+									onUpdate(e.state, "📚 Skill loaded: "+name)
+								}
+							}
+						}
+					}
+				}
+
+				// Redundant Mode Switch Gate: if the agent calls switch_mode for the mode it's already in,
+				// fast-path with an informative message without interrupting the user with a modal confirmation.
+				if tc.Name == "switch_mode" {
+					var sArgs struct {
+						TargetMode string `json:"target_mode"`
+					}
+					if json.Unmarshal([]byte(tc.Arguments), &sArgs) == nil {
+						target := strings.ToUpper(strings.TrimSpace(sArgs.TargetMode))
+						if target == "" || target == strings.ToUpper(e.Mode()) {
 							if onUpdate != nil {
-								onUpdate(e.state, "📚 Skill loaded: "+name)
+								onUpdate(e.state, fmt.Sprintf("Already in %s mode — proceeding", e.Mode()))
 							}
-							}
+							pending[i] = pendingTool{tc: tc, output: fmt.Sprintf("Already in %s mode — no switch needed. Proceed directly with your implementation or task.", e.Mode())}
+							continue
 						}
 					}
 				}
@@ -1685,9 +1853,10 @@ func (e *Engine) RunTurn(ctx context.Context, userQuery string, onUpdate TurnOut
 					}
 				}
 
-				// 2. Per-File Inspection Cap: block repeated reads, greps, or searches on the same file
-				// to prevent the model from spinning on exploratory tools without making edits.
-				if tc.Name == "read_file" || tc.Name == "grep" || tc.Name == "search_code" {
+				// 2. Per-File Inspection Cap: in BUILDER mode, block spinning reads or greps
+				// on the SAME file to encourage making edits instead of infinite inspection loops.
+				// (PLANNER and MINER modes are read-only exploration modes and need freedom to read code).
+				if e.Mode() == "BUILDER" && (tc.Name == "read_file" || tc.Name == "grep" || tc.Name == "search_code") {
 					var rArgs struct {
 						Path      string `json:"path"`
 						File      string `json:"file"`
@@ -1701,30 +1870,48 @@ func (e *Engine) RunTurn(ctx context.Context, userQuery string, onUpdate TurnOut
 						}
 						if rPath != "" {
 							rangeKey := rPath
-							if rArgs.StartLine > 0 || rArgs.EndLine > 0 {
+							if tc.Name == "read_file" && (rArgs.StartLine > 0 || rArgs.EndLine > 0) {
 								rangeKey = fmt.Sprintf("%s:%d-%d", rPath, rArgs.StartLine, rArgs.EndLine)
 							}
 							e.readCounts[rangeKey]++
-							if e.readCounts[rangeKey] > 2 || (rArgs.StartLine == 0 && rArgs.EndLine == 0 && e.readCounts[rPath] > 3) {
-								var blockedMsg string
-								if e.Mode() == "PLANNER" {
-									blockedMsg = fmt.Sprintf(
-										"🚫 [INSPECTION BLOCKED]: You have already examined '%s' %d times. "+
-										"You have sufficient context. Output your complete plan in text now.",
-										rPath, e.readCounts[rangeKey])
-								} else if e.Mode() == "MINER" {
-									blockedMsg = fmt.Sprintf(
-										"🚫 [INSPECTION BLOCKED]: You have already examined '%s' %d times. "+
-										"Output your extracted findings in text now.",
-										rPath, e.readCounts[rangeKey])
+							// Inspection cap: prevent infinite identical spins on the same range
+							// while granting ample runway for normal development and verification.
+							hasEdits := len(e.editedFiles) > 0 || (e.context != nil && len(e.context.EditedFiles()) > 0)
+							isBlocked := false
+							if tc.Name == "read_file" {
+								if rArgs.StartLine > 0 || rArgs.EndLine > 0 {
+									capLimit := 8
+									if hasEdits {
+										capLimit = 16
+									}
+									isBlocked = e.readCounts[rangeKey] > capLimit
 								} else {
-									blockedMsg = fmt.Sprintf(
-										"🚫 [INSPECTION BLOCKED]: You have already examined this code range in '%s' %d times. "+
+									capLimit := 8
+									if hasEdits {
+										capLimit = 16
+									}
+									isBlocked = e.readCounts[rPath] > capLimit
+								}
+							} else {
+								capLimit := 8
+								if hasEdits {
+									capLimit = 16
+								}
+								isBlocked = e.readCounts[rPath] > capLimit
+							}
+							if isBlocked {
+								blockedMsg := fmt.Sprintf(
+									"🚫 [INSPECTION BLOCKED]: You have already examined this code range in '%s' %d times. "+
 										"Use 'edit_file' or 'write_file' to implement your changes now.",
-										rPath, e.readCounts[rangeKey])
+									rPath, e.readCounts[rangeKey])
+								if tc.Name == "read_file" {
+									cleanedArgs := provider.SanitizeJSONArguments(tc.Arguments)
+									if out, err := e.tools.Execute(toolCtx, tc.Name, cleanedArgs); err == nil && strings.TrimSpace(out) != "" {
+										blockedMsg += fmt.Sprintf("\n\nContent:\n%s", out)
+									}
 								}
 								if onUpdate != nil {
-									onUpdate(e.state, "🚫 Redundant inspection blocked — proceed to edit")
+									onUpdate(e.state, "🚫 Redundant inspection noted — proceed to edit")
 								}
 								pending[i] = pendingTool{tc: tc, output: blockedMsg}
 								continue
@@ -1733,35 +1920,126 @@ func (e *Engine) RunTurn(ctx context.Context, userQuery string, onUpdate TurnOut
 					}
 				}
 
-				// 3. Multi-tool cycle and consecutive repetition detection:
+				// 3. Multi-tool cycle and consecutive repetition detection.
+				// VERIFICATION EXEMPTION (fix-verify cycle): re-running bash or
+				// run_tests with the SAME arguments after a file mutation or a
+				// previous command run is legitimate engineering (edit → test →
+				// fix → re-test, flaky-test confirmation), not a loop. The test
+				// result from before the edit is stale, so "the result is already
+				// in your context" is factually wrong for these tools. They are
+				// exempt from the repeat guard entirely — the exploration budget
+				// and iteration cap still bound them.
 				key := normalizedToolCallKey(tc)
 				if e.turnToolCallCounts == nil {
 					e.turnToolCallCounts = make(map[string]int)
 				}
-				e.turnToolCallCounts[key]++
+				// The counts map is RESET on every executed mutation or command
+				// (see the write/edit/bash pass below), so counts only reach high
+				// values through back-to-back identical calls with no progress in
+				// between — exactly the spinning this guard exists to stop.
+				//
+				// VERIFICATION EXEMPTION: bash/run_tests never feed the repeat
+				// guard (re-running a test command after an edit is the fix-verify
+				// cycle, not a loop) — but they still flow through the fuzzy
+				// family guard, permission gate, and lifecycle hooks below. An
+				// exemption is never a free pass for dangerous commands.
+				verificationExempt := isVerificationTool(tc.Name)
+				if !verificationExempt {
+					e.turnToolCallCounts[key]++
+				}
 				callCount := e.turnToolCallCounts[key]
 
-				if isRepeatToolCall(tc, e.lastToolCall) {
+				if isRepeatToolCall(tc, e.lastToolCall) && !verificationExempt {
 					e.lastToolCallRepeats++
-				} else {
+				} else if !verificationExempt {
 					e.lastToolCallRepeats = 0
 				}
 				e.lastToolCall = tc
 
-				if callCount >= 2 || e.lastToolCallRepeats >= 2 {
-					if callCount >= 3 || e.lastToolCallRepeats >= 3 {
-						// The model ignored the guard warning and is still
-						// spinning — abort the whole turn instead of burning iterations.
+				if callCount >= 3 || e.lastToolCallRepeats >= 2 {
+					// Check if this batch contains ANY fresh or mutating tool call.
+					// If the batch contains forward progress (e.g. reading a new range or editing a file),
+					// suppress ONLY this duplicate call and allow the fresh calls to proceed.
+					hasFreshOrMutationInBatch := false
+					for _, other := range resp.ToolCalls {
+						if isFileMutationTool(other.Name) {
+							hasFreshOrMutationInBatch = true
+							break
+						}
+						otherKey := normalizedToolCallKey(other)
+						if e.turnToolCallCounts[otherKey] <= 1 {
+							hasFreshOrMutationInBatch = true
+							break
+						}
+					}
+
+					// Dynamically mask non-mutating tools for the next round when batch has no progress,
+					// so the model is physically prevented from repeating identical queries:
+					if !hasFreshOrMutationInBatch && !isFileMutationTool(tc.Name) {
+						if e.maskedTools == nil {
+							e.maskedTools = make(map[string]int)
+						}
+						e.maskedTools[tc.Name] = 1
+					}
+
+					hasEdits := len(e.editedFiles) > 0 || (e.context != nil && len(e.context.EditedFiles()) > 0)
+					if (callCount >= 6 || e.lastToolCallRepeats >= 6) && !hasFreshOrMutationInBatch && !hasEdits {
+						// Hard spin safety net (only applies when NO files have been edited, e.g. mock adapter):
+						// Stop the tool loop and gracefully synthesize a final response from context.
 						e.state = StateBlocked
 						msg := fmt.Sprintf("Turn aborted: the model kept repeating tool call '%s' with identical arguments (%d times) after being told to stop. Context already contains the requested information. Please rephrase your request or ask for a more specific task.", tc.Name, callCount)
 						if onUpdate != nil {
 							onUpdate(e.state, msg)
 						}
-						return msg, nil
+						return e.finalSynth(ctx, msg, "Repetition Loop Break")
+					}
+
+					if callCount >= 4 || e.lastToolCallRepeats >= 3 {
+						if !hasFreshOrMutationInBatch && !isFileMutationTool(tc.Name) {
+							if e.maskedTools == nil {
+								e.maskedTools = make(map[string]int)
+							}
+							e.maskedTools[tc.Name] = 2
+						}
+						// Calls 4+: Halt execution of this duplicate call and instruct the model
+						// to synthesize, run verification, or advance without crashing the turn.
+						haltMsg := fmt.Sprintf("🛑 [TOOL CALL HALTED]: You have already executed '%s' with identical arguments (%d times). The result is already present in your conversation context above. Execution of this duplicate call was skipped. Tool '%s' is temporarily paused. Proceed to verify your work via 'bash' (e.g. build/test commands) or advance to the next objective.", tc.Name, callCount, tc.Name)
+						if tc.Name == "read_file" {
+							cleanedArgs := provider.SanitizeJSONArguments(tc.Arguments)
+							if out, err := e.tools.Execute(toolCtx, tc.Name, cleanedArgs); err == nil && strings.TrimSpace(out) != "" {
+								haltMsg += fmt.Sprintf("\n\nContent from context:\n%s", out)
+							}
+						}
+						if onUpdate != nil {
+							onUpdate(e.state, fmt.Sprintf("🛑 Duplicate tool call '%s' halted (call #%d)", tc.Name, callCount))
+						}
+						pending[i] = pendingTool{tc: tc, output: haltMsg}
+						continue
 					}
 					guardMsg := fmt.Sprintf("⚠️ [LOOP GUARD]: You already called '%s' with these exact arguments earlier in this turn (call #%d). The result is ALREADY in your conversation context above. Do NOT re-run the same tool call with identical arguments.", tc.Name, callCount)
 					if tc.Name == "read_file" {
-						guardMsg += " If you need to read further in this file, you MUST provide 'start_line' (e.g. start_line: 250) and 'end_line', or use 'grep' / 'code_locate' to find the target function directly."
+						var rArgs struct {
+							Path      string `json:"path"`
+							StartLine int    `json:"start_line"`
+							EndLine   int    `json:"end_line"`
+						}
+						_ = json.Unmarshal([]byte(tc.Arguments), &rArgs)
+						cleanedArgs := provider.SanitizeJSONArguments(tc.Arguments)
+						if out, err := e.tools.Execute(toolCtx, tc.Name, cleanedArgs); err == nil && strings.TrimSpace(out) != "" {
+							if e.phaseEdits > 0 {
+								guardMsg = fmt.Sprintf("ℹ️ [VERIFIED ON DISK]: Target file has been edited and changes are saved. The requested lines are provided below. Do NOT re-read this file. Proceed to verify your changes (e.g. run 'pnpm typecheck' or tests via 'bash'), or continue to your next task:\n\n%s", out)
+							} else {
+								guardMsg = fmt.Sprintf("⚠️ [LOOP GUARD]: Lines already retrieved earlier in this turn (call #%d). Content is provided below so you do not need to re-read. Proceed directly to 'edit_file' to implement changes or synthesize your response:\n\n%s", callCount, out)
+							}
+						} else if rArgs.StartLine > 0 || rArgs.EndLine > 0 {
+							if e.phaseEdits > 0 {
+								guardMsg = fmt.Sprintf("ℹ️ [VERIFIED ON DISK]: Lines %d-%d are saved on disk. Do NOT re-read this range. Proceed to verify your changes via 'bash' (run build or test command), or continue with your next task.", rArgs.StartLine, rArgs.EndLine)
+							} else {
+								guardMsg += fmt.Sprintf(" You have already retrieved lines %d-%d. Proceed directly to 'edit_file' to implement changes or synthesize your answer.", rArgs.StartLine, rArgs.EndLine)
+							}
+						} else {
+							guardMsg += " If you need to read further in this file, you MUST provide 'start_line' (e.g. start_line: 250) and 'end_line', or use 'grep' / 'code_locate' to find the target function directly."
+						}
 					} else if tc.Name == "edit_file" {
 						guardMsg += " If your previous edit failed to match, inspect the diagnostic above and pass 'start_line' and 'end_line' directly in edit_file, or call 'read_file' with that line range first to copy the exact code block verbatim."
 					} else {
@@ -1793,7 +2071,7 @@ func (e *Engine) RunTurn(ctx context.Context, userQuery string, onUpdate TurnOut
 							e.bashFamilyStreak = 0
 						}
 					}
-					if e.bashFamilyStreak >= 3 {
+					if e.bashFamilyStreak >= 5 {
 						fuzzyGuard := fmt.Sprintf("⚠️ [LOOP GUARD]: You have spent %d consecutive rounds running similar '%s' commands without converging. Stop re-running the same command family — change your approach, answer directly with what you have, or state precisely what information is still missing.", e.bashFamilyStreak, e.lastBashFamily)
 						if onUpdate != nil {
 							onUpdate(e.state, "⚠️ Same-command loop detected — instructing model to change strategy")
@@ -1812,14 +2090,6 @@ func (e *Engine) RunTurn(ctx context.Context, userQuery string, onUpdate TurnOut
 							onUpdate(e.state, "💡 Reusing cached research result for "+formatToolCallInfo(tc.Name, tc.Arguments))
 						}
 						pending[i] = pendingTool{tc: tc, output: cachedMsg}
-						continue
-					}
-					if callCount >= 3 {
-						infoGuard := fmt.Sprintf("💡 [INFORMATION SATURATION]: You have performed %d web searches/docs lookups in this turn. You have accumulated sufficient context. Stop querying external sources and proceed directly to synthesizing your technical answer or implementing the required code.", callCount)
-						if onUpdate != nil {
-							onUpdate(e.state, "💡 Information saturation reached — instructing model to synthesize")
-						}
-						pending[i] = pendingTool{tc: tc, output: infoGuard}
 						continue
 					}
 				}
@@ -1852,66 +2122,72 @@ func (e *Engine) RunTurn(ctx context.Context, userQuery string, onUpdate TurnOut
 					continue
 				}
 
-			pending[i] = pendingTool{tc: tc, exec: true}
-			e.turnUsedTools = true // any tool reaching execution = tools used this turn
-			if isFileMutationTool(tc.Name) {
-				roundMutation = true
+				pending[i] = pendingTool{tc: tc, exec: true}
+				e.turnUsedTools = true // any tool reaching execution = tools used this turn
+				if isFileMutationTool(tc.Name) {
+					roundMutation = true
+				}
+				execCount++
 			}
-			execCount++
-		}
-		// A round that executed a file mutation is productive: credit the
-		// completion tokens that produced it (the deliverable, not overhead).
-		if roundMutation {
-			e.turnProductiveTokens += e.lastRoundOutput
-		}	// Signal productive work so the UI can reset its turn watchdog timer.
-	// Fires on file-mutation rounds (edit/write/create/delete) — the clearest
-	// signal that the task advanced, not just explored.
-	if roundMutation {
-		if e.productiveIterHandler != nil {
-			e.productiveIterHandler()
-		}
-	}
+			// A round that executed a file mutation is productive: credit the
+			// completion tokens that produced it (the deliverable, not overhead).
+			if roundMutation {
+				e.turnProductiveTokens += e.lastRoundOutput
+				// Executing a mutation also resets the bash same-family streak:
+				// "edit → build → edit → build" is the fix-verify cycle, and the
+				// build commands between edits are verification, not spinning.
+				e.lastBashFamily = ""
+				e.bashFamilyStreak = 0
+			}
+			// Signal productive work so the UI can reset its turn watchdog timer.
+			// Fires on file-mutation rounds (edit/write/create/delete) — the clearest
+			// signal that the task advanced, not just explored.
+			if roundMutation {
+				if e.productiveIterHandler != nil {
+					e.productiveIterHandler()
+				}
+			}
 
-		// EXECUTION PHASE TRACKING: transition between research → execute → verify
-		// so the model always knows what phase it's in and what to do next.
-		if roundMutation {
-			// File mutation = execution phase. Track edits for verify gate.
-			if e.execPhase == phaseResearch {
-				e.execPhase = phaseExecute
-				e.phaseEdits = 0
-				e.phaseReads = 0
-			}
-			if e.execPhase == phaseExecute {
-				e.phaseEdits++
-			}
-			// AUTO-VERIFY: after every file mutation, inject a reminder to verify
-			// (run build/test). This is stronger than waiting for the model to
-			// re-read — it nudges verification BEFORE the model moves on to
-			// editing more files. Only inject after the first edit (not after
-			// every single edit in a batch) to avoid noise.
-			if e.phaseEdits == 1 {
-				e.context.InjectContextMessage("[AUTO-VERIFY] You just edited a file. After completing related edits for this task, run the project verification command (e.g. tsc / npm run build / go test / pytest) before declaring done.")
-			} else if e.phaseEdits >= 4 && e.phaseEdits%3 == 1 {
-				e.context.InjectContextMessage(fmt.Sprintf("⚡ [CHECKPOINT VERIFICATION]: You have applied %d edits across the codebase. Run project tests / build command now to verify compiler and type integrity.", e.phaseEdits))
-			}
-		} else if allReadOnly {
-			// Read-only round: if we're in execute phase and have made edits,
-			// the model is re-reading after editing — nudge immediately toward verification.
-			if e.execPhase == phaseExecute && e.phaseEdits > 0 {
-				e.phaseReads++
-				if e.phaseReads >= 1 && !e.readOnlyReminderSent {
-					e.readOnlyReminderSent = true
-					e.context.InjectContextMessage(
-						fmt.Sprintf("[PHASE: VERIFY] You have made %d edit(s). STOP re-reading files. "+
-							"Run the project build/test command (e.g. tsc, npm run build, go test, pytest) "+
-							"to verify your edits compile and pass tests.",
-						e.phaseEdits))
-					if onUpdate != nil {
-						onUpdate(e.state, "[VERIFY] Directing model to run build/test verification")
+			// EXECUTION PHASE TRACKING: transition between research → execute → verify
+			// so the model always knows what phase it's in and what to do next.
+			if roundMutation {
+				// File mutation = execution phase. Track edits for verify gate.
+				if e.execPhase == phaseResearch {
+					e.execPhase = phaseExecute
+					e.phaseEdits = 0
+					e.phaseReads = 0
+				}
+				if e.execPhase == phaseExecute {
+					e.phaseEdits++
+				}
+				// AUTO-VERIFY: after every file mutation, inject a reminder to verify
+				// (run build/test). This is stronger than waiting for the model to
+				// re-read — it nudges verification BEFORE the model moves on to
+				// editing more files. Only inject after the first edit (not after
+				// every single edit in a batch) to avoid noise.
+				if e.phaseEdits == 1 {
+					e.context.InjectContextMessage("[AUTO-VERIFY] You just edited a file. After completing related edits for this task, run the project verification command (e.g. tsc / npm run build / go test / pytest) before declaring done.")
+				} else if e.phaseEdits >= 4 && e.phaseEdits%3 == 1 {
+					e.context.InjectContextMessage(fmt.Sprintf("⚡ [CHECKPOINT VERIFICATION]: You have applied %d edits across the codebase. Run project tests / build command now to verify compiler and type integrity.", e.phaseEdits))
+				}
+			} else if allReadOnly {
+				// Read-only round: if we're in execute phase and have made edits,
+				// the model is re-reading after editing — nudge immediately toward verification.
+				if e.execPhase == phaseExecute && e.phaseEdits > 0 {
+					e.phaseReads++
+					if e.phaseReads >= 1 && !e.readOnlyReminderSent {
+						e.readOnlyReminderSent = true
+						e.context.InjectContextMessage(
+							fmt.Sprintf("[PHASE: VERIFY] You have made %d edit(s). STOP re-reading files. "+
+								"Run the project build/test command (e.g. tsc, npm run build, go test, pytest) "+
+								"to verify your edits compile and pass tests.",
+								e.phaseEdits))
+						if onUpdate != nil {
+							onUpdate(e.state, "[VERIFY] Directing model to run build/test verification")
+						}
 					}
 				}
 			}
-		}
 
 			// PHASE 2 — EXECUTION: run every pending call. Read-only tools
 			// (read_file, grep, glob, list_dir, search_code, fetch_url,
@@ -1950,9 +2226,10 @@ func (e *Engine) RunTurn(ctx context.Context, userQuery string, onUpdate TurnOut
 								return
 							}
 						}
-						out, err := e.tools.Execute(toolCtx, pending[idx].tc.Name, pending[idx].tc.Arguments)
+						cleanedArgs := provider.SanitizeJSONArguments(pending[idx].tc.Arguments)
+						out, err := e.tools.Execute(toolCtx, pending[idx].tc.Name, cleanedArgs)
 						if err != nil {
-							out = fmt.Sprintf("Tool error: %v", err)
+							out = formatToolExecutionError(pending[idx].tc.Name, err)
 						}
 						// Truncate-and-pointer: long outputs spill to
 						// .brocode/artifacts/ and only a head+tail digest enters
@@ -2033,57 +2310,57 @@ func (e *Engine) RunTurn(ctx context.Context, userQuery string, onUpdate TurnOut
 					// Track files the model edited so the native convention checker
 					// can review them (debug leftovers, markers, type safety,
 					// duplicate symbols) before the turn is declared done.
-				if pending[i].tc.Name == "write_file" || pending[i].tc.Name == "edit_file" || pending[i].tc.Name == "delete_file" || pending[i].tc.Name == "lsp_fix" || pending[i].tc.Name == "lsp_rename" || pending[i].tc.Name == "run_tests" {
-					// Active mutation or verification is tangible task progress:
-					// reset the read-only exploration stall counters so complex refactoring
-					// tasks across multiple files have a full runway to complete.
-					e.toolOnlyRounds = 0
-					e.toolReminderSent = false
-					e.toolReminder2Sent = false
-					e.readOnlyRounds = 0
-					e.readOnlyReminderSent = false
-					e.exploredStalls = 0
-					e.turnToolCallCounts = make(map[string]int) // file mutated: verification commands and re-reads are valid
-					e.lastToolCallRepeats = 0
-					if pending[i].tc.Name == "write_file" || pending[i].tc.Name == "edit_file" || pending[i].tc.Name == "edit_symbol" {
-						if p := extractToolPath(pending[i].tc.Arguments); p != "" {
-							e.editedFiles = append(e.editedFiles, p)
-							e.context.SetEditedFiles(e.editedFiles) // sync for smart compaction truncation
-							e.readCounts = make(map[string]int) // allow re-reading newly edited files
-							// Keep the session symbol index current after real edits.
-							if e.onFileEdited != nil && err == nil {
-								e.onFileEdited(p)
-							}
-							// Real-time post-edit LSP diagnostic hook & Auto-dependency healing
-							if e.diagFn != nil && err == nil {
-								if lspDiag := e.diagFn(p); lspDiag != "" && !strings.HasPrefix(lspDiag, "No diagnostics") {
-									if healMsg, ok := AutoResolveDependencies(toolCtx, e.repoRoot, lspDiag); ok {
-										if onUpdate != nil {
-											onUpdate(e.state, "📦 "+healMsg)
-										}
-										if reDiag := e.diagFn(p); reDiag != "" && !strings.HasPrefix(reDiag, "No diagnostics") {
-											lspDiag = reDiag
-										} else {
-											lspDiag = healMsg + " (LSP diagnostics are now clean)"
-										}
-									}
-									out += "\n\n⚡ [REAL-TIME LSP DIAGNOSTIC]:\n" + lspDiag
-									pending[i].output = out
+					if pending[i].tc.Name == "write_file" || pending[i].tc.Name == "edit_file" || pending[i].tc.Name == "delete_file" || pending[i].tc.Name == "lsp_fix" || pending[i].tc.Name == "lsp_rename" || pending[i].tc.Name == "run_tests" {
+						// Active mutation or verification is tangible task progress:
+						// reset the read-only exploration stall counters so complex refactoring
+						// tasks across multiple files have a full runway to complete.
+						e.toolOnlyRounds = 0
+						e.toolReminderSent = false
+						e.toolReminder2Sent = false
+						e.readOnlyRounds = 0
+						e.readOnlyReminderSent = false
+						e.exploredStalls = 0
+						e.turnToolCallCounts = make(map[string]int) // file mutated: verification commands and re-reads are valid
+						e.lastToolCallRepeats = 0
+						if pending[i].tc.Name == "write_file" || pending[i].tc.Name == "edit_file" || pending[i].tc.Name == "edit_symbol" {
+							if p := extractToolPath(pending[i].tc.Arguments); p != "" {
+								e.editedFiles = append(e.editedFiles, p)
+								e.context.SetEditedFiles(e.editedFiles) // sync for smart compaction truncation
+								e.readCounts = make(map[string]int)     // allow re-reading newly edited files
+								// Keep the session symbol index current after real edits.
+								if e.onFileEdited != nil && err == nil {
+									e.onFileEdited(p)
 								}
-
-								// Check blast radius downstream callers if globalIndex is available
-								if brokenCallers := CheckBlastRadiusImpact(toolCtx, e.repoRoot, p, e.diagFn, e.globalIndex); len(brokenCallers) > 0 {
-									out += "\n\n⚠️ [DOWNSTREAM BLAST RADIUS WARNING]: Editing exported symbols in " + filepath.Base(p) + " broke the following callers:\n"
-									for _, bc := range brokenCallers {
-										out += "  • " + bc + "\n"
+								// Real-time post-edit LSP diagnostic hook & Auto-dependency healing
+								if e.diagFn != nil && err == nil {
+									if lspDiag := e.diagFn(p); lspDiag != "" && !strings.HasPrefix(lspDiag, "No diagnostics") {
+										if healMsg, ok := AutoResolveDependencies(toolCtx, e.repoRoot, lspDiag); ok {
+											if onUpdate != nil {
+												onUpdate(e.state, "📦 "+healMsg)
+											}
+											if reDiag := e.diagFn(p); reDiag != "" && !strings.HasPrefix(reDiag, "No diagnostics") {
+												lspDiag = reDiag
+											} else {
+												lspDiag = healMsg + " (LSP diagnostics are now clean)"
+											}
+										}
+										out += "\n\n⚡ [REAL-TIME LSP DIAGNOSTIC]:\n" + lspDiag
+										pending[i].output = out
 									}
-									out += "👉 Action required: Update callers in the same pass."
-									pending[i].output = out
+
+									// Check blast radius downstream callers if globalIndex is available
+									if brokenCallers := CheckBlastRadiusImpact(toolCtx, e.repoRoot, p, e.diagFn, e.globalIndex); len(brokenCallers) > 0 {
+										out += "\n\n⚠️ [DOWNSTREAM BLAST RADIUS WARNING]: Editing exported symbols in " + filepath.Base(p) + " broke the following callers:\n"
+										for _, bc := range brokenCallers {
+											out += "  • " + bc + "\n"
+										}
+										out += "👉 Action required: Update callers in the same pass."
+										pending[i].output = out
+									}
 								}
 							}
 						}
 					}
-				}
 
 					// Lifecycle hook: after tool execution, with the tool's output.
 					e.hookRun(ctx, hooks.EventToolResult, map[string]string{
@@ -2103,6 +2380,11 @@ func (e *Engine) RunTurn(ctx context.Context, userQuery string, onUpdate TurnOut
 				if err := e.context.AppendToolResult(pending[i].tc.ID, pending[i].output); err != nil {
 					return "", err
 				}
+				e.emit(EventToolResult, ToolResultPayload{
+					CallID:   pending[i].tc.ID,
+					ToolName: pending[i].tc.Name,
+					Output:   pending[i].output,
+				})
 				// Handle autonomous mode switch approval
 				if pending[i].tc.Name == "switch_mode" && strings.HasPrefix(pending[i].output, "MODE_SWITCH_APPROVED:") {
 					parts := strings.SplitN(pending[i].output, ":", 3)
@@ -2141,8 +2423,8 @@ func (e *Engine) RunTurn(ctx context.Context, userQuery string, onUpdate TurnOut
 				if e.modeGuardTrippedCount >= 2 {
 					e.context.InjectContextMessage(fmt.Sprintf(
 						"🛑 STOP CALLING WRITE TOOLS: You are in %s mode (read-only architecture mode). "+
-						"Code writing and modifying tools are disabled. You have already examined the codebase. "+
-						"You MUST now output your complete response in text without making any further tool calls.",
+							"Code writing and modifying tools are disabled. You have already examined the codebase. "+
+							"You MUST now output your complete response in text without making any further tool calls.",
 						e.Mode(),
 					))
 				}
@@ -2267,8 +2549,10 @@ func (e *Engine) RunTurn(ctx context.Context, userQuery string, onUpdate TurnOut
 			// plus LSP diagnostics when wired. Findings are fed back so the
 			// model fixes them before declaring done.
 			if review := e.reviewEditedFiles(ctx); review != "" {
-				_ = e.context.AppendUserMessage("Code review:\n" + review + "\nPlease fix these issues before finishing.")
-				continue
+				if e.reviewPasses <= maxReviewPasses {
+					_ = e.context.AppendSystemNote("[AUTOMATED CODE REVIEW]:\n" + review + "\nPlease address any critical issues before concluding.")
+					continue
+				}
 			}
 		}
 
@@ -2318,8 +2602,19 @@ func (e *Engine) RunTurn(ctx context.Context, userQuery string, onUpdate TurnOut
 		// PLANNER mode (or any turn producing a structured execution plan):
 		// Automatically parse and save to .brocode/current_plan.md
 		// so BUILDER mode immediately inherits the active plan without language bias!
+		lowerResp := strings.ToLower(resp.Content)
+		isExplicitPlan := strings.Contains(lowerResp, "# 🎯 plan") ||
+			strings.Contains(lowerResp, "# plan") ||
+			strings.Contains(lowerResp, "## 📋 tasks") ||
+			strings.Contains(lowerResp, "## tasks") ||
+			strings.Contains(lowerResp, "## checklist") ||
+			strings.Contains(lowerResp, "## daftar tugas") ||
+			strings.Contains(lowerResp, "## rencana") ||
+			strings.Contains(lowerResp, "- [ ]") ||
+			strings.Contains(lowerResp, "* [ ]")
+
 		parsedPlan := plan.ParseMarkdownPlan(resp.Content)
-		if parsedPlan != nil && len(parsedPlan.Steps) >= 1 && (e.Mode() == "PLANNER" || len(parsedPlan.Steps) >= 2) {
+		if parsedPlan != nil && len(parsedPlan.Steps) >= 1 && (e.Mode() == "PLANNER" || isExplicitPlan) {
 			_ = plan.SaveCurrentPlan(e.repoRoot, parsedPlan)
 			if onUpdate != nil {
 				onUpdate(e.state, fmt.Sprintf("📋 Active plan saved with %d step(s) to .brocode/current_plan.md", len(parsedPlan.Steps)))
@@ -2349,9 +2644,26 @@ func (e *Engine) RunTurn(ctx context.Context, userQuery string, onUpdate TurnOut
 		// memory so a follow-up task can pick them up instead of losing them
 		// to the chat history. Deterministic parse, no extra LLM call.
 		if e.Mode() == "BUILDER" {
-			_, changed, _ := plan.SyncPlanProgress(e.repoRoot, e.editedFiles, resp.Content)
-			if changed && onUpdate != nil {
+			updatedPlan, changed, _ := plan.SyncPlanProgress(e.repoRoot, e.editedFiles, resp.Content)
+			if changed && updatedPlan != nil && onUpdate != nil {
 				onUpdate(e.state, "📋 Active plan progress updated in .brocode/current_plan.md")
+				// Live TUI sync: Emit updated checklist with completed/strikethrough tasks
+				var todoSb strings.Builder
+				for _, step := range updatedPlan.Steps {
+					glyph := "○"
+					switch strings.ToLower(step.Status) {
+					case "done", "completed":
+						glyph = "✓"
+					case "in_progress", "working":
+						glyph = "⏳"
+					case "skipped", "cancelled":
+						glyph = "✖"
+					}
+					todoSb.WriteString(fmt.Sprintf("%s  %s\n", glyph, step.Description))
+				}
+				if todoText := strings.TrimSpace(todoSb.String()); todoText != "" {
+					onUpdate(e.state, "TODOS:\n"+todoText)
+				}
 			}
 			if archived, archPath, _ := plan.AutoArchiveIfDone(e.repoRoot); archived {
 				if onUpdate != nil {
@@ -2487,7 +2799,8 @@ func (e *Engine) distillLesson(ctx context.Context) string {
 			Role:    "user",
 			Content: "You are a codebase lesson extractor. One sentence (max 40 words) about this failure so a future session avoids repeating the mistake. Focus on the root cause / fix, not the process. Files: " + fileList + "\nFailure was:\n" + errHead + "\n\nReply with only the lesson sentence, no prefix, no quotes.",
 		}},
-		Temperature: 0.2,
+		Temperature:     0.2,
+		ReasoningEffort: "none",
 	}
 	resp, err := e.complete(reviewCtx, req)
 	if err != nil || resp == nil {
@@ -2522,7 +2835,11 @@ func formatTSRAttempts(n int) string {
 func (e *Engine) buildSystemPrompt(currentMode string, iteration int, onUpdate TurnOutputHandler) string {
 	var activePlanStr string
 	if curPlan, err := plan.LoadCurrentPlan(e.repoRoot); err == nil && curPlan != nil && len(curPlan.Steps) > 0 {
-		activePlanStr = plan.RenderMarkdownPlan(curPlan)
+		if strings.TrimSpace(curPlan.RawMarkdown) != "" {
+			activePlanStr = curPlan.RawMarkdown
+		} else {
+			activePlanStr = plan.RenderMarkdownPlan(curPlan)
+		}
 	}
 
 	in := &prompt.Input{
@@ -2559,7 +2876,7 @@ func (e *Engine) buildSystemPrompt(currentMode string, iteration int, onUpdate T
 		// but counter-productive when the turn is already near the compaction
 		// threshold — it would just buy a compaction the model didn't need.
 		if remain := e.context.MaxWindow() - e.context.TotalContextTokens(); remain < 32*1024 {
-			budget := max(remain / 2, 4 * 1024)
+			budget := max(remain/2, 4*1024)
 			e.mem.SetWarmStartBudget(budget)
 		} else {
 			e.mem.SetWarmStartBudget(0)
@@ -2657,190 +2974,6 @@ func mergeUniqueNotes(base, extra []store.Note) []store.Note {
 // fewer schema tokens per request. PLANNER additionally drops bash entirely.
 // BUILDER gets the full surface. The runtime mode guards stay as a backstop
 // (MCP/subagent tools bypass this filter), but the LLM is never tempted by
-// tools its mode forbids.
-func (e *Engine) toolsForMode(mode string) []provider.ToolDefinition {
-	defs := e.tools.Definitions()
-	// Tool-description lean (P5): trim verbose schemas in every mode so more of
-	// the window is free for real task context. Applied before mode pruning.
-	if e.toolDescBudget > 0 {
-		lean := make([]provider.ToolDefinition, len(defs))
-		for i, d := range defs {
-			if len(d.Description) > e.toolDescBudget {
-				d.Description = strings.TrimSpace(d.Description[:e.toolDescBudget]) + "…"
-			}
-			lean[i] = d
-		}
-		defs = lean
-	}
-	// Model-tier tool filtering: weak models get fewer tools to avoid
-	// confusion from too many options. This implements Cursor/Aider's
-	// model-aware routing principle.
-	tier := prompt.ClassifyModelTier(e.model)
-	if tier == "weak" {
-		// Weak models: core tools only (read, edit, write, bash, grep)
-		weakKeep := map[string]bool{
-			"read_file": true, "write_file": true, "edit_file": true,
-			"bash": true, "grep": true, "glob": true, "list_dir": true,
-			"run_tests": true, "git": true, "switch_mode": true,
-		}
-		out := make([]provider.ToolDefinition, 0, len(weakKeep))
-		for _, d := range defs {
-			if weakKeep[d.Name] {
-				out = append(out, d)
-			}
-		}
-		return out
-	}
-	// Task-type adaptive tool filtering: certain task types don't need all tools.
-	// E.g., a bug-fix task doesn't need memory, web_search, doc_lookup — only
-	// read, edit, bash, grep. This shrinks the schema payload and prevents the
-	// model from being tempted by irrelevant tools.
-	taskType := classifyTaskType(e.context.LastUserPrompt())
-	if excludeByTask, ok := taskExcludeTools[taskType]; ok {
-		out := make([]provider.ToolDefinition, 0, len(defs))
-		for _, d := range defs {
-			if excludeByTask[d.Name] {
-				continue
-			}
-			out = append(out, d)
-		}
-		return out
-	}
-	if mode == "BUILDER" {
-		return defs
-	}
-	exclude := map[string]bool{
-		"write_file":  true,
-		"edit_file":   true,
-		"delete_file": true,
-		"lsp_fix":     true,
-		"lsp_rename":  true,
-	}
-	if mode == "PLANNER" {
-		exclude["bash"] = true
-	}
-	out := make([]provider.ToolDefinition, 0, len(defs))
-	for _, d := range defs {
-		if exclude[d.Name] {
-			continue
-		}
-		if e.toolDescBudget > 0 && len(d.Description) > e.toolDescBudget {
-			d.Description = strings.TrimSpace(d.Description[:e.toolDescBudget]) + "…"
-		}
-		out = append(out, d)
-	}
-	return out
-}
-
-
-
-// recordExplored keeps a capped, de-duplicated list of files/directories the
-// model has touched this turn (read_file, list_dir, grep, glob, bash find).
-func (e *Engine) recordExplored(tc provider.ToolCall) {
-	var target string
-	var m map[string]any
-	if json.Unmarshal([]byte(tc.Arguments), &m) == nil {
-		switch tc.Name {
-		case "read_file", "edit_file", "write_file":
-			target, _ = m["path"].(string)
-			if tc.Name == "edit_file" || tc.Name == "write_file" {
-				e.exploredStalls = 0
-			}
-			// A deliberate line-range read of a large file (read_file with
-			// start_line) is genuine progress — the model is covering the file in
-			// sections — NOT spinning, even though the path is the same. Reset the
-			// stall counter so the budget does not kill a model methodically
-			// reading a big file (the exact abort the user kept hitting). True
-			// spinning is still caught: identical repeated calls are blocked by
-			// repeat detection, and the absolute cap bounds everything.
-			// NOTE: range-reads (start_line/end_line) NO LONGER reset exploredStalls.
-			// The old behavior let models read the same file 15+ times line-by-line
-			// without ever triggering the loop guard. The per-file read cap above
-			// now handles this case correctly.
-		case "list_dir", "grep", "glob":
-			target, _ = m["path"].(string)
-			if target == "" {
-				target, _ = m["pattern"].(string)
-			}
-		case "bash":
-			// Every bash command counts as an explored target (prefixed so the
-			// space-filter in usageFn/MINER never mistakes a command for a file
-			// path). Same-path reads/dedup make REPEATED commands stall — but a
-			// model running DIFFERENT commands (git log, ls, grep -rn, find) is
-			// genuinely exploring, and the prompts even encourage bash for repo
-			// state. Previously only "find" was credited, so bash-based
-			// exploration was miscounted as spinning and aborted early — the
-			// same class of bug as the range-read fix.
-			if cmd, _ := m["command"].(string); strings.TrimSpace(cmd) != "" {
-				target = "bash: " + strings.TrimSpace(cmd)
-			}
-		}
-	}
-	if target == "" {
-		return
-	}
-	if slices.Contains(e.explored, target) {
-		return
-	}
-	e.explored = append(e.explored, target)
-	if len(e.explored) > 12 {
-		e.explored = e.explored[len(e.explored)-12:]
-	}
-}
-
-// wasExplored returns true if the given absolute file path was read or searched
-// during this turn. Used by the Off-Task Edit Gate.
-func (e *Engine) wasExplored(absPath string) bool {
-	for _, entry := range e.explored {
-		// Normalize: entry may be a bare path or "bash: <cmd>"
-		if strings.HasPrefix(entry, "bash: ") {
-			continue
-		}
-		entryAbs, err := filepath.Abs(entry)
-		if err != nil {
-			entryAbs = entry
-		}
-		if entryAbs == absPath {
-			return true
-		}
-		// Also allow if the explored entry is a parent directory of the target
-		// (e.g. the model listed_dir the locales folder and then edits id.json)
-		if strings.HasPrefix(absPath, entryAbs+string(os.PathSeparator)) {
-			return true
-		}
-	}
-	return false
-}
-
-// exploredPathList returns a compact comma-separated list of explored paths
-// for use in Off-Task Edit Gate messages.
-func (e *Engine) exploredPathList() string {
-	var parts []string
-	cwd, _ := os.Getwd()
-	for _, entry := range e.explored {
-		if strings.HasPrefix(entry, "bash: ") {
-			continue
-		}
-		rel := strings.TrimPrefix(entry, cwd+string(os.PathSeparator))
-		parts = append(parts, rel)
-	}
-	if len(parts) == 0 {
-		return "(none)"
-	}
-	return strings.Join(parts, ", ")
-}
-
-// projectContextBlock renders the injected project overview (tree + docs) as
-// a system-prompt section, or an empty string when none was provided.
-
-// exploredSummary renders the list of files/directories the model has already
-// read or searched, used by the tool-budget reminders and the abort message.
-func (e *Engine) exploredSummary() string {
-	if len(e.explored) == 0 {
-		return ""
-	}
-	return "\n\nFiles you have already examined: " + strings.Join(e.explored, ", ")
-}
 
 // diagLineRe matches a scanned diagnostic line: "  error [deprecated] 12:5  msg".
 var diagLineRe = regexp.MustCompile(`^\s*(error|warning|info|hint)(?:\s*\[(deprecated|unnecessary)\])?\s+(\d+):(\d+)\s+(.*)$`)
@@ -3051,106 +3184,39 @@ func (e *Engine) finalSynth(ctx context.Context, reason string, marker string) (
 	}, e.fitMessages(localSysPrompt)...)
 
 	synthReq := provider.CompletionRequest{
-		Model:       e.model,
-		Messages:    reqMessages,
-		Tools:       nil,
-		Temperature: 0.2,
+		Model:           e.model,
+		Messages:        reqMessages,
+		Tools:           nil,
+		Temperature:     0.2,
+		ReasoningEffort: "none",
 	}
 
 	synthResp, synthErr := e.complete(ctx, synthReq)
 	if synthErr == nil && synthResp != nil && strings.TrimSpace(synthResp.Content) != "" {
-		res := synthResp.Content + "\n\n---\n*⚠️ Respon ini dirangkum dari hasil eksplorasi parsial (" + marker + ").* "
+		res := synthResp.Content + "\n\n---\n*⚠️ This response was synthesized from partial exploration (" + marker + ").* "
+		if strings.Contains(reason, "Turn aborted") {
+			res = fmt.Sprintf("⚠️ %s\n\n%s", reason, res)
+			e.state = StateBlocked
+		} else {
+			e.state = StateDone
+		}
 		_ = e.context.AppendAssistantTurn(e.Mode(), e.model, "", res, nil)
-		e.state = StateDone
 		return res, nil
 	}
 
 	// Deterministic fallback — NEVER surface a raw error to the user.
-	e.state = StateDone
+	if strings.Contains(reason, "Turn aborted") {
+		e.state = StateBlocked
+	} else {
+		e.state = StateDone
+	}
 	fallbackMsg := fmt.Sprintf("⚠️ %s\n\nHere is what was verified from the explored codebase:\n%s", reason, e.exploredSummary())
 	if e.lastReasoning != "" {
 		fallbackMsg += "\n\n**Last Working Focus**: " + e.lastReasoning
 	}
-	fallbackMsg += "\n\n---\n*⚠️ Respon ini dirangkum dari hasil eksplorasi parsial (" + marker + ").* "
+	fallbackMsg += "\n\n---\n*⚠️ This response was synthesized from partial exploration (" + marker + ").* "
 	_ = e.context.AppendAssistantTurn(e.Mode(), e.model, "", fallbackMsg, nil)
 	return fallbackMsg, nil
-}
-
-// isRepeatToolCall reports whether a tool call is an exact repeat of the
-// previous one in this turn (same name and identical arguments).
-// isFileMutationTool reports whether a tool name changes the filesystem
-// (write/edit/create/delete). Rounds that execute these are credited as
-// productive for the Productive Token Ratio metric.
-func isFileMutationTool(name string) bool {
-	switch name {
-	case "write_file", "edit_file", "create_file", "delete_file":
-		return true
-	}
-	return false
-}
-
-func isRepeatToolCall(tc, prev provider.ToolCall) bool {
-	if prev.Name == "" {
-		return false
-	}
-	if tc.Name != prev.Name {
-		return false
-	}
-	// Normalize whitespace-only differences in the arguments JSON so
-	// formatting changes don't defeat the detection.
-	a := strings.TrimSpace(tc.Arguments)
-	b := strings.TrimSpace(prev.Arguments)
-	if a == b {
-		return true
-	}
-	// Structural comparison: identical JSON objects with different key order
-	// should still count as repeats.
-	var ma, mb map[string]any
-	if json.Unmarshal([]byte(a), &ma) == nil && json.Unmarshal([]byte(b), &mb) == nil {
-		ja, _ := json.Marshal(ma)
-		jb, _ := json.Marshal(mb)
-		return string(ja) == string(jb)
-	}
-	return false
-}
-
-func normalizedToolCallKey(tc provider.ToolCall) string {
-	a := strings.TrimSpace(tc.Arguments)
-	var m map[string]any
-	if json.Unmarshal([]byte(a), &m) == nil {
-		b, _ := json.Marshal(m)
-		return tc.Name + ":" + string(b)
-	}
-	return tc.Name + ":" + a
-}
-
-// bashFamily returns the leading command word of a bash tool call (e.g.
-// "git" for `git status`, "grep" for `grep -rn foo`). It is the coarse signal
-// used by the fuzzy loop-break to detect same-strategy spins where the
-// arguments change but the command family never does. Empty for non-bash use.
-func bashFamily(argsJSON string) string {
-	var args struct {
-		Command string `json:"command"`
-	}
-	if err := json.Unmarshal([]byte(argsJSON), &args); err != nil || args.Command == "" {
-		return ""
-	}
-	cmd := strings.TrimSpace(args.Command)
-	if i := strings.IndexAny(cmd, " \t"); i > 0 {
-		cmd = cmd[:i]
-	}
-	return strings.ToLower(cmd)
-}
-
-// advanceBashFamily tracks the consecutive same-family bash streak across
-// ROUNDS: given the current round's family and the engine's last-round family
-// + streak, it returns the updated (family, streak) pair. A switch to a
-// different family (or an empty family) resets the streak to 1.
-func advanceBashFamily(fam, last string, streak int) (string, int) {
-	if fam != "" && fam == last {
-		return fam, streak + 1
-	}
-	return fam, 1
 }
 
 // complete runs a completion through the primary adapter, streaming when the
@@ -3168,8 +3234,6 @@ func (e *Engine) complete(ctx context.Context, req provider.CompletionRequest) (
 	return e.completeWith(ctx, e.adapter, req)
 }
 
-
-
 func (e *Engine) completeWith(ctx context.Context, a provider.ProviderAdapter, req provider.CompletionRequest) (*provider.CompletionResponse, error) {
 	// Snapshot the live handlers ONCE. Progressing adapters (e.g. the opencode
 	// CLI) forward output from their own goroutines that can outlive this call:
@@ -3180,10 +3244,13 @@ func (e *Engine) completeWith(ctx context.Context, a provider.ProviderAdapter, r
 	// callback checks its own snapshot, never the field.
 	progress := e.progressHandler
 	stream := e.streamHandler
+	reasoning := e.reasoningHandler
 	st := e.state
 	var resp *provider.CompletionResponse
 	var err error
-	if sa, ok := a.(provider.StreamingAdapter); ok && stream != nil {
+	if rsa, ok := a.(provider.ReasoningStreamingAdapter); ok && (stream != nil || reasoning != nil) {
+		resp, err = rsa.StreamCompleteWithReasoning(ctx, req, stream, reasoning)
+	} else if sa, ok := a.(provider.StreamingAdapter); ok && stream != nil {
 		resp, err = sa.StreamComplete(ctx, req, stream)
 	} else if pa, ok := a.(provider.ProgressingAdapter); ok && progress != nil {
 		resp, err = pa.CompleteWithProgress(ctx, req, func(line string) {
@@ -3266,8 +3333,6 @@ func (e *Engine) fitMessages(sysPrompt string) []provider.Message {
 	}
 	return res
 }
-
-
 
 // hookRun fires a lifecycle hook event with structured env data. Output is
 // returned so on-tool-call hooks can override tool results; other events
@@ -3391,4 +3456,18 @@ func shortenPath(p string) string {
 		return strings.TrimPrefix(rel, string(os.PathSeparator))
 	}
 	return p
+}
+
+func formatToolExecutionError(toolName string, err error) string {
+	if err == nil {
+		return ""
+	}
+	errStr := err.Error()
+	if strings.Contains(errStr, "invalid character") ||
+		strings.Contains(errStr, "cannot unmarshal") ||
+		strings.Contains(errStr, "syntax error") ||
+		strings.Contains(errStr, "invalid arguments") {
+		return fmt.Sprintf("Tool error (%s): %s.\n👉 Hint: Ensure tool arguments are valid, properly formatted JSON (escape quotes and backslashes inside string values).", toolName, errStr)
+	}
+	return fmt.Sprintf("Tool error: %v", err)
 }

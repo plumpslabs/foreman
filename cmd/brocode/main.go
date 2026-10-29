@@ -61,6 +61,8 @@ func main() {
 	flagBudget := flag.Float64("budget", 0, "Per-task cost cap in USD — the turn stops gracefully once estimated spend exceeds it (0 = unlimited)")
 	flagBench := flag.String("bench", "", "Run the benchmark harness on a JSON manifest of cases (file path or single case object) and exit")
 	flagLog := flag.String("log", "", "Write a real-time activity log to this file (use `tail -f` in another terminal to monitor what BroCode is doing)")
+	flagPrompt := flag.String("prompt", "", "Run task in headless mode (no TUI) and stream output directly to stdout")
+	flagPromptShort := flag.String("p", "", "Run task in headless mode (shorthand)")
 	flag.Parse()
 
 	if *flagVersion || *flagVersionLong {
@@ -318,6 +320,28 @@ func main() {
 		}
 	}
 
+	promptText := *flagPrompt
+	if promptText == "" {
+		promptText = *flagPromptShort
+	}
+	if promptText != "" {
+		os.Exit(runHeadlessTask(
+			promptText,
+			cfg,
+			activeProvider,
+			activeModel,
+			adapter,
+			tools,
+			ctxMgr,
+			st,
+			sessionID,
+			*flagBudget,
+			cwd,
+			lspMgr,
+			scoutMgr,
+		))
+	}
+
 	appModel := ui.NewApp(cfg, activeProvider, activeModel, adapter, tools, ctxMgr, mcpMgr, lspMgr, scoutMgr, *flagBudget, previousPrompts, activityLog, initialMessages...)
 
 	// Trim startup indexing & reflection allocations in the background so p.Run starts instantly
@@ -509,4 +533,3 @@ func runUpdateCommand() {
 
 	fmt.Println(msg)
 }
-

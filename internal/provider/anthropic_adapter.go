@@ -112,14 +112,15 @@ func (a *AnthropicAdapter) Complete(ctx context.Context, req CompletionRequest) 
 			continue
 		}
 
-		aMsg := anthropicMessage{Role: msg.Role}
-		if msg.Role == "user" && msg.ToolCallID != "" {
+		aMsg := anthropicMessage{Role: "user"}
+		if (msg.Role == "user" || msg.Role == "tool") && msg.ToolCallID != "" {
 			aMsg.Content = append(aMsg.Content, anthropicContentBlock{
 				Type:      "tool_result",
 				ToolUseID: msg.ToolCallID,
 				Content:   msg.Content,
 			})
 		} else {
+			aMsg.Role = msg.Role
 			if msg.Reasoning != "" {
 				aMsg.Content = append(aMsg.Content, anthropicContentBlock{
 					Type:     "thinking",

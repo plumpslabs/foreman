@@ -21,11 +21,12 @@ type PlanStep struct {
 
 // Plan represents an explicit execution plan for complex multi-file tasks.
 type Plan struct {
-	Goal      string     `json:"goal"`
-	Status    string     `json:"status"` // "ACTIVE" | "IN_PROGRESS" | "COMPLETED"
-	CreatedAt time.Time  `json:"created_at"`
-	Steps     []PlanStep `json:"steps"`
-	Files     []string   `json:"files,omitempty"`
+	Goal        string     `json:"goal"`
+	Status      string     `json:"status"` // "ACTIVE" | "IN_PROGRESS" | "COMPLETED"
+	CreatedAt   time.Time  `json:"created_at"`
+	Steps       []PlanStep `json:"steps"`
+	Files       []string   `json:"files,omitempty"`
+	RawMarkdown string     `json:"raw_markdown,omitempty"`
 }
 
 func (p *Plan) ToJSON() string {
@@ -56,12 +57,16 @@ func LoadCurrentPlan(workspaceDir string) (*Plan, error) {
 	if err != nil {
 		return nil, err
 	}
-	return ParseMarkdownPlan(string(data)), nil
+	p := ParseMarkdownPlan(string(data))
+	p.RawMarkdown = string(data)
+	return p, nil
 }
 
 // SaveCurrentPlan writes the active plan into .brocode/current_plan.md.
 // If an existing plan with a different goal was active, it safely archives
 // the previous plan into .brocode/plans/archive/ first so past tasks are never lost.
+// When RawMarkdown is set (e.g. from an Intent Discovery generation), it writes the full
+// rich markdown instead of degrading it to a skeleton checklist.
 func SaveCurrentPlan(workspaceDir string, p *Plan) error {
 	if p == nil {
 		return nil
@@ -75,7 +80,11 @@ func SaveCurrentPlan(workspaceDir string, p *Plan) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err
 	}
-	return os.WriteFile(path, []byte(RenderMarkdownPlan(p)), 0o644)
+	content := p.RawMarkdown
+	if strings.TrimSpace(content) == "" {
+		content = RenderMarkdownPlan(p)
+	}
+	return os.WriteFile(path, []byte(content), 0o644)
 }
 
 // maxArchivePlans is the maximum number of completed plans kept in the archive directory.
@@ -162,10 +171,17 @@ func SyncPlanProgress(workspaceDir string, editedFiles []string, responseContent
 		if p.Steps[i].Status == "done" {
 			continue
 		}
+		descLower := strings.ToLower(p.Steps[i].Description)
 		for _, ef := range editedFiles {
 			base := filepath.Base(ef)
-			desc := p.Steps[i].Description
-			if strings.Contains(desc, ef) || (len(base) > 3 && strings.Contains(desc, base)) {
+			baseNoExt := strings.TrimSuffix(base, filepath.Ext(base))
+			efLower := strings.ToLower(ef)
+			baseLower := strings.ToLower(base)
+			baseNoExtLower := strings.ToLower(baseNoExt)
+
+			if strings.Contains(descLower, efLower) ||
+				(len(baseLower) > 3 && strings.Contains(descLower, baseLower)) ||
+				(len(baseNoExtLower) > 3 && strings.Contains(descLower, baseNoExtLower)) {
 				p.Steps[i].Status = "done"
 				changed = true
 				break
@@ -198,6 +214,16 @@ func SyncPlanProgress(workspaceDir string, editedFiles []string, responseContent
 	}
 
 	if changed {
+		if p.RawMarkdown != "" {
+			for _, step := range p.Steps {
+				if step.Status == "done" {
+					desc := cleanTaskDesc(step.Description)
+					p.RawMarkdown = strings.Replace(p.RawMarkdown, "- [ ] "+desc, "- [x] "+desc, -1)
+					p.RawMarkdown = strings.Replace(p.RawMarkdown, "* [ ] "+desc, "* [x] "+desc, -1)
+					p.RawMarkdown = strings.Replace(p.RawMarkdown, "+ [ ] "+desc, "+ [x] "+desc, -1)
+				}
+			}
+		}
 		_ = SaveCurrentPlan(workspaceDir, p)
 	}
 	return p, changed, nil
@@ -227,8 +253,9 @@ func AutoArchiveIfDone(workspaceDir string) (bool, string, error) {
 // using universal Markdown structural grammar (GFM task lists, ordered lists, numbered headings).
 func ParseMarkdownPlan(md string) *Plan {
 	p := &Plan{
-		Status:    "ACTIVE",
-		CreatedAt: time.Now(),
+		Status:      "ACTIVE",
+		CreatedAt:   time.Now(),
+		RawMarkdown: md,
 	}
 
 	lines := strings.Split(md, "\n")
@@ -240,15 +267,25 @@ func ParseMarkdownPlan(md string) *Plan {
 			continue
 		}
 
+		// YAML frontmatter title detection: "title: ..."
+		if p.Goal == "" && strings.HasPrefix(strings.ToLower(trimmed), "title:") {
+			title := strings.TrimSpace(trimmed[6:])
+			title = strings.Trim(title, `"'`)
+			if title != "" {
+				p.Goal = title
+				continue
+			}
+		}
+
 		// First markdown heading is taken as the Goal / Title
 		if p.Goal == "" && strings.HasPrefix(trimmed, "#") {
 			goal := strings.TrimLeft(trimmed, "# \t")
 			goal = strings.TrimPrefix(goal, "🎯 ")
 			goal = strings.TrimPrefix(goal, "Plan: ")
 			goal = strings.TrimPrefix(goal, "Plan - ")
-			// If the heading is just generic "Tasks", "Steps", "Plan", skip it
+			// If the heading is just generic "Tasks", "Steps", "Plan", "Intent Discovery", skip it
 			lower := strings.ToLower(strings.TrimSpace(goal))
-			if lower != "tasks" && lower != "steps" && lower != "plan" && lower != "rencana" && lower != "daftar tugas" && lower != "roadmap" && lower != "checklist" && lower != "action items" {
+			if lower != "tasks" && lower != "steps" && lower != "plan" && lower != "rencana" && lower != "daftar tugas" && lower != "roadmap" && lower != "checklist" && lower != "action items" && !strings.Contains(lower, "intent discovery") {
 				p.Goal = strings.TrimSpace(goal)
 				continue
 			}

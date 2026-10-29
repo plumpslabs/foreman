@@ -634,11 +634,11 @@ func formatConventionIssues(issues []conventionIssue) string {
 // ── structural checks (file-level, not per-line regex) ───────────────
 
 const (
-	maxFuncLines   = 50  // warn when a function body exceeds this
-	maxFileLines   = 300 // warn when total file lines exceed this
-	maxParams      = 5   // warn when function signature has too many params
-	maxNestingDepth = 4  // warn when nesting exceeds this
-	maxTODOsPerFile = 5  // warn when TODO/FIXME count exceeds this
+	maxFuncLines    = 50  // warn when a function body exceeds this
+	maxFileLines    = 300 // warn when total file lines exceed this
+	maxParams       = 5   // warn when function signature has too many params
+	maxNestingDepth = 4   // warn when nesting exceeds this
+	maxTODOsPerFile = 5   // warn when TODO/FIXME count exceeds this
 )
 
 // structuralChecks runs file-level analysis that single-line regex cannot
@@ -649,8 +649,8 @@ func structuralChecks(path string, oldContent string, lines []string) []conventi
 	ext := strings.ToLower(filepath.Ext(path))
 	// Only run structural checks on languages we have function-detection for.
 	if ext != ".go" && ext != ".js" && ext != ".ts" && ext != ".jsx" && ext != ".tsx" &&
-			ext != ".py" && ext != ".rs" && ext != ".java" && ext != ".cs" &&
-			ext != ".php" && ext != ".rb" && ext != ".swift" && ext != ".kt" && ext != ".dart" {
+		ext != ".py" && ext != ".rs" && ext != ".java" && ext != ".cs" &&
+		ext != ".php" && ext != ".rb" && ext != ".swift" && ext != ".kt" && ext != ".dart" {
 		return nil
 	}
 
@@ -663,8 +663,8 @@ func structuralChecks(path string, oldContent string, lines []string) []conventi
 
 	var issues []conventionIssue
 
-	// File length check
-	if len(lines) > maxFileLines {
+	// File length check: only flag newly created files, never spam for legacy files
+	if oldContent == "" && len(lines) > maxFileLines {
 		issues = append(issues, conventionIssue{
 			Path:    path,
 			Kind:    "file-length",
@@ -697,7 +697,7 @@ func structuralChecks(path string, oldContent string, lines []string) []conventi
 		for i := fr.start; i <= fr.end && i < len(lines); i++ {
 			if !existingLines[i] {
 				newLines++
-		}
+			}
 		}
 		if newLines == 0 {
 			continue

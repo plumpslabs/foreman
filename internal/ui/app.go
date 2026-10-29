@@ -94,13 +94,13 @@ type Model struct {
 	// runs are queued in pendingQueue and auto-sent when it finishes: one turn
 	// at a time, because concurrent RunTurn calls clobber the engine's shared
 	// per-turn state and can crash the CLI progress goroutine (nil handler).
-	turnRunning  bool
-	turnMode     string
+	turnRunning bool
+	turnMode    string
 	// modePending holds a user-initiated mode change (Shift+Tab) requested
 	// while a turn was running. The engine mode is deferred until the turn
 	// ends (applying it mid-turn would disturb the running turn); it is
 	// reconciled in the turnResultMsg handler.
-	modePending  string
+	modePending string
 	// turnGen is an monotonically-increasing counter, incremented each time a
 	// new turn starts. turnResultMsg carries the gen value at dispatch time —
 	// if the message arrives with a stale gen (the turn was interrupted and a
@@ -135,6 +135,7 @@ type Model struct {
 	// Live token streaming state & memoized formatting cache
 	streaming          bool
 	pendingStream      string
+	reasoningPreview   string
 	streamRenderCached string
 	streamRenderRaw    string
 	streamRenderWrap   int
@@ -146,7 +147,6 @@ type Model struct {
 
 	// activeRecommendations holds interactive follow-up suggestions from the latest turn
 	activeRecommendations []QuickRecommendation
-
 
 	// Log viewport: the conversation scrolls inside a fixed-height window so
 	// the terminal never repaints the whole history (flicker fix) and the

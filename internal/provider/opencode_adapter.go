@@ -15,37 +15,26 @@ var ansiEscapeRe = regexp.MustCompile(`\x1b\[[0-9;?]*[a-zA-Z]`)
 // fetch fails. The canonical source of truth is the gateway itself — this list
 // is kept in sync manually but the live fetch supersedes it at runtime.
 var OpenCodeFreeModels = []string{
-	"deepseek-v4-flash-free",
-	"hy3-free",
 	"mimo-v2.5-free",
-	"laguna-s-2.1-free",
-	"ling-3.0-tiny-free",
-	"longcat-2.0-free",
-	"nemotron-3-ultra-free",
 	"nemotron-3.5-lightning-free",
+
+	"nemotron-3-ultra-free",
+	"ling-3.0-flash-fin-free",
 	"big-pickle",
 }
 
 // FilterOpenCodeFreeModels filters a raw model list from the OpenCode /models
 // endpoint down to only free-tier models. The gateway returns ALL models
-// (paid + free), so we must filter. Two heuristics:
-//  1. Models ending in "-free" are always free-tier.
-//  2. Models in the hardcoded OpenCodeFreeModels list are known free-tier.
-// This lets new free models appear automatically when the gateway adds them,
-// while excluding paid models like claude-opus-5 or gpt-5.6-sol.
+// (paid + free), so we must filter. Models ending in "-free" or "big-pickle" are free-tier.
 func FilterOpenCodeFreeModels(all []string) []string {
-	knownFree := make(map[string]bool, len(OpenCodeFreeModels))
-	for _, m := range OpenCodeFreeModels {
-		knownFree[m] = true
-	}
 	var out []string
 	for _, m := range all {
-		if knownFree[m] || strings.HasSuffix(m, "-free") {
+		if strings.HasSuffix(m, "-free") || m == "big-pickle" {
 			out = append(out, m)
 		}
 	}
 	if len(out) == 0 {
-		return OpenCodeFreeModels // degraded: return hardcoded fallback
+		return OpenCodeFreeModels // degraded: return fallback
 	}
 	return out
 }

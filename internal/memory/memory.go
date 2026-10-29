@@ -174,13 +174,17 @@ func (s *Store) Save() error {
 		if lines >= maxRetainLines {
 			break
 		}
-		sb.WriteString("## ");sb.WriteString(sec);sb.WriteString("\n")
+		sb.WriteString("## ")
+		sb.WriteString(sec)
+		sb.WriteString("\n")
 		lines++
 		for _, f := range items {
 			if lines >= maxRetainLines {
 				break
 			}
-			sb.WriteString("- ");sb.WriteString(f);sb.WriteString("\n")
+			sb.WriteString("- ")
+			sb.WriteString(f)
+			sb.WriteString("\n")
 			lines++
 		}
 		sb.WriteString("\n")
@@ -282,9 +286,13 @@ func (s *Store) WarmStart() string {
 		if len(items) == 0 {
 			continue
 		}
-		sb.WriteString("## ");sb.WriteString(sec);sb.WriteString("\n")
+		sb.WriteString("## ")
+		sb.WriteString(sec)
+		sb.WriteString("\n")
 		for _, f := range items {
-			sb.WriteString("- ");sb.WriteString(f);sb.WriteString("\n")
+			sb.WriteString("- ")
+			sb.WriteString(f)
+			sb.WriteString("\n")
 		}
 	}
 	s.mu.Unlock()
@@ -377,10 +385,11 @@ func (s *Store) WarmStartRelevant(query string) string {
 // knows the project's structure without re-reading everything.
 //
 // Example output:
-//   📚 Memory Index (use memory tool to recall details):
-//   • Architecture (5 facts): auth flow, DB schema, API routes
-//   • Conventions (3 facts): naming, error handling, testing
-//   • Gotchas (2 facts): race condition in cache, N+1 query
+//
+//	📚 Memory Index (use memory tool to recall details):
+//	• Architecture (5 facts): auth flow, DB schema, API routes
+//	• Conventions (3 facts): naming, error handling, testing
+//	• Gotchas (2 facts): race condition in cache, N+1 query
 func (s *Store) MemoryIndex() string {
 	if s == nil {
 		return ""
@@ -560,6 +569,36 @@ func (s *Store) retainWithTimestamp(section, fact string) (bool, error) {
 	return s.Retain(section, tagged)
 }
 
+// RetainVerifiedLesson stores an authoritative lesson learned from passed tests,
+// compiler checks, or verified repairs with confidence and source tags.
+func (s *Store) RetainVerifiedLesson(section, title, description, source string) (bool, error) {
+	if s == nil || s.path == "" {
+		return false, nil
+	}
+	sec := strings.TrimSpace(section)
+	if sec == "" {
+		sec = "Lessons Learned"
+	}
+	src := strings.TrimSpace(source)
+	if src == "" {
+		src = "verified_test"
+	}
+	t := strings.TrimSpace(title)
+	d := strings.TrimSpace(description)
+	if t == "" && d == "" {
+		return false, fmt.Errorf("lesson requires a title or description")
+	}
+	var entry string
+	if t != "" && d != "" {
+		entry = fmt.Sprintf("[%s | %s] **%s**: %s", time.Now().Format("2006-01-02"), src, t, d)
+	} else if t != "" {
+		entry = fmt.Sprintf("[%s | %s] %s", time.Now().Format("2006-01-02"), src, t)
+	} else {
+		entry = fmt.Sprintf("[%s | %s] %s", time.Now().Format("2006-01-02"), src, d)
+	}
+	return s.Retain(sec, entry)
+}
+
 // List returns all memory facts formatted for the model (used by /memory).
 func (s *Store) List() string {
 	if s == nil {
@@ -578,9 +617,13 @@ func (s *Store) List() string {
 			continue
 		}
 		any = true
-		sb.WriteString("## ");sb.WriteString(sec);sb.WriteString("\n")
+		sb.WriteString("## ")
+		sb.WriteString(sec)
+		sb.WriteString("\n")
 		for _, f := range s.facts[sec] {
-			sb.WriteString("- ");sb.WriteString(f);sb.WriteString("\n")
+			sb.WriteString("- ")
+			sb.WriteString(f)
+			sb.WriteString("\n")
 		}
 	}
 	if !any {
@@ -619,7 +662,7 @@ func (s *Store) CaptureMinerFindings(answer string, files []string) error {
 				currentSec = after
 				continue
 			}
-			
+
 			var fact string
 			if after, found := strings.CutPrefix(trimmed, "- "); found {
 				fact = after

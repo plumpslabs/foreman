@@ -31,12 +31,15 @@ func (t *MemoryTool) Parameters() map[string]any {
 		"properties": map[string]any{
 			"action": map[string]any{
 				"type":        "string",
-				"enum":        []string{"recall", "retain", "list"},
-				"description": "recall: search memory for facts matching a query; retain: store a durable fact; list: show all stored facts",
+				"enum":        []string{"recall", "retain", "list", "lesson"},
+				"description": "recall: search memory for facts matching a query; retain: store a durable fact; list: show all stored facts; lesson: store a verified lesson proven by test/compiler verification",
 			},
-			"query":   map[string]any{"type": "string", "description": "For recall: natural-language query or keywords to search for"},
-			"fact":    map[string]any{"type": "string", "description": "For retain: the durable fact to store (e.g. 'Payment flow: service -> repository -> Prisma')"},
-			"section": map[string]any{"type": "string", "description": "For retain (optional): section to file the fact under (Architecture, Build & Test, Decisions, Gotchas, Notes)"},
+			"query":       map[string]any{"type": "string", "description": "For recall: natural-language query or keywords to search for"},
+			"fact":        map[string]any{"type": "string", "description": "For retain: the durable fact to store (e.g. 'Payment flow: service -> repository -> Prisma')"},
+			"section":     map[string]any{"type": "string", "description": "For retain/lesson (optional): section to file under (Architecture, Build & Test, Decisions, Gotchas, Lessons Learned)"},
+			"title":       map[string]any{"type": "string", "description": "For lesson: short title of the verified lesson"},
+			"description": map[string]any{"type": "string", "description": "For lesson: detailed actionable insight or fix procedure"},
+			"source":      map[string]any{"type": "string", "description": "For lesson (optional): verification source (e.g. test_passed, compiler_verified, user_confirmed)"},
 		},
 		"required": []string{"action"},
 	}
@@ -47,10 +50,13 @@ func (t *MemoryTool) Execute(ctx context.Context, argsJSON string) (string, erro
 		return "ℹ️ Project memory is not available in this session.", nil
 	}
 	var args struct {
-		Action  string `json:"action"`
-		Query   string `json:"query"`
-		Fact    string `json:"fact"`
-		Section string `json:"section"`
+		Action      string `json:"action"`
+		Query       string `json:"query"`
+		Fact        string `json:"fact"`
+		Section     string `json:"section"`
+		Title       string `json:"title"`
+		Description string `json:"description"`
+		Source      string `json:"source"`
 	}
 	if err := json.Unmarshal([]byte(argsJSON), &args); err != nil {
 		return "", err
@@ -70,9 +76,23 @@ func (t *MemoryTool) Execute(ctx context.Context, argsJSON string) (string, erro
 			return "✅ Stored in project memory.", nil
 		}
 		return "ℹ️ Already in memory (duplicate).", nil
+	case "lesson":
+		title := args.Title
+		desc := args.Description
+		if title == "" && desc == "" && args.Fact != "" {
+			desc = args.Fact
+		}
+		added, err := t.Store.RetainVerifiedLesson(args.Section, title, desc, args.Source)
+		if err != nil {
+			return "", err
+		}
+		if added {
+			return "✅ Verified lesson stored in project memory.", nil
+		}
+		return "ℹ️ Lesson already in memory (duplicate).", nil
 	case "list":
 		return t.Store.List(), nil
 	default:
-		return "", fmt.Errorf("memory action must be recall, retain, or list")
+		return "", fmt.Errorf("memory action must be recall, retain, lesson, or list")
 	}
 }

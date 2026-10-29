@@ -138,7 +138,10 @@ func CheckBlastRadiusImpact(ctx context.Context, repoRoot string, modifiedFile s
 	checkedFiles := make(map[string]bool)
 	checkedFiles[modifiedFile] = true
 
-	for _, impFile := range importers {
+	for i, impFile := range importers {
+		if i >= 5 || ctx.Err() != nil {
+			break
+		}
 		if checkedFiles[impFile] {
 			continue
 		}

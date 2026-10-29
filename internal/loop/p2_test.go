@@ -155,7 +155,7 @@ func TestToolsForModeStructuralPruning(t *testing.T) {
 	// The engine's bare test registry has no LSP tools; register stubs so the
 	// pruning rules (which mirror real registration in cmd/brocode) are
 	// exercised for the disk-mutating LSP tools too.
-	for _, name := range []string{"lsp_fix", "lsp_rename"} {
+	for _, name := range []string{"lsp_fix", "lsp_rename", "read_files", "str_replace", "code_slice"} {
 		e.tools.Register(&stubTool{name: name})
 	}
 
@@ -195,6 +195,19 @@ func TestToolsForModeStructuralPruning(t *testing.T) {
 	}
 	if !planner["read_file"] {
 		t.Error("PLANNER must keep read_file")
+	}
+
+	// Canonical tool surface hygiene: redundant aliases must never leak to LLM
+	for _, alias := range []string{"read_files", "str_replace", "code_slice"} {
+		if builder[alias] {
+			t.Errorf("BUILDER must prune redundant alias %q", alias)
+		}
+		if miner[alias] {
+			t.Errorf("MINER must prune redundant alias %q", alias)
+		}
+		if planner[alias] {
+			t.Errorf("PLANNER must prune redundant alias %q", alias)
+		}
 	}
 }
 
