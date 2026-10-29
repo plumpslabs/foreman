@@ -122,7 +122,9 @@ gain a mode plus a file tree.
   into the chat **under the responding agent's name** when the run finishes, and questions from the
   agent appear as decision cards. If the room has no invited team (or no configured provider), the
   message is still stored and a warning is returned to the sender. If the OpenHands SDK is missing,
-  a hint banner shows the install command.
+  a banner offers a one-click install (`POST /api/engine/install` runs pip in the engine's Python;
+  `GET /api/engine/status` probes whether the SDK is importable). No restart is required — the bridge
+  spawns a fresh Python for every run.
 - **Live agents strip** — above the input, every invited agent shows as a chip with a status dot:
   pulsing while running, dimmed when paused, muted when idle.
 - **Room rail members** — each invited team in the right rail lists its member badges (main agent

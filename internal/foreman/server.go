@@ -56,6 +56,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/providers/test", s.testProvider)
 	mux.HandleFunc("POST /api/providers/discover", s.discoverModels)
 	mux.HandleFunc("DELETE /api/providers/{providerID}", s.deleteProvider)
+	mux.HandleFunc("GET /api/engine/status", s.engineStatus)
+	mux.HandleFunc("POST /api/engine/install", s.engineInstall)
 	mux.HandleFunc("PUT /api/settings", s.updateSettings)
 	mux.HandleFunc("POST /api/skills", s.saveSkill)
 	mux.HandleFunc("DELETE /api/skills/{skillID}", s.deleteSkill)
@@ -180,6 +182,33 @@ func (s *Server) deleteRoom(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) engineStatus(w http.ResponseWriter, r *http.Request) {
+	if err := s.verifyProject(r.URL.Query().Get("project")); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	installed, detail := s.runtime.EngineInstalled()
+	writeJSON(w, http.StatusOK, map[string]any{"installed": installed, "detail": detail})
+}
+
+func (s *Server) engineInstall(w http.ResponseWriter, r *http.Request) {
+	if err := s.verifyProject(r.URL.Query().Get("project")); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	out, err := s.runtime.InstallEngine(context.WithoutCancel(r.Context()))
+	if err != nil {
+		writeJSON(w, http.StatusBadGateway, map[string]any{
+			"ok": false, "output": out, "error": err.Error(),
+		})
+		return
+	}
+	installed, _ := s.runtime.EngineInstalled()
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok": true, "output": out, "installed": installed,
+	})
 }
 
 func (s *Server) createRoom(w http.ResponseWriter, r *http.Request) {

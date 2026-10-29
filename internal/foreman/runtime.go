@@ -37,6 +37,16 @@ func NewRuntime(st *Store) *Runtime {
 // SetEngine swaps the bridge engine; used by tests to inject a fake engine.
 func (rt *Runtime) SetEngine(e *Engine) { rt.engine = e }
 
+// EngineInstalled reports whether the OpenHands SDK is importable.
+func (rt *Runtime) EngineInstalled() (bool, string) {
+	return rt.engine.sdkInstalled()
+}
+
+// InstallEngine installs the OpenHands SDK into the engine's Python.
+func (rt *Runtime) InstallEngine(ctx context.Context) (string, error) {
+	return rt.engine.installSDK(ctx)
+}
+
 func (rt *Runtime) StartTask(parent context.Context, taskID string) (AgentRun, error) {
 	task, room, team, providerConfig, secret, settings, err := rt.store.PrepareTaskRun(taskID)
 	if err != nil {

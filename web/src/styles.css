@@ -812,6 +812,10 @@ select.mini-select { appearance: none; -webkit-appearance: none; padding-right: 
   background: #0d1014; border: 1px solid #343b46; border-radius: 6px; padding: 3px 8px;
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px; width: fit-content;
 }
+.sdk-hint-actions { display: flex; align-items: center; gap: 6px; margin-left: auto; flex-shrink: 0; }
+.btn-spin { display: inline-flex; }
+.btn-spin svg { animation: rot 1s linear infinite; }
+@keyframes rot { to { transform: rotate(360deg); } }
 
 /* Live agents strip above the composer */
 .live-agents { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; padding: 8px 20px 0; }

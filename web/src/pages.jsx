@@ -225,6 +225,7 @@ export function RoomDetailHost({ room, state, notify, setModal, runTask, refresh
   const [mentionQuery, setMentionQuery] = useState('');
   const [mentionIdx, setMentionIdx] = useState(0);
   const [sdkHintDismissed, setSdkHintDismissed] = useState(false);
+  const [engineBusy, setEngineBusy] = useState(false);
 
   useEffect(() => { setInvited(room.teamIds || []); }, [room.id, room.teamIds.join(',')]);
 
@@ -277,6 +278,24 @@ export function RoomDetailHost({ room, state, notify, setModal, runTask, refresh
   };
 
   const clearMention = () => setMentionAgent('');
+
+  const installEngine = async () => {
+    setEngineBusy(true);
+    try {
+      const data = await api('/api/engine/install', { method: 'POST', body: '{}' });
+      if (data && data.ok) {
+        notify('OpenHands engine installed — send a message again');
+        setSdkHintDismissed(true);
+        await refresh();
+      } else {
+        notify((data && data.error) || 'Engine install failed');
+      }
+    } catch (error) {
+      notify(error.message);
+    } finally {
+      setEngineBusy(false);
+    }
+  };
 
   const flushSendQueue = async () => {
     if (sendingRef.current) return;
@@ -535,12 +554,16 @@ export function RoomDetailHost({ room, state, notify, setModal, runTask, refresh
                     <Icon name="info" size={15} class="icon" />
                     <div class="sdk-hint-body">
                       <b>OpenHands engine belum terpasang di Python environment.</b>
-                      <span>Jalankan di terminal, lalu restart Foreman:</span>
+                      <span>Klik Install — Foreman menjalankan:</span>
                       <code>python3 -m pip install openhands-sdk openhands-tools</code>
                     </div>
-                    <button type="button" class="icon-btn" onClick={() => setSdkHintDismissed(true)} aria-label="Dismiss">
-                      <Icon name="x" size={13} />
-                    </button>
+                    <div class="sdk-hint-actions">
+                      <button type="button" class="btn small primary" disabled={engineBusy} onClick={installEngine}>
+                        {engineBusy ? <span class="btn-spin"><Icon name="refresh" size={13} /></span> : <Icon name="refresh" size={13} />}
+                        {engineBusy ? 'Installing…' : 'Install engine'}
+                      </button>
+                      <button type="button" class="btn small" onClick={() => setSdkHintDismissed(true)}>Hide</button>
+                    </div>
                   </div>
                 );
               })()}

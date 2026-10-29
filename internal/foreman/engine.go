@@ -50,6 +50,44 @@ func (c *RunControl) Pause() {
 	}
 }
 
+// sdkImportProbe fails unless the OpenHands SDK packages are importable.
+const sdkImportProbe = "import openhands.sdk, openhands.tools; print('ok')"
+
+// sdkInstalled probes whether the OpenHands SDK is importable by this engine's
+// Python. It returns true plus the probe output when the import succeeds.
+func (e *Engine) sdkInstalled() (bool, string) {
+	cmd := exec.Command(e.python, "-c", sdkImportProbe)
+	var out bytes.Buffer
+	cmd.Stdout = &out
+	cmd.Stderr = &out
+	err := cmd.Run()
+	return err == nil, strings.TrimSpace(out.String())
+}
+
+// installSDK installs the OpenHands SDK into the engine's Python via pip. On
+// PEP 668 "externally-managed-environment" errors it retries with
+// --break-system-packages. It returns the combined pip output.
+func (e *Engine) installSDK(ctx context.Context) (string, error) {
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Minute)
+	defer cancel()
+	run := func(args ...string) (string, error) {
+		cmd := exec.CommandContext(ctx, e.python, args...)
+		var b bytes.Buffer
+		cmd.Stdout = &b
+		cmd.Stderr = &b
+		err := cmd.Run()
+		return b.String(), err
+	}
+	out, err := run("-m", "pip", "install", "--upgrade", "openhands-sdk", "openhands-tools")
+	if err != nil && strings.Contains(strings.ToLower(out), "externally-managed") {
+		note := "\n[retried with --break-system-packages]\n"
+		out2, err2 := run("-m", "pip", "install", "--upgrade", "--break-system-packages",
+			"openhands-sdk", "openhands-tools")
+		return out + note + out2, err2
+	}
+	return out, err
+}
+
 // EngineRequest describes one bounded OpenHands run executed by the bridge.
 // JSON tags must match the config keys read by bridge/agent_bridge.py.
 type EngineRequest struct {

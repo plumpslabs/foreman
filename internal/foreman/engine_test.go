@@ -156,6 +156,26 @@ time.sleep(30)
 	}
 }
 
+func TestEngineSDKInstalledProbe(t *testing.T) {
+	missing := withStubProgram(t, `#!/bin/sh
+echo "No module named 'openhands'" >&2
+exit 1
+`)
+	ok, detail := missing.sdkInstalled()
+	if ok || !strings.Contains(detail, "No module named") {
+		t.Fatalf("expected missing SDK probe (ok=%v detail=%q)", ok, detail)
+	}
+
+	present := withStubProgram(t, `#!/bin/sh
+echo ok
+exit 0
+`)
+	ok, detail = present.sdkInstalled()
+	if !ok || !strings.Contains(detail, "ok") {
+		t.Fatalf("expected present SDK probe (ok=%v detail=%q)", ok, detail)
+	}
+}
+
 func TestNewEnginePrefersEnvOverride(t *testing.T) {
 	t.Setenv("FOREMAN_PYTHON", "/opt/custom/python3")
 	if got := NewEngine().python; got != "/opt/custom/python3" {

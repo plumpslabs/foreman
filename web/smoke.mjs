@@ -17,7 +17,10 @@ const workspace = {
   projectPath: '/tmp/demo',
   rooms: [{
     id: 'r1', name: 'Smoke Room', goal: 'g', teamIds: ['t1'], status: 'planning',
-    messages: [{ id: 'm1', role: 'agent', agentName: 'Quick Coordinator', content: 'saya siap', createdAt: new Date().toISOString() }],
+    messages: [
+      { id: 'm1', role: 'agent', agentName: 'Quick Coordinator', content: 'saya siap', createdAt: new Date().toISOString() },
+      { id: 'm2', role: 'agent', agentName: 'Implementer', content: 'OpenHands SDK is not installed in this Python environment. pip install openhands-sdk', createdAt: new Date().toISOString() },
+    ],
     createdAt: new Date().toISOString(),
     questions: [{ id: 'q1', prompt: 'Proceed with the refactor?', options: ['Yes', 'No'], answer: '', createdAt: new Date().toISOString() }],
   }],
@@ -113,6 +116,20 @@ if (!composeTa) {
 // Agent reply bubble should show the real responding agent name.
 const authored = [...window.document.querySelectorAll('.msg .msg-meta strong')].map((el) => el.textContent.trim());
 if (!authored.includes('Quick Coordinator')) failures.push('agent reply does not show the responding agent name');
+
+// SDK-missing banner should offer a one-click install.
+if (!window.document.querySelector('.sdk-hint')) failures.push('sdk hint banner missing');
+const installBtn = byText('.btn', 'Install engine');
+if (!installBtn) {
+  failures.push('install engine button missing');
+} else {
+  calls.length = 0;
+  click(installBtn);
+  await flush();
+  if (!calls.some((c) => c.url.includes('/api/engine/install') && c.method === 'POST')) {
+    failures.push('install engine button did not POST /api/engine/install');
+  }
+}
 
 // @ mention autocomplete -> badge -> routed send.
 calls.length = 0;
