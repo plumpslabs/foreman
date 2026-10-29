@@ -1308,6 +1308,12 @@ func (s *Store) FinishRun(run AgentRun) error {
 			switch run.Status {
 			case "completed":
 				s.state.Tasks[taskIndex].Status = "review"
+			case "paused":
+				// A paused run keeps its progress; the task stays in_progress so
+				// Continue can resume the saved conversation.
+				if s.state.Tasks[taskIndex].Status == "todo" {
+					s.state.Tasks[taskIndex].Status = "in_progress"
+				}
 			case "cancelled", "timed_out", "failed", "blocked":
 				s.state.Tasks[taskIndex].Status = "todo"
 			}

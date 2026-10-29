@@ -50,6 +50,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("PUT /api/tasks/{taskID}/status", s.updateTaskStatus)
 	mux.HandleFunc("POST /api/tasks/{taskID}/run", s.startTask)
 	mux.HandleFunc("POST /api/runs/{runID}/cancel", s.cancelRun)
+	mux.HandleFunc("POST /api/runs/{runID}/pause", s.pauseRun)
 	mux.HandleFunc("POST /api/providers", s.saveProvider)
 	mux.HandleFunc("POST /api/providers/test", s.testProvider)
 	mux.HandleFunc("POST /api/providers/discover", s.discoverModels)
@@ -310,6 +311,18 @@ func (s *Server) cancelRun(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := s.runtime.CancelRun(r.PathValue("runID")); err != nil {
+		writeError(w, http.StatusConflict, err.Error())
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) pauseRun(w http.ResponseWriter, r *http.Request) {
+	if err := s.verifyProject(r.URL.Query().Get("project")); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if err := s.runtime.PauseRun(r.PathValue("runID")); err != nil {
 		writeError(w, http.StatusConflict, err.Error())
 		return
 	}

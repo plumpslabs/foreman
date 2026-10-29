@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 )
 
@@ -27,6 +28,28 @@ type EngineTool struct {
 	Class  string `json:"class"`
 }
 
+// RunControl lets the runtime ask a live bridge run to pause gracefully.
+type RunControl struct {
+	mu    sync.Mutex
+	pause func()
+}
+
+func (c *RunControl) setPause(fn func()) {
+	c.mu.Lock()
+	c.pause = fn
+	c.mu.Unlock()
+}
+
+// Pause asks the bridge to stop at the next step boundary and keep state.
+func (c *RunControl) Pause() {
+	c.mu.Lock()
+	fn := c.pause
+	c.mu.Unlock()
+	if fn != nil {
+		fn()
+	}
+}
+
 // EngineRequest describes one bounded OpenHands run executed by the bridge.
 // JSON tags must match the config keys read by bridge/agent_bridge.py.
 type EngineRequest struct {
@@ -37,6 +60,8 @@ type EngineRequest struct {
 	APIKey               string       `json:"apiKey"`
 	Model                string       `json:"model"`
 	Tools                []EngineTool `json:"tools"`
+	PersistenceDir       string       `json:"persistenceDir,omitempty"`
+	ConversationID       string       `json:"conversationId,omitempty"`
 	MaxIterations        int          `json:"maxIterations"`
 	BudgetUSD            float64      `json:"budgetUsd"`
 	AllowProjectCommands bool         `json:"allowProjectCommands"`
@@ -95,10 +120,20 @@ func (e *Engine) materializeBridge() (string, func(), error) {
 	return scriptPath, cleanup, nil
 }
 
-// Run executes one bridge run, forwarding events to emit until the process
+// Run executes one bridge run without pause control.
+func (e *Engine) Run(ctx context.Context, req EngineRequest, emit func(EngineEvent)) (EngineResult, error) {
+	return e.run(ctx, req, emit, nil)
+}
+
+// RunControlled executes one bridge run and wires pause signals to control.
+func (e *Engine) RunControlled(ctx context.Context, req EngineRequest, emit func(EngineEvent), control *RunControl) (EngineResult, error) {
+	return e.run(ctx, req, emit, control)
+}
+
+// run executes one bridge run, forwarding events to emit until the process
 // finishes or ctx is cancelled. It returns the terminal result or an error
 // when the bridge never produced one.
-func (e *Engine) Run(ctx context.Context, req EngineRequest, emit func(EngineEvent)) (EngineResult, error) {
+func (e *Engine) run(ctx context.Context, req EngineRequest, emit func(EngineEvent), control *RunControl) (EngineResult, error) {
 	if e.python == "" {
 		return EngineResult{}, errors.New("no Python interpreter found; install Python 3 or set FOREMAN_PYTHON")
 	}
@@ -135,6 +170,15 @@ func (e *Engine) Run(ctx context.Context, req EngineRequest, emit func(EngineEve
 			return EngineResult{Status: statusFromContext(ctx)}, ctx.Err()
 		}
 		return EngineResult{}, fmt.Errorf("start engine bridge (%s): %w", e.python, err)
+	}
+	// A pause request sends SIGTERM so the bridge can stop at a step boundary
+	// and persist its conversation state instead of being killed.
+	if control != nil {
+		control.setPause(func() {
+			if cmd.Process != nil {
+				_ = cmd.Process.Signal(syscall.SIGTERM)
+			}
+		})
 	}
 
 	// Feed the config line, then close stdin so the bridge sees EOF.

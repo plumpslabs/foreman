@@ -37,7 +37,11 @@ const workspace = {
 const dom = new JSDOM(html, { url: 'http://localhost:8080/?project=%2Ftmp%2Fdemo', runScripts: 'outside-only', pretendToBeVisual: true });
 const { window } = dom;
 
-window.fetch = async () => ({ ok: true, status: 200, json: async () => workspace });
+const calls = [];
+window.fetch = async (url, opts) => {
+  calls.push({ url: String(url), method: opts?.method || 'GET' });
+  return { ok: true, status: 200, json: async () => workspace };
+};
 window.matchMedia = window.matchMedia || (() => ({ matches: false, addListener() {}, removeListener() {} }));
 
 const bundle = readFileSync(new URL(jsFile, dist), 'utf8');
@@ -75,6 +79,11 @@ for (const label of ['Chat', 'Kanban', 'Plan', 'Changes', 'Task progress', 'Exec
 }
 if (!view.includes('Running')) failures.push('room runtime status missing');
 if (!view.includes('Pause run')) failures.push('pause control missing');
+click(byText('button', 'Pause run'));
+await flush();
+if (!calls.some((c) => c.url.includes('/pause') && c.method === 'POST')) {
+  failures.push('pause action did not call the pause endpoint');
+}
 if (!view.includes('Agent needs a decision')) failures.push('agent question card missing');
 if (!view.includes('Proceed with the refactor?')) failures.push('question prompt missing');
 if (window.location.hash !== '#/rooms/r1') failures.push('room route was not written to the hash');

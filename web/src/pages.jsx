@@ -48,7 +48,7 @@ function roomRuntimeStatus(room, runs) {
   const active = roomRuns.find((run) => run.status === 'running');
   if (active) return 'running';
   const last = roomRuns[0];
-  if (last && ['failed', 'timed_out', 'cancelled'].includes(last.status)) return 'paused';
+  if (last && ['paused', 'failed', 'timed_out', 'cancelled'].includes(last.status)) return 'paused';
   return 'idle';
 }
 
@@ -196,7 +196,7 @@ export function RoomsPage({ state, openRoom, setModal }) {
   );
 }
 
-export function RoomDetailHost({ room, state, notify, setModal, runTask, refresh, onBack, cancelRun }) {
+export function RoomDetailHost({ room, state, notify, setModal, runTask, refresh, onBack, cancelRun, pauseRun }) {
   const [tab, setTab] = useState('chat');
   const [draft, setDraft] = useState('');
   const [sending, setSending] = useState(false);
@@ -215,7 +215,7 @@ export function RoomDetailHost({ room, state, notify, setModal, runTask, refresh
   const activeRun = roomRuns.find((r) => r.status === 'running');
   const lastRun = roomRuns[0];
   const runtime = activeRun ? 'running'
-    : lastRun && ['failed', 'timed_out', 'cancelled'].includes(lastRun.status) ? 'paused'
+    : lastRun && ['paused', 'failed', 'timed_out', 'cancelled'].includes(lastRun.status) ? 'paused'
       : 'idle';
   const pendingQuestions = (room.questions || []).filter((q) => !q.answer);
 
@@ -301,10 +301,10 @@ export function RoomDetailHost({ room, state, notify, setModal, runTask, refresh
               {runtime === 'running' ? 'Running' : runtime === 'paused' ? 'Paused' : 'Idle'}
             </div>
             {activeRun ? (
-              <button class="btn" onClick={() => cancelRun(activeRun.id)}>
+              <button class="btn" onClick={() => pauseRun(activeRun.id)}>
                 <Icon name="pause" size={14} />Pause run
               </button>
-            ) : lastRun && ['failed', 'timed_out', 'cancelled'].includes(lastRun.status) ? (
+            ) : lastRun && ['paused', 'failed', 'timed_out', 'cancelled'].includes(lastRun.status) ? (
               <button class="btn primary" onClick={() => runTask(lastRun.taskId)}>
                 <Icon name="activity" size={14} />Continue
               </button>
@@ -513,13 +513,16 @@ export function RoomDetailHost({ room, state, notify, setModal, runTask, refresh
             <div class="rail-title">Run status</div>
             <div class={`rail-status ${runtime}`}>
               <span class={`runtime-dot ${runtime}`} />
-              <span>{runtime === 'running' ? 'Agent running' : runtime === 'paused' ? 'Paused after a failure' : 'No active run'}</span>
+              <span>{runtime === 'running' ? 'Agent running'
+                : runtime === 'paused' && lastRun && lastRun.status === 'paused' ? 'Paused — state saved, ready to continue'
+                  : runtime === 'paused' ? 'Paused after a failure'
+                    : 'No active run'}</span>
             </div>
             {activeRun ? (
-              <button class="btn" style="width:100%;margin-top:8px" onClick={() => cancelRun(activeRun.id)}>
+              <button class="btn" style="width:100%;margin-top:8px" onClick={() => pauseRun(activeRun.id)}>
                 <Icon name="pause" size={13} />Pause run
               </button>
-            ) : lastRun && ['failed', 'timed_out', 'cancelled'].includes(lastRun.status) ? (
+            ) : lastRun && ['paused', 'failed', 'timed_out', 'cancelled'].includes(lastRun.status) ? (
               <button class="btn primary" style="width:100%;margin-top:8px" onClick={() => runTask(lastRun.taskId)}>
                 <Icon name="activity" size={13} />Continue where it stopped
               </button>
@@ -831,7 +834,7 @@ export function SkillsPage({ state, setModal, openSkill }) {
 }
 
 
-export function RunsPage({ state, cancelRun }) {
+export function RunsPage({ state, cancelRun, pauseRun }) {
   const { runs, tasks } = state;
   return (
     <>
@@ -859,7 +862,10 @@ export function RunsPage({ state, cancelRun }) {
                   </div>
                 </div>
                 {run.status === 'running' && (
-                  <button class="btn small" onClick={() => cancelRun(run.id)}>Cancel</button>
+                  <>
+                    <button class="btn small" onClick={() => pauseRun(run.id)}>Pause</button>
+                    <button class="btn small" style="margin-left:6px" onClick={() => cancelRun(run.id)}>Cancel</button>
+                  </>
                 )}
               </article>
             );

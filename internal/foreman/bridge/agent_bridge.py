@@ -6,8 +6,12 @@ Protocol
 stdin : exactly one JSON object (the bridge config) terminated by a newline.
 stdout: newline-delimited JSON events consumed by the Go runtime:
     {"type":"status"|"tool"|"message", "message":"..."}
-    {"type":"result", "status":"completed|failed|blocked", "message":"...",
+    {"type":"result", "status":"completed|failed|blocked|paused", "message":"...",
      "tokens":N, "cost":C}
+
+A SIGTERM from Foreman pauses the run at the next step boundary: the
+conversation state is persisted (persistenceDir) and the result reports
+"paused" so the task can be continued later without losing progress.
 stderr: diagnostics, captured by Foreman and reported on failure.
 
 The Go side owns the timeout: it kills this process on cancel/deadline, so
@@ -17,6 +21,7 @@ no in-process timeout logic is needed here beyond the budget guard.
 import importlib
 import json
 import os
+import signal
 import sys
 import threading
 import time
@@ -162,6 +167,28 @@ def main():
     if not os.path.isdir(workspace):
         fail("workspace does not exist: %s" % workspace)
 
+    # Pause bookkeeping is set up immediately so a SIGTERM that arrives during
+    # startup (model load, tool import) is still recorded, not a hard kill.
+    state = {"over_budget": False, "done": False, "last_status": "", "paused": False}
+
+    def request_pause(reason):
+        state["paused"] = True
+        emit({"type": "status", "message": "pausing run (%s); conversation state is saved" % reason})
+        try:
+            conversation.pause()
+        except Exception:
+            pass
+
+    # Foreman pauses a run by sending SIGTERM: stop at the next step boundary
+    # and keep the persisted conversation so the task can be continued later.
+    def on_sigterm(signum, frame):
+        request_pause("pause requested")
+
+    try:
+        signal.signal(signal.SIGTERM, on_sigterm)
+    except Exception:
+        pass
+
     try:
         from openhands.sdk import LLM, Agent, Conversation
     except Exception as exc:
@@ -209,13 +236,34 @@ def main():
         fail("could not configure the model provider: %s" % exc)
 
     agent = Agent(llm=llm, tools=tools)
+    # Context compaction: the SDK's summarizing condenser keeps long runs from
+    # blowing the model window (same defaults as the SDK's default agent).
+    try:
+        from openhands.sdk import default_condenser
+        agent.condenser = default_condenser(llm)
+        emit({"type": "status", "message": "Context condenser enabled"})
+    except Exception as exc:
+        emit({"type": "status", "message": "condenser unavailable: %s" % exc})
     max_iterations = int(config.get("maxIterations") or 30)
     budget = float(config.get("budgetUsd") or 0)
     # visualizer=None keeps the SDK's pretty-printer off stdout so the
     # JSON-line protocol stays the only thing on the pipe.
     conv_kwargs = {"visualizer": None}
+    # Conversation state (events, agent progress) persists to disk so a paused
+    # or interrupted run resumes where it stopped instead of starting over.
+    persistence_dir = (config.get("persistenceDir") or "").strip()
+    conversation_id = (config.get("conversationId") or "").strip()
+    if persistence_dir:
+        try:
+            os.makedirs(persistence_dir, exist_ok=True)
+            conv_kwargs["persistence_dir"] = persistence_dir
+            if conversation_id:
+                conv_kwargs["conversation_id"] = conversation_id
+        except Exception as exc:
+            emit({"type": "status", "message": "persistence unavailable: %s" % exc})
     if budget > 0:
         conv_kwargs["max_budget_per_run"] = budget
+    resumed = False
     try:
         conversation = Conversation(
             agent=agent,
@@ -234,13 +282,26 @@ def main():
                 conversation.state.max_iterations = max_iterations
             except Exception:
                 pass
+    if persistence_dir:
+        try:
+            prior = list(conversation.state.events.get_all_events())
+            resumed = len(prior) > 0
+        except Exception:
+            resumed = False
+        if resumed:
+            emit({"type": "status", "message": "Resuming persisted conversation"})
 
     prompt = config.get("prompt") or ""
     overview = project_overview(workspace)
     if overview:
         prompt += "\n\nWorkspace file overview:\n" + overview
 
-    state = {"over_budget": False, "done": False, "last_status": ""}
+    # If a pause arrived during startup, honor it without starting the run.
+    if state["paused"]:
+        tokens, cost = collect_usage(llm)
+        emit({"type": "result", "status": "paused", "message": "Run paused before it started.",
+              "tokens": tokens, "cost": cost})
+        return
 
     def poll():
         while not state["done"]:
@@ -257,16 +318,19 @@ def main():
                     state["over_budget"] = True
                     emit({"type": "status",
                           "message": "budget limit reached ($%.4f > $%.4f); pausing run" % (cost, budget)})
-                    try:
-                        conversation.pause()
-                    except Exception:
-                        pass
+                    request_pause("budget limit reached")
             time.sleep(0.75)
 
     poller = threading.Thread(target=poll, daemon=True)
     poller.start()
 
-    conversation.send_message(prompt)
+    if resumed:
+        conversation.send_message(
+            "Continue the previous run from where it stopped. Re-check the current "
+            "workspace state before acting, then finish the task described below.\n\n" + prompt
+        )
+    else:
+        conversation.send_message(prompt)
     run_error = None
     try:
         conversation.run()
@@ -278,7 +342,10 @@ def main():
     tokens, cost = collect_usage(llm)
     final_message = extract_final_message(conversation)
 
-    if state["over_budget"]:
+    if state["paused"] and not state["over_budget"]:
+        status = "paused"
+        message = final_message or "Run paused. Conversation state is saved for Continue."
+    elif state["over_budget"]:
         status = "blocked"
         message = final_message or ("Run paused after reaching the configured budget of $%.4f." % budget)
     elif run_error is not None:

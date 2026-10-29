@@ -174,10 +174,20 @@ export function App() {
     }
   };
 
+  const pauseRun = async (runId) => {
+    try {
+      await api(`/api/runs/${encodeURIComponent(runId)}/pause`, { method: 'POST', body: '{}' });
+      notify('Pause requested — the agent will stop at a safe point');
+      await refresh();
+    } catch (error) {
+      notify(error.message);
+    }
+  };
+
   const pageProps = {
     state: current, notify, refresh, setModal, navigate,
     openRoom, openAgent, openTeam, openSkill, openTeamCreate,
-    runTask, deleteSkill, cancelRun,
+    runTask, deleteSkill, cancelRun, pauseRun,
   };
 
   const pages = {

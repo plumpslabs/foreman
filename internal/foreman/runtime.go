@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -11,11 +12,16 @@ import (
 	"github.com/google/uuid"
 )
 
+type activeRun struct {
+	cancel  context.CancelFunc
+	control *RunControl
+}
+
 type Runtime struct {
 	store     *Store
 	engine    *Engine
 	mu        sync.Mutex
-	active    map[string]context.CancelFunc
+	active    map[string]*activeRun
 	semaphore chan struct{}
 }
 
@@ -23,7 +29,7 @@ func NewRuntime(st *Store) *Runtime {
 	return &Runtime{
 		store:     st,
 		engine:    NewEngine(),
-		active:    map[string]context.CancelFunc{},
+		active:    map[string]*activeRun{},
 		semaphore: make(chan struct{}, 8),
 	}
 }
@@ -65,8 +71,9 @@ func (rt *Runtime) StartTask(parent context.Context, taskID string) (AgentRun, e
 		return AgentRun{}, err
 	}
 	runCtx, cancel := context.WithTimeout(parent, time.Duration(settings.MaxExecutionSeconds)*time.Second)
+	control := &RunControl{}
 	rt.mu.Lock()
-	rt.active[run.ID] = cancel
+	rt.active[run.ID] = &activeRun{cancel: cancel, control: control}
 	rt.mu.Unlock()
 	go func() {
 		defer func() {
@@ -76,25 +83,42 @@ func (rt *Runtime) StartTask(parent context.Context, taskID string) (AgentRun, e
 			rt.mu.Unlock()
 			<-rt.semaphore
 		}()
-		finished := rt.execute(runCtx, run, task, room, team, providerConfig, secret, settings)
+		finished := rt.execute(runCtx, control, run, task, room, team, providerConfig, secret, settings)
 		_ = rt.store.FinishRun(finished)
 	}()
 	return run, nil
 }
 
+// CancelRun immediately stops a run (hard kill).
 func (rt *Runtime) CancelRun(runID string) error {
 	rt.mu.Lock()
-	cancel := rt.active[runID]
+	entry := rt.active[runID]
 	rt.mu.Unlock()
-	if cancel == nil {
+	if entry == nil {
 		return errors.New("run is not active")
 	}
-	cancel()
+	entry.cancel()
+	return nil
+}
+
+// PauseRun asks a run to stop at the next step boundary. The conversation state
+// is persisted so the task can be continued later.
+func (rt *Runtime) PauseRun(runID string) error {
+	rt.mu.Lock()
+	entry := rt.active[runID]
+	rt.mu.Unlock()
+	if entry == nil {
+		return errors.New("run is not active")
+	}
+	if entry.control == nil {
+		return errors.New("run cannot be paused")
+	}
+	entry.control.Pause()
 	return nil
 }
 
 // execute drives one OpenHands bridge run and persists its events.
-func (rt *Runtime) execute(ctx context.Context, run AgentRun, task Task, room Room, team *Team, config ProviderConfig, secret string, settings Settings) AgentRun {
+func (rt *Runtime) execute(ctx context.Context, control *RunControl, run AgentRun, task Task, room Room, team *Team, config ProviderConfig, secret string, settings Settings) AgentRun {
 	finish := func(status, message string, err error, tokens int, cost float64) AgentRun {
 		run.Status, run.Result, run.EndedAt = status, message, time.Now().UTC()
 		if err != nil {
@@ -110,27 +134,30 @@ func (rt *Runtime) execute(ctx context.Context, run AgentRun, task Task, room Ro
 		return run
 	}
 
-	prompt := buildRunPrompt(room, task, team)
+	prompt := buildRunPrompt(room, task, team, skillsContext(team, task, rt.store.Snapshot().Skills))
 	agentToolIDs := agentToolIDs(team, task)
+	snapshot := rt.store.Snapshot()
 	req := EngineRequest{
-		Workspace:            rt.store.Snapshot().ProjectPath,
+		Workspace:            snapshot.ProjectPath,
 		Prompt:               prompt,
 		Protocol:             config.Protocol,
 		BaseURL:              config.BaseURL,
 		APIKey:               secret,
 		Model:                config.DefaultModel,
 		Tools:                ResolveEngineTools(agentToolIDs, settings.AllowProjectCommands),
+		PersistenceDir:       filepath.Join(snapshot.ProjectPath, ".foreman", "agent-conversations"),
+		ConversationID:       task.ID,
 		MaxIterations:        30,
 		BudgetUSD:            settings.BudgetUSD,
 		AllowProjectCommands: settings.AllowProjectCommands,
 	}
-	result, err := rt.engine.Run(ctx, req, func(ev EngineEvent) {
+	result, err := rt.engine.RunControlled(ctx, req, func(ev EngineEvent) {
 		msg := ev.Message
 		if msg == "" {
 			msg = ev.Type
 		}
 		_ = rt.store.AppendRunEvent(run.ID, ev.Type, safeRuntimeError(errors.New(msg), secret))
-	})
+	}, control)
 	if err != nil {
 		return finish(result.Status, resultOrError(result.Message, err), err, result.Tokens, result.CostUSD)
 	}
@@ -190,7 +217,7 @@ func parseAgentQuestions(message string) []AgentQuestion {
 	return questions
 }
 
-func buildRunPrompt(room Room, task Task, team *Team) string {
+func buildRunPrompt(room Room, task Task, team *Team, skills string) string {
 	sections := []string{
 		fmt.Sprintf("Room: %s", room.Name),
 		fmt.Sprintf("Room goal: %s", room.Goal),
@@ -201,11 +228,104 @@ func buildRunPrompt(room Room, task Task, team *Team) string {
 		sections = append(sections,
 			strings.TrimSpace(strings.Join([]string{team.Purpose, team.Instructions, agentInstructions(*team, task.AgentName)}, "\n\n")))
 	}
+	if skills != "" {
+		sections = append(sections, "# Skills\n\n"+skills)
+	}
 	sections = append(sections,
 		"Work only on this task. Keep changes within the active project workspace. Report what changed and what you verified.",
 		"Need a decision from the human before continuing? End your reply with a fenced block:\n\n```question\n<the question>\n- option one\n- option two\n```\n\nThen stop and wait for the answer.",
 	)
 	return strings.Join(sections, "\n\n")
+}
+
+// skillsContext renders the assigned agent's skills into the run prompt.
+// Active skills contribute their instructions (bounded); passive skills are
+// listed by name as reference only.
+func skillsContext(team *Team, task Task, skills []Skill) string {
+	refs := agentSkillRefs(team, task)
+	if len(refs) == 0 || len(skills) == 0 {
+		return ""
+	}
+	byRef := make(map[string]Skill, len(skills)*2)
+	for _, skill := range skills {
+		byRef[skill.ID] = skill
+		byRef[skill.Name] = skill
+	}
+	var active, passive []Skill
+	seen := map[string]bool{}
+	for _, ref := range refs {
+		skill, ok := byRef[ref]
+		if !ok || seen[skill.ID] {
+			continue
+		}
+		seen[skill.ID] = true
+		if skill.Mode == SkillModeActive {
+			active = append(active, skill)
+		} else {
+			passive = append(passive, skill)
+		}
+	}
+
+	var builder strings.Builder
+	if len(active) > 0 {
+		builder.WriteString("## Active skills\n\n")
+		budget := 8000
+		for _, skill := range active {
+			body := strings.TrimSpace(skill.Instructions)
+			var files strings.Builder
+			for _, file := range skill.Files {
+				if strings.EqualFold(file.Path, "SKILL.md") {
+					continue
+				}
+				files.WriteString("- " + file.Path + "\n")
+			}
+			section := "### " + skill.Name + "\n" + body
+			if files.Len() > 0 {
+				section += "\n\nBundle files:\n" + files.String()
+			}
+			if len(section) > budget {
+				section = section[:budget] + "\n…(truncated)"
+			}
+			builder.WriteString(section + "\n\n")
+			budget -= len(section)
+			if budget <= 0 {
+				break
+			}
+		}
+	}
+	if len(passive) > 0 {
+		builder.WriteString("## Reference skills (passive)\n")
+		for _, skill := range passive {
+			desc := strings.TrimSpace(skill.Description)
+			if desc != "" {
+				builder.WriteString("- " + skill.Name + ": " + desc + "\n")
+			} else {
+				builder.WriteString("- " + skill.Name + "\n")
+			}
+		}
+	}
+	return strings.TrimSpace(builder.String())
+}
+
+func agentSkillRefs(team *Team, task Task) []string {
+	if team == nil {
+		return nil
+	}
+	target := task.AgentName
+	if target == "" {
+		target = team.MainAgent
+	}
+	for _, agent := range team.Agents {
+		if agent.Name == target {
+			return agent.Skills
+		}
+	}
+	for _, agent := range team.Agents {
+		if agent.Name == team.MainAgent {
+			return agent.Skills
+		}
+	}
+	return nil
 }
 
 func agentInstructions(team Team, name string) string {

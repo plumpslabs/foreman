@@ -32,6 +32,19 @@ func withStubPython(t *testing.T, body string) *Engine {
 	return NewEngine()
 }
 
+// withStubProgram writes an arbitrary executable program (any shebang) to act
+// as the "Python" interpreter for the engine. Used when the stub needs signal
+// handling that a POSIX shell cannot deliver while a child runs.
+func withStubProgram(t *testing.T, prog string) *Engine {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "stub-python")
+	if err := os.WriteFile(path, []byte(prog), 0700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("FOREMAN_PYTHON", path)
+	return NewEngine()
+}
+
 func TestEngineRunStreamsEventsAndReturnsResult(t *testing.T) {
 	engine := withStubPython(t, `echo '{"type":"status","message":"engine: running"}'
 echo '{"type":"tool","message":"file edited"}'
@@ -80,6 +93,66 @@ sleep 30`)
 	}
 	if result.Status != "cancelled" && result.Status != "timed_out" {
 		t.Fatalf("unexpected status: %q", result.Status)
+	}
+}
+
+func TestEngineRunControlledPauseSignalsBridge(t *testing.T) {
+	// The stub traps SIGTERM (what a pause sends), reports the paused result,
+	// and exits so the engine returns it as a first-class outcome. Real Python
+	// is used because a POSIX shell cannot run its trap until a child sleep exits.
+	stub := `#!/usr/bin/env python3
+import json, os, signal, sys, time
+
+def handler(sig, frame):
+    print(json.dumps({"type": "result", "status": "paused",
+                      "message": "paused, state saved",
+                      "tokens": 7, "cost": 0.01}))
+    sys.stdout.flush()
+    os._exit(0)
+
+signal.signal(signal.SIGTERM, handler)
+print(json.dumps({"type": "status", "message": "starting"}))
+sys.stdout.flush()
+time.sleep(30)
+`
+	engine := withStubProgram(t, stub)
+
+	control := &RunControl{}
+	started := make(chan struct{})
+	start := time.Now()
+	done := make(chan struct{})
+	var result EngineResult
+	var err error
+	go func() {
+		result, err = engine.RunControlled(context.Background(), EngineRequest{Workspace: t.TempDir()},
+			func(ev EngineEvent) {
+				if ev.Message == "starting" {
+					select {
+					case <-started:
+					default:
+						close(started)
+					}
+				}
+			}, control)
+		close(done)
+	}()
+	// Wait until the stub is alive and has installed its SIGTERM handler before
+	// pausing, otherwise the signal can land before Python is ready.
+	select {
+	case <-started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("stub never reported starting")
+	}
+	control.Pause()
+	<-done
+	if err != nil {
+		t.Fatalf("pause run failed: %v", err)
+	}
+	if result.Status != "paused" || result.Message != "paused, state saved" {
+		t.Fatalf("unexpected result: %#v", result)
+	}
+	if time.Since(start) > 5*time.Second {
+		t.Fatal("run did not stop promptly on pause")
 	}
 }
 

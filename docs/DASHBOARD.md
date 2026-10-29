@@ -92,8 +92,11 @@ gain a mode plus a file tree.
 - **Routing** — the dashboard uses hash routes (`#/rooms/:id`, `#/agents/:id`, …) so a refresh
   returns to the same page.
 - **Runtime status** — rooms show Running/Paused/Idle from their runs. A running room exposes
-  *Pause run*; a room whose last run failed/timed out/cancelled exposes *Continue*, which starts
-  the same task again without retyping the prompt.
+  *Pause run* (a graceful SIGTERM to the bridge, which persists the conversation and stops at the
+  next step boundary; the task stays `in_progress`). A room whose last run is paused, failed,
+  timed out, or cancelled exposes *Continue*, which starts the same task again. Because Foreman
+  persists each conversation under the task id (`persistenceDir` + `conversationId`), Continue
+  resumes the saved conversation instead of starting over.
 - **Participants** — teams can be invited or kicked per room (`PUT /api/rooms/{id}/teams`).
 - **Agent questions** — an agent can request a decision by ending its reply with a fenced
   `question` block whose first line is the question and whose `- ` lines are options. The runtime
@@ -144,8 +147,14 @@ provider clears agent/team references and removes its credential.
 
 An agent's `providerId` + `model` override the workspace default for runs of that agent.
 
-Skills are stored metadata; the runtime bridge does not yet inject them into a run (the active/passive
-mode is persisted so injection can be wired without another migration).
+## Skills and runtime injection
+
+- **Active skills** (mode `active`) are injected into the run prompt as a `## Active skills`
+  section with their instructions and bundle file list (bounded to 8000 chars total).
+- **Passive skills** (mode `passive`) are listed by name + description as reference-only context.
+- Skills resolve by id or name from the agent's `skills[]`; unrecognized references are ignored.
+- The bridge enables the SDK's summarizing condenser (`default_condenser`) on every run so long
+  conversations stay inside the model window.
 
 ## Icons
 
