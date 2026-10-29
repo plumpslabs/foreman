@@ -14,7 +14,7 @@ func TestOpenStoreSeedsAndPersistsWorkspace(t *testing.T) {
 		t.Fatal(err)
 	}
 	state := store.Snapshot()
-	if state.SchemaVersion != SchemaVersion || len(state.Templates) != 3 {
+	if state.SchemaVersion != SchemaVersion || len(state.Templates) != 4 {
 		t.Fatalf("unexpected initial state: schema=%d templates=%d", state.SchemaVersion, len(state.Templates))
 	}
 	path := filepath.Join(project, ".foreman", "workspace.json")
@@ -67,14 +67,14 @@ func TestImportedTeamIsIndependentFromTemplate(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	team, err := store.ImportTeam("feature-team", "My Feature Team")
+	team, err := store.ImportTeam("frontend-team", "My Feature Team")
 	if err != nil {
 		t.Fatal(err)
 	}
 	team.Agents[0].Name = "Custom Lead"
 	team.Agents[1].Role = "Custom role"
 	state := store.Snapshot()
-	if state.Templates[1].MainAgent != "Feature Lead" || state.Templates[1].Agents[1].Role == "Custom role" {
+	if state.Templates[1].MainAgent != "Nova" || state.Templates[1].Agents[1].Role == "Custom role" {
 		t.Fatal("editing imported team unexpectedly changed the source template")
 	}
 }

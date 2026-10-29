@@ -51,7 +51,7 @@ func TestDashboardServesEmbeddedUIAndWorkspaceAPI(t *testing.T) {
 	if err := json.Unmarshal(response.Body.Bytes(), &state); err != nil {
 		t.Fatal(err)
 	}
-	if len(state.Templates) != 3 || state.ProjectPath != project || state.Settings.MaxConcurrentRuns != 1 || len(state.Tasks) != 0 {
+	if len(state.Templates) != 4 || state.ProjectPath != project || state.Settings.MaxConcurrentRuns != 1 || len(state.Tasks) != 0 {
 		t.Fatalf("unexpected workspace response: %#v", state)
 	}
 }

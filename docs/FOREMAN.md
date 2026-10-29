@@ -67,9 +67,16 @@ events, tasks, and approvals outgrow JSON.
 ## Dashboard
 
 Preact SPA in `web/`, built by Vite into `internal/foreman/web/dist` and embedded via
-`go:embed`. Pages: Home, Rooms (chat + tasks), Kanban (dependency-aware), Teams, Agents, Skills,
-Runs (events + cancel), Settings (providers, execution policy, theme).
+`go:embed`. Room-centric layout:
+- Left sidebar: Overview · Rooms · Teams · Agent library · Skills · Runs & activity · Settings
+- **Room = workspace session**: each room has its own goal, invited teams, chat, and per-room tasks
+- Room detail: toolbar + tabs (Chat · Kanban · Plan · Changes), with a right rail showing room team,
+  task progress, live activity, and execution policy
+- Kanban is scoped per room (no global Kanban page)
+Pages: Home, Rooms, Teams, Agents, Skills, Runs, Settings, plus the RoomDetailHost.
 `npm run smoke` renders the built bundle in jsdom against a mocked API.
+The layout, navigation map, and room interaction model are documented in
+[`docs/DASHBOARD.md`](DASHBOARD.md).
 
 ## Roadmap
 

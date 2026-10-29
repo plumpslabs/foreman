@@ -1,115 +1,202 @@
 import { useEffect, useState } from 'preact/hooks';
 import { api } from './api.js';
+import { Icon } from './icons.jsx';
 
 const esc = (s) => String(s ?? '');
+const timeAgo = (iso) => {
+  const d = new Date(iso);
+  const s = Math.floor((Date.now() - d.getTime()) / 1000);
+  if (s < 60) return 'just now';
+  if (s < 3600) return `${Math.floor(s / 60)}m ago`;
+  if (s < 86400) return `${Math.floor(s / 3600)}h ago`;
+  return d.toLocaleDateString();
+};
 
-function RoomCard({ room, recent, onOpen }) {
+function avatarInitials(name) {
+  return String(name || '?').slice(0, 2).toUpperCase();
+}
+
+function avatarClass(tone) {
+  switch (tone) {
+    case 'green': return 'agent-avatar green';
+    case 'blue': return 'agent-avatar blue';
+    case 'purple': return 'agent-avatar purple';
+    case 'orange': return 'agent-avatar orange';
+    default: return 'agent-avatar';
+  }
+}
+
+/* ---------- Shared components ---------- */
+
+function StatCard({ label, icon, num, sub }) {
+  return (
+    <article class="stat">
+      <div class="stat-top">
+        <span class="stat-icon"><Icon name={icon} size={15} /></span>
+        <span>{esc(label)}</span>
+      </div>
+      <div class="stat-num">{esc(num)}</div>
+      <div class="stat-foot">{esc(sub)}</div>
+    </article>
+  );
+}
+
+function RoomRow({ room, onOpen }) {
+  const statusTag = {
+    planning: 'muted', running: 'blue', review: 'orange', cancelled: 'red', completed: 'green',
+  }[room.status] || 'muted';
+  const teamCount = (room.teamIds || []).length;
   return (
     <article
-      class="room clickable"
+      class="room-row clickable"
       role="button"
       tabindex="0"
       aria-label={`Open room ${room.name}`}
       onClick={() => onOpen(room.id)}
       onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onOpen(room.id); } }}
     >
-      <div class="room-head">
-        <h3>{esc(room.name)}</h3>
-        <span class="status">{esc(room.status)}</span>
+      <div class="room-symbol"><Icon name="message-square" /></div>
+      <div class="room-main">
+        <div class="room-title">{esc(room.name)}</div>
+        <div class="room-sub">{esc(room.goal || 'No goal provided.')}</div>
+        <div class="room-foot">
+          <span class={`tag ${statusTag}`}>{esc(room.status)}</span>
+          <span class="meta-text">{teamCount} team{teamCount === 1 ? '' : 's'} · {timeAgo(room.createdAt)}</span>
+        </div>
       </div>
-      <p>{esc(room.goal || 'No goal provided.')}</p>
-      <small>
-        {(room.teamIds || []).length} team{(room.teamIds || []).length === 1 ? '' : 's'} ·{' '}
-        {recent ? 'Open room →' : `Created ${new Date(room.createdAt).toLocaleString()} · Open room →`}
-      </small>
     </article>
   );
 }
 
+function TemplateCard({ template, onImport }) {
+  return (
+    <article class="team-card">
+      <div class="team-card-top">
+        <div class="team-icon"><Icon name="users" size={19} /></div>
+      </div>
+      <div class="team-name">{esc(template.name)}</div>
+      <div class="team-desc">{esc(template.purpose)}</div>
+      <div class="meta-text" style="margin-bottom:9px">
+        Main agent: <b>{esc(template.mainAgent)}</b> · {(template.agents || []).length} roles
+      </div>
+      <div style="display:flex;gap:5px;flex-wrap:wrap">
+        {(template.agents || []).map((a) => (
+          <span class="tag">{esc(a.name)} · {esc(String(a.role).split('·')[0].trim())}</span>
+        ))}
+      </div>
+      <button class="btn primary" style="margin-top:14px" onClick={() => onImport({ kind: 'team', templateId: template.id })}>
+        Import editable copy
+      </button>
+    </article>
+  );
+}
+
+function ActivityItem({ icon, text, time }) {
+  return (
+    <div class="activity-item">
+      <div class="activity-mark"><Icon name={icon} size={15} /></div>
+      <div>
+        <div class="activity-text">{esc(text)}</div>
+        <div class="activity-time">{esc(time)}</div>
+      </div>
+    </div>
+  );
+}
+
+/* ---------- Pages ---------- */
+
 export function HomePage({ state, openRoom, setModal }) {
-  const rooms = state.rooms;
+  const { rooms, templates, tasks, skills } = state;
+  const completedTasks = tasks.filter((t) => t.status === 'done').length;
   return (
     <>
-      <div class="head">
+      <div class="page-head">
         <div>
-          <div class="eyebrow">Local-first agent workspace</div>
-          <h1 class="title">Make the work visible.</h1>
-          <div class="sub">
-            Create reusable teams, give each room its own goal and context, and keep execution honest.
-            Runs execute through the local OpenHands engine with bounded iteration, time, and cost.
-          </div>
+          <div class="eyebrow">Your command center</div>
+          <h1 class="page-title">Make the work visible.</h1>
+          <div class="page-sub">Coordinate your AI teams, keep work visible in rooms, and let Foreman handle orchestration.</div>
         </div>
-        <button class="button primary" onClick={() => setModal({ kind: 'room' })}>+ New room</button>
+        <div style="display:flex;gap:8px;flex-wrap:wrap">
+          <button class="btn" onClick={() => setModal({ kind: 'rooms' })}><Icon name="users" />Manage teams</button>
+          <button class="btn primary" onClick={() => setModal({ kind: 'room' })}><Icon name="plus" />New room</button>
+        </div>
       </div>
-      <div class="grid">
-        <article class="card">
-          <h3>Rooms</h3>
-          <p>Separate conversations and project goals.</p>
-          <strong>{rooms.length}</strong>
-          <div class="muted">No demo activity is presented as live work.</div>
-        </article>
-        <article class="card">
-          <h3>Teams</h3>
-          <p>Reusable team definitions, independent of rooms.</p>
-          <strong>{state.teams.length}</strong>
-          <div class="muted">Importing makes an editable copy.</div>
-        </article>
-        <article class="card">
-          <h3>Agent execution</h3>
-          <p>Execution status comes from real runs only.</p>
-          <span class="tag">OpenHands engine</span>
-          <div class="notice">
-            Runs need a configured provider and Python with the OpenHands SDK installed.
-            No source code leaves this machine unless your provider endpoint does.
-          </div>
-        </article>
+      <div class="grid-stats">
+        <StatCard label="Active rooms" icon="message-square" num={rooms.length}
+          sub={`${rooms.filter((r) => ['running', 'planning'].includes(r.status)).length} in progress`} />
+        <StatCard label="Tasks this week" icon="check-check" num={tasks.length} sub={`${completedTasks} completed`} />
+        <StatCard label="Templates" icon="layers" num={templates.length} sub="Import editable teams" />
+        <StatCard label="Skills" icon="puzzle" num={skills.length} sub="Reusable capabilities" />
       </div>
-      <div class="toolbar">
-        <h2>Recent rooms</h2>
-        <span class="muted">Rooms are stored in .foreman/workspace.json</span>
+      <div class="section-head">
+        <div>
+          <div class="section-title">Your rooms</div>
+          <div class="section-note">Task-focused workspaces — each room is a session</div>
+        </div>
+        <button class="btn subtle" onClick={() => setModal({ kind: 'rooms' })}>View all <Icon name="arrow-up-right" size={14} /></button>
       </div>
       <div class="list">
         {rooms.length
-          ? rooms.slice(0, 3).map((room) => <RoomCard key={room.id} room={room} recent onOpen={openRoom} />)
-          : <div class="empty">No rooms yet. Create one to define a separate goal and invite teams.</div>}
+          ? rooms.map((r) => <RoomRow key={r.id} room={r} onOpen={openRoom} />)
+          : <div class="empty">No rooms yet. Create a room to define a goal and invite teams.</div>}
+      </div>
+      <div class="section-head">
+        <div>
+          <div class="section-title">Team templates</div>
+          <div class="section-note">Start from a built-in team and customize it</div>
+        </div>
+      </div>
+      <div class="grid" style="grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:12px">
+        {templates.map((t) => <TemplateCard key={t.id} template={t} onImport={setModal} />)}
       </div>
     </>
   );
 }
 
 export function RoomsPage({ state, openRoom, setModal }) {
+  const { rooms } = state;
   return (
     <>
-      <div class="head">
+      <div class="page-head">
         <div>
-          <div class="eyebrow">Isolated work sessions</div>
-          <h1 class="title">Rooms</h1>
-          <div class="sub">
-            A team's reusable definition can be invited into multiple rooms. Each room stores its own
-            goal, team membership, and chat.
-          </div>
+          <div class="eyebrow">Shared work context</div>
+          <h1 class="page-title">Rooms</h1>
+          <div class="page-sub">A room is a task-focused workspace. Invite teams, chat with agents, and track work in one place.</div>
         </div>
-        <button class="button primary" onClick={() => setModal({ kind: 'room' })}>+ New room</button>
+        <button class="btn primary" onClick={() => setModal({ kind: 'room' })}><Icon name="plus" />New room</button>
       </div>
-      <div class="toolbar"><h2>All rooms</h2></div>
       <div class="list">
-        {state.rooms.length
-          ? state.rooms.map((room) => <RoomCard key={room.id} room={room} onOpen={openRoom} />)
-          : <div class="empty">No rooms yet. Create one to define a separate goal and invite teams.</div>}
+        {rooms.length
+          ? rooms.map((r) => <RoomRow key={r.id} room={r} onOpen={openRoom} />)
+          : <div class="empty">No rooms yet. Create one to define a goal and invite teams.</div>}
+      </div>
+      <div class="panel" style="margin-top:24px">
+        <div class="panel-head"><h3>How rooms work</h3></div>
+        <ActivityItem icon="users" text="Invite teams, not duplicated agents." time="The same team can be used across multiple rooms." />
+        <ActivityItem icon="git-branch" text="Each task gets an execution boundary." time="Use a worktree or sandbox to keep parallel changes isolated." />
+        <ActivityItem icon="shield-check" text="Human approval stays configurable." time="Require approval for plans, file changes, commands, or merges." />
       </div>
     </>
   );
 }
 
-export function RoomDetailHost({ room, state, refresh, notify, setModal, runTask, setActiveRoomId }) {
-  const teams = state.teams.filter((team) => room.teamIds.includes(team.id));
-  const teamNames = teams.length ? teams.map((team) => team.name).join(' + ') : 'No teams invited';
-  const roomTasks = state.tasks.filter((task) => task.roomId === room.id);
+export function RoomDetailHost({ room, state, notify, setModal, runTask, refresh, setActiveRoomId }) {
+  const [tab, setTab] = useState('chat');
   const [draft, setDraft] = useState('');
   const [sending, setSending] = useState(false);
+  const [activeAgent, setActiveAgent] = useState(room.mainAgent || 'Atlas');
+  const [inviteOpen, setInviteOpen] = useState(false);
+  const [invited, setInvited] = useState(room.teamIds || []);
 
-  const send = async (event) => {
-    event.preventDefault();
+  useEffect(() => { setInvited(room.teamIds || []); }, [room.id]);
+  useEffect(() => { setActiveAgent(room.mainAgent || 'Atlas'); }, [room.id]);
+
+  const { teams: allTeams, tasks, settings } = state;
+  const teams = allTeams.filter((t) => room.teamIds.includes(t.id));
+  const roomTasks = tasks.filter((t) => t.roomId === room.id);
+
+  const send = async (e) => {
+    e.preventDefault();
     const content = draft.trim();
     if (!content) return;
     setSending(true);
@@ -127,111 +214,337 @@ export function RoomDetailHost({ room, state, refresh, notify, setModal, runTask
     }
   };
 
+  const done = roomTasks.filter((t) => t.status === 'done').length;
+  const total = roomTasks.length;
+  const pct = total ? Math.round((done / total) * 100) : 0;
+
+  const toggleInvite = (id) => setInvited((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
+
   return (
-    <div class="detail active">
-      <div class="toolbar">
-        <button class="button" onClick={() => setActiveRoomId('')}>← All rooms</button>
-        <span class="status">{esc(room.status)} · No run active</span>
-      </div>
-      <div class="panel">
-        <div class="room-head">
-          <h2 class="title" style="font-size:21px">{esc(room.name)}</h2>
-          <span class="tag">{esc(teamNames)}</span>
-        </div>
-        <p>{esc(room.goal || 'No goal provided.')}</p>
-        <div class="notice">
-          Room chat is saved locally. Sending a chat message does not start an agent; create a task
-          and choose Run agent to execute it.
-        </div>
-        <div class="toolbar">
-          <h3>Room tasks ({roomTasks.length})</h3>
-          <button class="button" onClick={() => setModal({ kind: 'task', roomId: room.id })}>+ Task</button>
-        </div>
-        <div class="list">
-          {roomTasks.length
-            ? roomTasks.map((task) => (
-              <div class="task-card">
-                <b>{esc(task.title)}</b> · <span class="status">{esc(task.status)}</span>
-                <p>{esc(task.description)}</p>
-                {task.status === 'todo' && (
-                  <div class="inline-actions">
-                    <button class="button small-button" onClick={() => runTask(task.id)}>Run agent</button>
-                  </div>
-                )}
+    <>
+      <div class="workspace">
+        <div class="workspace-main">
+          <div class="room-toolbar">
+            <button class="icon-btn" onClick={() => setActiveRoomId('')} aria-label="Back to rooms"><Icon name="arrow-left" /></button>
+            <div style="min-width:0;flex:1">
+              <div class="room-title-large">{esc(room.name)}</div>
+              <div class="room-desc-small">{esc(room.goal || 'No goal provided.')}</div>
+            </div>
+            <button class="btn subtle" onClick={() => setInviteOpen(true)}><Icon name="user-plus" /><span class="hide-sm">Invite</span></button>
+          </div>
+
+          <div class="room-tabs">
+            <button class={`room-tab ${tab === 'chat' ? 'active' : ''}`} onClick={() => setTab('chat')}><Icon name="message-square" />Chat</button>
+            <button class={`room-tab ${tab === 'board' ? 'active' : ''}`} onClick={() => setTab('board')}>
+              <Icon name="kanban" />Kanban{total ? <span class="tag" style="margin-left:2px">{total}</span> : null}
+            </button>
+            <button class={`room-tab ${tab === 'plan' ? 'active' : ''}`} onClick={() => setTab('plan')}><Icon name="git-branch" />Plan</button>
+            <button class={`room-tab ${tab === 'changes' ? 'active' : ''}`} onClick={() => setTab('changes')}><Icon name="git-diff" />Changes</button>
+          </div>
+
+          {tab === 'chat' && (
+            <div class="room-view active">
+              <div class="chat-scroll">
+                {(room.messages || []).length
+                  ? room.messages.map((m) => (
+                    <div class={`msg ${m.role === 'user' ? 'user' : ''}`}>
+                      <div class={`msg-avatar ${m.role === 'user' ? 'user' : 'main-agent'}`}>
+                        {m.role === 'user' ? 'ME' : avatarInitials(room.mainAgent || 'Foreman')}
+                      </div>
+                      <div class="msg-content">
+                        <div class="msg-meta">
+                          <strong>{esc(m.role === 'user' ? 'You' : (room.mainAgent || 'Foreman'))}</strong>
+                          <span>{m.role === 'user' ? 'You' : `${room.mainAgent || 'Foreman'} · Main agent`} · {timeAgo(m.createdAt)}</span>
+                        </div>
+                        <div class={`bubble ${m.role === 'user' ? 'user-bubble' : ''}`}>{esc(m.content)}</div>
+                      </div>
+                    </div>
+                  ))
+                  : (
+                    <div class="empty">
+                      No messages yet. Describe the goal below to start this room's conversation.
+                    </div>
+                  )}
               </div>
-            ))
-            : <div class="muted">No tasks yet.</div>}
-        </div>
-        <div class="chat-list">
-          {(room.messages || []).length
-            ? room.messages.map((message) => (
-              <article class={`chat-message ${message.role === 'user' ? 'user' : ''}`}>
-                <div class="chat-meta">
-                  {message.role === 'user' ? 'You' : 'Foreman'} · {new Date(message.createdAt).toLocaleString()}
+              <form class="chat-compose" onSubmit={send}>
+                <div class="compose-tools">
+                  <span class="compose-hint">Message the room · work is saved locally</span>
+                  <button class="btn subtle" type="button" onClick={() => setModal({ kind: 'attach' })}>
+                    <Icon name="paperclip" size={14} />Attach context
+                  </button>
                 </div>
-                {esc(message.content)}
-              </article>
-            ))
-            : <div class="empty">No messages yet. Write the room goal or a request below to start its saved conversation.</div>}
+                <div class="compose-box">
+                  <textarea
+                    rows="2"
+                    placeholder="Describe a task for this room…"
+                    value={draft}
+                    onInput={(e) => setDraft(e.currentTarget.value)}
+                  />
+                  <button class="send-btn" type="submit" disabled={sending} aria-label="Send message"><Icon name="arrow-up" /></button>
+                </div>
+                <div class="compose-selects">
+                  <button class="mini-select" type="button" onClick={() => setModal({ kind: 'route', agents: teams, current: activeAgent, onPick: setActiveAgent })}>
+                    <Icon name="bot" size={13} /><span>{esc(activeAgent)}</span><Icon name="chevron-down" size={13} />
+                  </button>
+                  <button class="mini-select" type="button" onClick={() => setModal({ kind: 'effort', current: settings.defaultEffort })}>
+                    <Icon name="gauge" size={13} /><span>Effort: {esc(settings.defaultEffort)}</span><Icon name="chevron-down" size={13} />
+                  </button>
+                  <button class="mini-select" type="button" onClick={() => setModal({ kind: 'approval', required: settings.requireRunApproval })}>
+                    <Icon name="shield-check" size={13} /><span>Approval {settings.requireRunApproval ? 'on' : 'off'}</span>
+                  </button>
+                </div>
+              </form>
+            </div>
+          )}
+
+          {tab === 'board' && (
+            <div class="room-view active">
+              <Board roomId={room.id} tasks={roomTasks} runTask={runTask} setModal={setModal} />
+            </div>
+          )}
+
+          {tab === 'plan' && (
+            <div class="room-view active">
+              <div style="padding:24px;max-width:900px;width:100%;margin:0 auto">
+                <div class="section-title">Task graph</div>
+                <div class="section-note" style="margin-top:5px">
+                  Dependencies determine when workers can be spawned. Parallel work is scheduled only when safe.
+                </div>
+                <div class="panel" style="margin-top:18px;padding:0;overflow:hidden">
+                  {roomTasks.length
+                    ? roomTasks.map((t, i) => (
+                      <div class="plan-list-task">
+                        <div class={`task-number ${t.status === 'done' ? 'done' : ''}`}>
+                          {t.status === 'done' ? <Icon name="check" size={13} /> : i + 1}
+                        </div>
+                        <div class="room-main">
+                          <div class="room-title">{esc(t.title)}</div>
+                          <div class="room-sub">{esc(t.description || 'No description.')}</div>
+                          <div class="room-foot">
+                            <span class="tag">{esc(t.priority)}</span>
+                            <span class="meta-text">{esc(t.status)} · effort {esc(t.effort)}</span>
+                          </div>
+                        </div>
+                      </div>
+                    ))
+                    : <div class="empty" style="border:0;margin:14px">No tasks yet. Add tasks from the Kanban tab.</div>}
+                </div>
+                <div class="panel" style="margin-top:14px">
+                  <div class="section-title">Scheduling rationale</div>
+                  <p class="section-note" style="line-height:1.8;margin-top:8px">
+                    The main agent handles coordination and final synthesis. Independent read-only analysis can run in
+                    parallel. Code changes wait for findings to reduce conflicts and unnecessary work.
+                  </p>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {tab === 'changes' && (
+            <div class="room-view active">
+              <div style="padding:24px;max-width:900px;width:100%;margin:0 auto">
+                <div class="section-title">Proposed changes</div>
+                <div class="section-note" style="margin-top:5px">
+                  A review surface for agent output. Local room state only until a run produces artifacts.
+                </div>
+                <div class="changes-list" style="margin-top:16px">
+                  <div class="changes-row">
+                    <div class="changes-symbol"><Icon name="file-code" /></div>
+                    <div class="changes-main">
+                      <div class="changes-title">No change sets yet</div>
+                      <div class="changes-sub">Run a task to produce a reviewable change.</div>
+                    </div>
+                    <span class="tag orange">Pending</span>
+                  </div>
+                  <div class="changes-row">
+                    <div class="changes-symbol"><Icon name="shield-check" /></div>
+                    <div class="changes-main">
+                      <div class="changes-title">Review gate</div>
+                      <div class="changes-sub">{settings.requireRunApproval ? 'Changes require human approval before merge.' : 'Approval is currently disabled by policy.'}</div>
+                    </div>
+                    <span class={`tag ${settings.requireRunApproval ? 'green' : 'muted'}`}>{settings.requireRunApproval ? 'Enabled' : 'Off'}</span>
+                  </div>
+                </div>
+              </div>
+            </div>
+          )}
         </div>
-        <form class="chat-compose" onSubmit={send}>
-          <textarea
-            maxlength="16000"
-            required
-            placeholder="Write a request for this room… (saved locally; no agent runs yet)"
-            value={draft}
-            onInput={(e) => setDraft(e.currentTarget.value)}
-          />
-          <button class="button primary" type="submit" disabled={sending}>Save message</button>
-        </form>
+
+        <aside class="right-rail">
+          <div class="rail-section">
+            <div class="rail-title">
+              Room team
+              <button class="dots" onClick={() => setInviteOpen(true)} aria-label="Invite team"><Icon name="plus" size={14} /></button>
+            </div>
+            {teams.length
+              ? teams.map((t) => (
+                <div class="agent-line">
+                  <div class="agent-avatar green" style="border-radius:6px">{avatarInitials(t.mainAgent)}</div>
+                  <div class="agent-info">
+                    <div class="agent-name">{esc(t.mainAgent)}</div>
+                    <div class="agent-role">{esc(t.name)}</div>
+                  </div>
+                  <span class="agent-status running"><span class="status-dot" />Ready</span>
+                </div>
+              ))
+              : <div class="muted" style="font-size:11px;padding:4px 0">No teams invited yet.</div>}
+            <button class="btn subtle" style="width:100%;margin-top:8px" onClick={() => setInviteOpen(true)}>
+              <Icon name="users" size={14} />Manage participants
+            </button>
+          </div>
+
+          <div class="rail-section">
+            <div class="rail-title">Task progress <span style="margin-left:auto;font-weight:400;color:var(--muted)">{done} / {total}</span></div>
+            <div class="progress-track"><div class="progress-fill" style={`width:${pct}%`} /></div>
+            <div style="margin-top:9px">
+              {roomTasks.filter((t) => t.status !== 'done').slice(0, 4).map((t) => (
+                <div class="rail-task">
+                  <span style="color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{esc(t.title)}</span>
+                  <span class={`tag ${t.status === 'in_progress' ? 'blue' : ''}`} style="margin-left:auto">{esc(t.status)}</span>
+                </div>
+              ))}
+              {!roomTasks.length && <div class="muted" style="font-size:11px">No tasks in this room.</div>}
+            </div>
+            <button class="btn subtle" style="width:100%;margin-top:7px" onClick={() => setTab('board')}>
+              Open Kanban <Icon name="arrow-up-right" size={14} />
+            </button>
+          </div>
+
+          <div class="rail-section">
+            <div class="rail-title">Live activity</div>
+            <div class="activity-feed">
+              <b>Room</b> created<br />
+              <span style="color:var(--muted)">{timeAgo(room.createdAt)}</span><br /><br />
+              <b>Policy</b> {settings.effortMode} effort · max {settings.maxConcurrentRuns} run{settings.maxConcurrentRuns === 1 ? '' : 's'}<br />
+              <span style="color:var(--muted)">Guardrails from Settings</span>
+            </div>
+          </div>
+
+          <div class="rail-section">
+            <div class="rail-title">Execution policy</div>
+            <div style="display:flex;flex-wrap:wrap;gap:6px">
+              <span class="policy-chip green">{esc(settings.effortMode)} effort</span>
+              <span class="policy-chip blue">Max {settings.maxConcurrentRuns} runs</span>
+              <span class="policy-chip blue">Timeout {settings.maxExecutionSeconds}s</span>
+              {settings.requireRunApproval
+                ? <span class="policy-chip orange">Approval required</span>
+                : <span class="policy-chip green">Auto-run</span>}
+            </div>
+          </div>
+        </aside>
       </div>
+
+      {inviteOpen && (
+        <div class="modal-backdrop open" onClick={(e) => { if (e.target === e.currentTarget) setInviteOpen(false); }}>
+          <div class="modal">
+            <div class="modal-head">
+              <h3>Invite teams to room</h3>
+              <button class="icon-btn" onClick={() => setInviteOpen(false)} aria-label="Close"><Icon name="x" /></button>
+            </div>
+            <div class="modal-body">
+              <div class="field">
+                <label>Select teams to invite</label>
+                <div class="choice-grid">
+                  {allTeams.length
+                    ? allTeams.map((t) => (
+                      <label class={`choice ${invited.includes(t.id) ? 'selected' : ''}`}>
+                        <input type="checkbox" checked={invited.includes(t.id)} onChange={() => toggleInvite(t.id)} />
+                        <span><b>{esc(t.name)}</b><br /><small>{esc(t.purpose)}</small></span>
+                      </label>
+                    ))
+                    : <span class="muted">No teams yet. Import a template first.</span>}
+                </div>
+              </div>
+              <small>Inviting a team does not spawn every agent. The scheduler starts only the workers needed for assigned tasks.</small>
+            </div>
+            <div class="modal-foot">
+              <button class="btn" onClick={() => setInviteOpen(false)}>Cancel</button>
+              <button class="btn primary" onClick={() => { notify('Room participants updated'); setInviteOpen(false); }}>Save participants</button>
+            </div>
+          </div>
+        </div>
+      )}
+    </>
+  );
+}
+
+const BOARD_COLUMNS = [
+  ['todo', 'To do'],
+  ['blocked', 'Blocked'],
+  ['in_progress', 'In progress'],
+  ['review', 'Review'],
+  ['done', 'Done'],
+];
+
+function Board({ roomId, tasks, runTask, setModal }) {
+  return (
+    <div class="board">
+      {BOARD_COLUMNS.map(([key, title]) => {
+        const columnTasks = tasks.filter((t) => t.status === key);
+        return (
+          <div class="board-col">
+            <div class="board-col-head">{title}<span>{columnTasks.length}</span></div>
+            <div class="board-tasks">
+              {columnTasks.length
+                ? columnTasks.map((t) => (
+                  <article class="board-task">
+                    <div class="board-task-title">{esc(t.title)}</div>
+                    <div class="board-task-desc">{esc(t.description || 'No description.')}</div>
+                    <div class="board-task-foot">
+                      <span class={`tag ${['high', 'urgent'].includes(t.priority) ? 'orange' : ''}`}>{esc(t.priority)}</span>
+                      <span class="meta-text">effort {esc(t.effort)}</span>
+                    </div>
+                    <div style="display:flex;gap:5px;margin-top:9px">
+                      <button class="btn small" style="flex:1" onClick={() => setModal({ kind: 'task', roomId, task: t })}>Edit</button>
+                      {t.status === 'todo' && (
+                        <button class="btn primary small" style="flex:1" onClick={(e) => runTask(t.id, e.currentTarget)}>Run</button>
+                      )}
+                      {t.status === 'review' && (
+                        <span class="tag blue" style="flex:1;justify-content:center">Awaiting review</span>
+                      )}
+                    </div>
+                  </article>
+                ))
+                : <div class="muted" style="font-size:11px;padding:4px">No tasks</div>}
+              <button class="board-add" onClick={() => setModal({ kind: 'task', roomId, task: null })}>+ Add task</button>
+            </div>
+          </div>
+        );
+      })}
     </div>
   );
 }
 
 export function TeamsPage({ state, setModal }) {
+  const { teams, templates } = state;
   return (
     <>
-      <div class="head">
+      <div class="page-head">
         <div>
           <div class="eyebrow">Reusable agent teams</div>
-          <h1 class="title">Teams</h1>
-          <div class="sub">
-            Start from a built-in template. Imports create independent, editable team copies; the
-            source template stays unchanged.
-          </div>
+          <h1 class="page-title">Teams</h1>
+          <div class="page-sub">Build a team once, invite it into any room. Choose a main agent, set instructions, and attach skills.</div>
         </div>
       </div>
-      <div class="grid">
-        {state.templates.map((template) => (
-          <article class="card">
-            <span class="tag green">Template v{template.version}</span>
-            <h3 style="margin-top:12px">{esc(template.name)}</h3>
-            <p>{esc(template.purpose)}</p>
-            <div class="muted">Main agent: {esc(template.mainAgent)} · {template.agents.length} roles</div>
-            <button
-              class="button primary"
-              style="margin-top:14px"
-              onClick={() => setModal({ kind: 'team', templateId: template.id })}
-            >
-              Import editable copy
-            </button>
-          </article>
-        ))}
+      <div class="grid" style="grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:12px">
+        {templates.map((t) => <TemplateCard key={t.id} template={t} onImport={setModal} />)}
       </div>
-      <div class="toolbar"><h2>Your teams</h2></div>
+      <div class="section-head" style="margin-top:24px">
+        <div>
+          <div class="section-title">Your teams</div>
+          <div class="section-note">Imported editable copies</div>
+        </div>
+      </div>
       <div class="list">
-        {state.teams.length
-          ? state.teams.map((team) => (
-            <article class="room">
-              <div class="room-head">
-                <h3>{esc(team.name)}</h3>
-                <span class="tag">{esc(team.templateId)} template</span>
+        {teams.length
+          ? teams.map((t) => (
+            <article class="room-row">
+              <div class="agent-avatar blue" style="border-radius:6px">{avatarInitials(t.mainAgent)}</div>
+              <div class="room-main">
+                <div class="room-title">{esc(t.name)}<span class="tag">{esc(t.templateId)} template</span></div>
+                <div class="room-sub">{esc(t.purpose)}</div>
+                <div class="room-foot"><span class="meta-text">Main: {esc(t.mainAgent)} · {(t.agents || []).length} agent roles</span></div>
               </div>
-              <p>{esc(team.purpose)}</p>
-              <small>
-                Main: {esc(team.mainAgent)} · {team.agents.length} agent roles · Instructions included
-              </small>
             </article>
           ))
           : <div class="empty">No teams imported. Choose a template above to create an editable copy.</div>}
@@ -240,101 +553,44 @@ export function TeamsPage({ state, setModal }) {
   );
 }
 
-const KANBAN_COLUMNS = [
-  ['todo', 'To do'],
-  ['blocked', 'Blocked'],
-  ['in_progress', 'In progress'],
-  ['review', 'Review'],
-  ['done', 'Done'],
-];
-
-export function KanbanPage({ state, runTask, setTaskStatus }) {
-  const tasks = state.tasks;
-  return (
-    <>
-      <div class="head">
-        <div>
-          <div class="eyebrow">Persistent task board</div>
-          <h1 class="title">Kanban</h1>
-          <div class="sub">
-            Tasks are scoped to rooms. Dependencies block execution until every prerequisite is done.
-          </div>
-        </div>
-      </div>
-      <div class="kanban">
-        {KANBAN_COLUMNS.map(([key, title]) => {
-          const columnTasks = tasks.filter((task) => task.status === key);
-          return (
-            <div class="kanban-col">
-              <h3>{title} · {columnTasks.length}</h3>
-              {columnTasks.length
-                ? columnTasks.map((task) => {
-                  const room = state.rooms.find((item) => item.id === task.roomId);
-                  const depNames = (task.dependencies || [])
-                    .map((id) => (tasks.find((item) => item.id === id) || {}).title || id);
-                  return (
-                    <article class="task-card">
-                      <h4>{esc(task.title)}</h4>
-                      <p>{esc(room ? room.name : 'Unknown room')} · {esc(task.priority)} · effort {esc(task.effort)}</p>
-                      <p>{esc(task.description || '')}</p>
-                      {depNames.length ? <small class="muted">Depends on: {depNames.map(esc).join(', ')}</small> : null}
-                      {task.status === 'blocked' ? <div><span class="tag">Waiting for dependencies</span></div> : null}
-                      <div class="inline-actions">
-                        {task.status === 'todo' && (
-                          <>
-                            <button class="button small-button" onClick={() => setTaskStatus(task.id, 'review')}>Mark done</button>
-                            <button class="button primary small-button" onClick={(e) => runTask(task.id, e.currentTarget)}>Run agent</button>
-                          </>
-                        )}
-                        {task.status === 'review' && (
-                          <button class="button primary small-button" onClick={() => setTaskStatus(task.id, 'done')}>Approve complete</button>
-                        )}
-                      </div>
-                    </article>
-                  );
-                })
-                : <div class="muted">No tasks</div>}
-            </div>
-          );
-        })}
-      </div>
-    </>
-  );
-}
-
-export function AgentsPage({ state }) {
+export function AgentsPage({ state, setModal }) {
   const profiles = [];
   for (const team of state.teams) {
     for (const agent of team.agents || []) {
-      profiles.push({ ...agent, teamName: team.name, main: agent.name === team.mainAgent });
+      profiles.push({
+        ...agent,
+        teamName: team.name,
+        main: agent.name === team.mainAgent,
+        tone: agent.requireReview ? 'orange' : 'green',
+      });
     }
   }
   return (
     <>
-      <div class="head">
+      <div class="page-head">
         <div>
           <div class="eyebrow">Agent library</div>
-          <h1 class="title">Agents</h1>
-          <div class="sub">
-            Imported team agents and their roles are listed below. They are configuration profiles,
-            not running processes.
-          </div>
+          <h1 class="page-title">Agent profiles</h1>
+          <div class="page-sub">Define role, model, instructions, and allowed tools once. Assign profiles to teams when needed.</div>
         </div>
+        <button class="btn primary" onClick={() => setModal({ kind: 'agent' })}><Icon name="plus" />Create agent</button>
       </div>
-      <div class="toolbar"><h2>Configured team roles</h2></div>
       <div class="list">
         {profiles.length
-          ? profiles.map((agent) => (
-            <article class="room">
-              <div class="room-head">
-                <h3>
-                  {esc(agent.name)}{' '}
-                  {agent.main ? <span class="tag green">Main agent</span> : <span class="tag">Worker role</span>}
-                </h3>
-                <span class="tag">{esc(agent.teamName)}</span>
+          ? profiles.map((a) => (
+            <article class="room-row">
+              <div class={avatarClass(a.tone)} style="border-radius:6px">{avatarInitials(a.name)}</div>
+              <div class="room-main">
+                <div class="room-title">
+                  {esc(a.name)}
+                  {a.main ? <span class="tag green">Main agent</span> : <span class="tag">Worker role</span>}
+                </div>
+                <div class="room-sub">{esc(a.role)} · team {esc(a.teamName)}</div>
+                <div class="room-foot">
+                  {a.requireReview ? <span class="tag orange">Requires review</span> : null}
+                  <span class="meta-text">{(a.tools || []).length} tools allowed</span>
+                </div>
               </div>
-              <p>{esc(agent.role)}</p>
-              <small>Profile imported with team · Runs when its task starts</small>
             </article>
           ))
           : <div class="empty">No agent profiles yet. Import a team template; its roles will appear here.</div>}
@@ -344,30 +600,28 @@ export function AgentsPage({ state }) {
 }
 
 export function SkillsPage({ state, setModal, deleteSkill }) {
-  const skills = state.skills;
+  const { skills } = state;
   return (
     <>
-      <div class="head">
+      <div class="page-head">
         <div>
           <div class="eyebrow">Reusable capabilities</div>
-          <h1 class="title">Skills</h1>
-          <div class="sub">
-            Versioned instruction bundles are stored locally. Skills do not grant additional tools
-            or permissions.
-          </div>
+          <h1 class="page-title">Skills</h1>
+          <div class="page-sub">Attach focused instruction bundles to agents. Keep skills composable instead of hardcoding behavior into agent prompts.</div>
         </div>
-        <button class="button primary" onClick={() => setModal({ kind: 'skill' })}>+ New skill</button>
+        <button class="btn primary" onClick={() => setModal({ kind: 'skill' })}><Icon name="plus" />Add skill</button>
       </div>
       <div class="list">
         {skills.length
-          ? skills.map((skill) => (
-            <article class="room skill-card">
-              <div class="room-head">
-                <h3>{esc(skill.name)} <span class="tag">v{skill.version}</span></h3>
-                <button class="button small-button" onClick={() => deleteSkill(skill.id)}>Delete</button>
+          ? skills.map((s) => (
+            <article class="team-card">
+              <div class="team-card-top">
+                <div class="team-icon"><Icon name="puzzle" size={18} /></div>
+                <button class="btn small" onClick={() => { if (confirm('Delete this skill?')) deleteSkill(s.id); }}>Delete</button>
               </div>
-              <p>{esc(skill.description)}</p>
-              <div class="muted">{esc(skill.instructions)}</div>
+              <div class="team-name">{esc(s.name)}<span class="tag" style="margin-left:6px">v{esc(s.version)}</span></div>
+              <div class="team-desc">{esc(s.description)}</div>
+              <div class="muted" style="font-size:11px;white-space:pre-wrap">{esc(s.instructions)}</div>
             </article>
           ))
           : <div class="empty">No workspace skills configured.</div>}
@@ -377,49 +631,38 @@ export function SkillsPage({ state, setModal, deleteSkill }) {
 }
 
 export function RunsPage({ state, cancelRun }) {
-  const runs = state.runs;
+  const { runs, tasks } = state;
   return (
     <>
-      <div class="head">
+      <div class="page-head">
         <div>
           <div class="eyebrow">Execution history</div>
-          <h1 class="title">Runs</h1>
-          <div class="sub">
-            Status, event logs, duration, token count, and result are persisted from actual local
-            engine runs.
-          </div>
+          <h1 class="page-title">Runs & activity</h1>
+          <div class="page-sub">See what ran, which agent was spawned, what it changed, and whether human approval is needed.</div>
         </div>
       </div>
       <div class="list">
         {runs.length
-          ? runs.map((run) => (
-            <article class="room">
-              <div class="room-head">
-                <h3>{esc(run.status)} · {esc(run.model)}</h3>
-                <span class="tag">{esc(run.provider)}</span>
-              </div>
-              <p>{esc(run.result || run.error || 'Run executing…')}</p>
-              <small>
-                Started {new Date(run.startedAt).toLocaleString()} ·{' '}
-                {(run.tokens || 0).toLocaleString()} tokens · ${Number(run.costUsd || 0).toFixed(4)}
-              </small>
-              {run.status === 'running' && (
-                <div class="inline-actions">
-                  <button class="button small-button" onClick={() => cancelRun(run.id)}>Cancel run</button>
+          ? runs.map((run) => {
+            const task = tasks.find((t) => t.id === run.taskId);
+            const tone = run.status === 'running' ? 'orange' : run.status === 'completed' ? 'green' : 'blue';
+            return (
+              <article class="room-row">
+                <div class={avatarClass(tone)} style="border-radius:6px"><Icon name="activity" size={14} /></div>
+                <div class="room-main">
+                  <div class="room-title">{esc(run.status)} · {esc(run.model)}</div>
+                  <div class="room-sub">{esc(task ? task.title : 'Unknown task')} · {esc(run.result || run.error || 'Run executing…')}</div>
+                  <div class="room-foot">
+                    <span class="tag">{esc(run.provider)}</span>
+                    <span class="meta-text">Started {new Date(run.startedAt).toLocaleString()} · {esc(run.tokens || 0)} tokens · ${Number(run.costUsd || 0).toFixed(4)}</span>
+                  </div>
                 </div>
-              )}
-              <details style="margin-top:8px">
-                <summary class="muted">{(run.events || []).length} run events</summary>
-                <div class="list" style="margin-top:8px">
-                  {(run.events || []).map((event) => (
-                    <div class="muted">
-                      {new Date(event.createdAt).toLocaleTimeString()} · {esc(event.type)} · {esc(event.message)}
-                    </div>
-                  ))}
-                </div>
-              </details>
-            </article>
-          ))
+                {run.status === 'running' && (
+                  <button class="btn small" onClick={() => cancelRun(run.id)}>Cancel</button>
+                )}
+              </article>
+            );
+          })
           : <div class="empty">No runs have been executed in this workspace.</div>}
       </div>
     </>
@@ -428,89 +671,70 @@ export function RunsPage({ state, cancelRun }) {
 
 export function SettingsPage({ state, notify, refresh }) {
   const settings = state.settings;
-  const [provider, setProvider] = useState({
-    id: '', name: '', protocol: 'openai-compatible', baseUrl: '', models: '', defaultModel: '', enabled: true,
-  });
-  const [apiKey, setApiKey] = useState('');
   const [policy, setPolicy] = useState(settings);
+  const [provider, setProvider] = useState({ id: '', name: '', protocol: 'openai-compatible', baseUrl: '', models: '', defaultModel: '', enabled: true });
+  const [apiKey, setApiKey] = useState('');
 
   useEffect(() => { setPolicy(settings); }, [JSON.stringify(settings)]);
 
-  const providerConfig = () => ({
-    id: provider.id.trim(),
-    name: provider.name.trim(),
-    protocol: provider.protocol,
-    baseUrl: provider.baseUrl.trim(),
-    models: provider.models.split(',').map((s) => s.trim()).filter(Boolean),
-    defaultModel: provider.defaultModel.trim(),
-    enabled: provider.enabled,
-  });
+  const savePolicy = async (e) => {
+    e.preventDefault();
+    try {
+      await api('/api/settings', { method: 'PUT', body: JSON.stringify(policy) });
+      await refresh();
+      notify('Policy saved');
+    } catch (err) { notify(err.message); }
+  };
+  const setField = (f, v, numeric = false) => setPolicy((prev) => ({ ...prev, [f]: numeric ? Number(v) : v }));
 
-  const saveProvider = async (event) => {
-    event.preventDefault();
+  const providerConfig = () => ({
+    id: provider.id.trim(), name: provider.name.trim(), protocol: provider.protocol,
+    baseUrl: provider.baseUrl.trim(), models: provider.models.split(',').map((s) => s.trim()).filter(Boolean),
+    defaultModel: provider.defaultModel.trim(), enabled: provider.enabled,
+  });
+  const saveProvider = async (e) => {
+    e.preventDefault();
     try {
       await api('/api/providers', { method: 'POST', body: JSON.stringify({ config: providerConfig(), apiKey }) });
       setApiKey('');
       await refresh();
       notify('Provider saved');
-    } catch (error) {
-      notify(error.message);
-    }
+    } catch (err) { notify(err.message); }
   };
-
   const testProvider = async () => {
     try {
-      const result = await api('/api/providers/test', {
-        method: 'POST',
-        body: JSON.stringify({ config: providerConfig(), apiKey }),
-      });
-      notify(`Connected: ${result.model}`);
-    } catch (error) {
-      notify(error.message);
-    }
-  };
-
-  const savePolicy = async (event) => {
-    event.preventDefault();
-    try {
-      await api('/api/settings', { method: 'PUT', body: JSON.stringify(policy) });
-      await refresh();
-      notify('Policy saved');
-    } catch (error) {
-      notify(error.message);
-    }
-  };
-
-  const setPolicyField = (field, value, numeric = false) => {
-    setPolicy((prev) => ({ ...prev, [field]: numeric ? Number(value) : value }));
+      await api('/api/providers/test', { method: 'POST', body: JSON.stringify({ config: providerConfig(), apiKey }) });
+      notify(`Connected: ${provider.defaultModel}`);
+    } catch (err) { notify('Connection failed: ' + err.message); }
   };
 
   return (
     <>
-      <div class="head">
+      <div class="page-head">
         <div>
-          <div class="eyebrow">Workspace configuration</div>
-          <h1 class="title">Settings</h1>
-          <div class="sub">
-            Provider keys are stored separately with local file permissions. Runs use bounded
-            iteration, time, cost, approval, and tool-access policies.
-          </div>
+          <div class="eyebrow">Workspace controls</div>
+          <h1 class="page-title">Settings</h1>
+          <div class="page-sub">Set guardrails for how aggressively Foreman plans, spawns workers, and applies changes.</div>
         </div>
+        <button class="btn primary" onClick={savePolicy}><Icon name="check" />Save policy</button>
       </div>
+
       <div class="panel">
-        <h3>Providers and models</h3>
-        <p>Configure OpenAI-compatible or Anthropic endpoints. The connection test makes a real provider request.</p>
+        <h3 style="margin-top:0">Providers and models</h3>
+        <p class="section-note" style="margin-top:0">
+          Configure OpenAI-compatible or Anthropic endpoints. Connection tests make a real request.
+        </p>
         <form onSubmit={saveProvider}>
           <div class="settings-grid">
             <div class="field">
               <label>Provider ID</label>
-              <input required maxlength="80" placeholder="openai-compatible"
-                value={provider.id} onInput={(e) => setProvider({ ...provider, id: e.currentTarget.value })} />
+              <input required maxlength="80" placeholder="openai-compatible" value={provider.id}
+                onInput={(e) => setProvider({ ...provider, id: e.currentTarget.value })} />
             </div>
             <div class="field">
               <label>Display name</label>
-              <input required maxlength="120" placeholder="Local gateway"
-                value={provider.name} onInput={(e) => setProvider({ ...provider, name: e.currentTarget.value })} />
+              <input required maxlength="120" placeholder="Local gateway" value={provider.name}
+                onInput={(e) => setProvider({ ...provider, name: e.currentTarget.value })} />
             </div>
             <div class="field">
               <label>Protocol</label>
@@ -521,24 +745,24 @@ export function SettingsPage({ state, notify, refresh }) {
             </div>
             <div class="field">
               <label>Base URL</label>
-              <input required placeholder="http://127.0.0.1:11434/v1"
-                value={provider.baseUrl} onInput={(e) => setProvider({ ...provider, baseUrl: e.currentTarget.value })} />
+              <input required placeholder="http://127.0.0.1:11434/v1" value={provider.baseUrl}
+                onInput={(e) => setProvider({ ...provider, baseUrl: e.currentTarget.value })} />
             </div>
             <div class="field">
               <label>Model IDs (comma-separated)</label>
-              <input required placeholder="model-id"
-                value={provider.models} onInput={(e) => setProvider({ ...provider, models: e.currentTarget.value })} />
+              <input required placeholder="model-id" value={provider.models}
+                onInput={(e) => setProvider({ ...provider, models: e.currentTarget.value })} />
             </div>
             <div class="field">
               <label>Default model</label>
-              <input required placeholder="model-id"
-                value={provider.defaultModel} onInput={(e) => setProvider({ ...provider, defaultModel: e.currentTarget.value })} />
+              <input required placeholder="model-id" value={provider.defaultModel}
+                onInput={(e) => setProvider({ ...provider, defaultModel: e.currentTarget.value })} />
             </div>
           </div>
           <div class="field">
             <label>API key (optional for local models)</label>
-            <input type="password" autocomplete="new-password" placeholder="Leave blank to retain existing saved key"
-              value={apiKey} onInput={(e) => setApiKey(e.currentTarget.value)} />
+            <input type="password" autocomplete="new-password" placeholder="Leave blank to retain existing" value={apiKey}
+              onInput={(e) => setApiKey(e.currentTarget.value)} />
           </div>
           <label class="check">
             <input type="checkbox" checked={provider.enabled}
@@ -546,111 +770,100 @@ export function SettingsPage({ state, notify, refresh }) {
             <span>Enabled for task execution</span>
           </label>
           <div style="display:flex;gap:8px;margin-top:12px">
-            <button class="button" type="button" onClick={testProvider}>Test connection</button>
-            <button class="button primary" type="submit">Save provider</button>
+            <button class="btn" type="button" onClick={testProvider}>Test connection</button>
+            <button class="btn primary" type="submit">Save provider</button>
           </div>
         </form>
         <div class="list" style="margin-top:16px">
           {state.providers.length
-            ? state.providers.map((item) => (
-              <article class="room">
-                <div class="room-head">
-                  <h3>
-                    {esc(item.name)} <span class={`tag ${item.enabled ? 'green' : ''}`}>{item.enabled ? 'Enabled' : 'Disabled'}</span>
-                  </h3>
-                  <span class="tag">{esc(item.id)}</span>
+            ? state.providers.map((p) => (
+              <article class="room-row">
+                <div class={avatarClass(p.enabled ? 'green' : '')} style="border-radius:6px">{esc(p.name).slice(0, 2).toUpperCase()}</div>
+                <div class="room-main">
+                  <div class="room-title">{esc(p.name)}<span class={`tag ${p.enabled ? 'green' : ''}`}>{p.enabled ? 'Enabled' : 'Disabled'}</span></div>
+                  <div class="room-sub">{esc(p.protocol)} · {esc(p.baseUrl)}</div>
+                  <div class="room-foot"><span class="meta-text">{(p.models || []).join(', ')} · default {esc(p.defaultModel)} · {p.hasApiKey ? 'credential saved' : 'no credential'}</span></div>
                 </div>
-                <p>{esc(item.protocol)} · {esc(item.baseUrl)}</p>
-                <small>
-                  {(item.models || []).map(esc).join(', ')} · default {esc(item.defaultModel)} ·{' '}
-                  {item.hasApiKey ? 'credential saved' : 'no credential'}
-                </small>
               </article>
             ))
-            : <div class="empty">No providers configured.</div>}
+            : <div class="muted" style="font-size:11px">No providers configured.</div>}
         </div>
       </div>
 
       <div class="panel" style="margin-top:12px">
-        <h3>Execution policy and appearance</h3>
-        <p>
-          Maximum run concurrency is 1–8. Project commands (terminal) are only enabled when the
-          policy allows them; the engine otherwise works on files and tasks alone.
+        <h3 style="margin-top:0">Execution policy</h3>
+        <p class="section-note" style="margin-top:0">
+          Run concurrency is 1–8. Project commands are only enabled when the policy allows them.
         </p>
         <form onSubmit={savePolicy}>
           <div class="settings-grid">
             <div class="field">
               <label>Theme</label>
-              <select value={policy.theme} onChange={(e) => setPolicyField('theme', e.currentTarget.value)}>
-                <option>dark</option>
-                <option>light</option>
-                <option>system</option>
+              <select value={policy.theme} onChange={(e) => setField('theme', e.currentTarget.value)}>
+                <option value="dark">Dark</option>
+                <option value="light">Light</option>
+                <option value="system">System</option>
               </select>
             </div>
             <div class="field">
               <label>Effort mode</label>
-              <select value={policy.effortMode} onChange={(e) => setPolicyField('effortMode', e.currentTarget.value)}>
-                <option>automatic</option>
-                <option>manual</option>
+              <select value={policy.effortMode} onChange={(e) => setField('effortMode', e.currentTarget.value)}>
+                <option value="automatic">Automatic</option>
+                <option value="manual">Manual</option>
               </select>
             </div>
             <div class="field">
               <label>Default effort</label>
-              <select value={policy.defaultEffort} onChange={(e) => setPolicyField('defaultEffort', e.currentTarget.value)}>
-                <option>low</option>
-                <option>medium</option>
-                <option>high</option>
+              <select value={policy.defaultEffort} onChange={(e) => setField('defaultEffort', e.currentTarget.value)}>
+                <option value="low">Low</option>
+                <option value="medium">Medium</option>
+                <option value="high">High</option>
               </select>
             </div>
             <div class="field">
-              <label>Concurrent runs</label>
+              <label>Max concurrent runs</label>
               <input type="number" min="1" max="8" value={policy.maxConcurrentRuns}
-                onInput={(e) => setPolicyField('maxConcurrentRuns', e.currentTarget.value, true)} />
+                onInput={(e) => setField('maxConcurrentRuns', e.currentTarget.value, true)} />
             </div>
             <div class="field">
               <label>Max workers per task</label>
               <input type="number" min="1" max="8" value={policy.maxWorkersPerTask}
-                onInput={(e) => setPolicyField('maxWorkersPerTask', e.currentTarget.value, true)} />
+                onInput={(e) => setField('maxWorkersPerTask', e.currentTarget.value, true)} />
             </div>
             <div class="field">
               <label>Max delegation depth</label>
               <input type="number" min="0" max="5" value={policy.maxDelegationDepth}
-                onInput={(e) => setPolicyField('maxDelegationDepth', e.currentTarget.value, true)} />
+                onInput={(e) => setField('maxDelegationDepth', e.currentTarget.value, true)} />
             </div>
             <div class="field">
               <label>Max retries</label>
               <input type="number" min="0" max="5" value={policy.maxRetries}
-                onInput={(e) => setPolicyField('maxRetries', e.currentTarget.value, true)} />
+                onInput={(e) => setField('maxRetries', e.currentTarget.value, true)} />
             </div>
             <div class="field">
               <label>Run timeout (seconds)</label>
               <input type="number" min="10" max="3600" value={policy.maxExecutionSeconds}
-                onInput={(e) => setPolicyField('maxExecutionSeconds', e.currentTarget.value, true)} />
+                onInput={(e) => setField('maxExecutionSeconds', e.currentTarget.value, true)} />
             </div>
             <div class="field">
               <label>Budget (USD, 0 = unlimited)</label>
               <input type="number" min="0" step="0.01" value={policy.budgetUsd}
-                onInput={(e) => setPolicyField('budgetUsd', e.currentTarget.value, true)} />
+                onInput={(e) => setField('budgetUsd', e.currentTarget.value, true)} />
             </div>
           </div>
-          <label class="check">
+          <label class="check" style="margin-top:8px">
             <input type="checkbox" checked={policy.requireRunApproval}
-              onChange={(e) => setPolicyField('requireRunApproval', e.currentTarget.checked)} />
+              onChange={(e) => setField('requireRunApproval', e.currentTarget.checked)} />
             <span>Require explicit approval before runs</span>
           </label>
-          <br />
-          <label class="check">
+          <label class="check" style="margin-top:8px">
             <input type="checkbox" checked={policy.allowProjectCommands}
-              onChange={(e) => setPolicyField('allowProjectCommands', e.currentTarget.checked)} />
+              onChange={(e) => setField('allowProjectCommands', e.currentTarget.checked)} />
             <span>Allow project commands (terminal tool in the engine)</span>
           </label>
-          <button class="button primary" style="margin-top:12px">Save policy</button>
+          <button class="btn primary" style="margin-top:12px">Save policy</button>
         </form>
-        <div class="notice">
-          Runs are bounded by configured timeout, budget, and a 30-iteration engine cap. Delegation,
-          retries, and worker fan-out are not yet implemented.
-        </div>
-        <p style="margin-top:14px">
+        <p class="section-note" style="margin-top:14px">
           Workspace data: <code>.foreman/workspace.json</code> · API keys: <code>.foreman/credentials.json</code> (0600).
         </p>
       </div>

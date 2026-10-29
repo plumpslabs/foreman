@@ -1,25 +1,26 @@
-<div align="center">```text
+<p align="center">
+  <img src="publics/foreman.png" alt="Foreman" width="128" />
+</p>
+
+```text
 ███████╗ █████╗ ██████╗ ███╗   ██╗███████╗██╗   ██╗██╗  ██╗
 ██╔════╝██╔══██╗██╔══██╗████╗  ██║██╔════╝██║   ██║╚██╗██╔╝
-█████╗  ███████║██████║██╔██╗ ██║█████╗  ██║   ██║ ╚███╔╝ 
-██╔══╝  ██╔══██║██╔══██╗██║╚██╗██║██╔╝   ██║   ██║ ██╔██╗ 
+█████╗  ███████║██████║██╔██╗ ██║█████╗  ██║   ██║ ╚███╔╝
+██╔══╝  ██╔══██║██╔══██╗██║╚██╗██║██╔╝   ██║   ██║ ██╔██╗
 ██║     ██║  ██║██║  ██║██║ ╚████║███████╗╚██████╔╝██╔╝ ██╗
 ╚═╝     ╚═╝  ╚═╝╚═╝  ╚═╝╚═╝  ╚═══╝╚══════╝ ╚═════╝╚═╝  ╚═╝
 local-first agent workspace
-
-Foreman
 ```
 
-**Local-first agent workspace for teams of coding agents**
-*Rooms, Kanban, team templates, provider config, and bounded runs — driven by the open-source OpenHands engine, on your own machine.*
+<p align="center"><b>Foreman</b><br/>
+<em>Local-first agent workspace for teams of coding agents</em><br/>
+Rooms, Kanban, team templates, provider config, and bounded runs — driven by the open-source OpenHands engine, on your own machine.</p>
 
 <p align="center">
   <a href="https://github.com/plumpslabs/foreman/releases"><img src="https://img.shields.io/badge/release-latest-blue.svg?style=flat-square" alt="Release"></a>
   <a href="https://go.dev"><img src="https://img.shields.io/badge/go-1.26+-00ADD8.svg?style=flat-square&logo=go" alt="Go Version"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-green.svg?style=flat-square" alt="License"></a>
 </p>
-
-</div>
 
 ---
 
@@ -43,6 +44,15 @@ foreman start --no-open       # headless / remote terminal
 
 Foreman binds to `127.0.0.1` only, rejects cross-origin POSTs, and never starts an agent or an
 external request on its own.
+
+## Dashboard
+
+Open `http://127.0.0.1:8080/?project=<project-dir>` — the UI is room-centric:
+
+- **Left sidebar** — workspace navigation (Overview · Rooms · Teams · Agent library · Skills · Runs & activity · Settings)
+- **Rooms** — every room is an isolated work session with its own goal, invited teams, chat, and tasks
+- **Room detail** — toolbar, tabs (Chat · Kanban · Plan · Changes), and a right rail showing room team, task progress, live activity, and execution policy
+- **Kanban** lives *inside* each room, not as a global menu item — tasks are scoped to the room they belong to
 
 ## Architecture
 
