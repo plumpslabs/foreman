@@ -1,16 +1,16 @@
 # yaml-language-server: $schema=https://goreleaser.com/static/schema.json
 version: 2
 
-project_name: brocode
+project_name: foreman
 
 before:
   hooks:
     - go mod tidy
 
 builds:
-  - id: brocode
-    main: ./cmd/brocode
-    binary: brocode
+  - id: foreman
+    main: ./cmd/foreman
+    binary: foreman
     env:
       - CGO_ENABLED=0
     goos:
@@ -22,7 +22,7 @@ builds:
       - amd64
       - arm64
     ldflags:
-      - -s -w -X github.com/plumpslabs/bro-code/internal/version.Version={{.Version}}
+      - -s -w -X github.com/plumpslabs/foreman/internal/version.Version={{.Version}}
 
 archives:
   - name_template: >-
@@ -47,7 +47,7 @@ changelog:
 release:
   github:
     owner: plumpslabs
-    name: bro-code
+    name: foreman
   mode: replace
   replace_existing_artifacts: true
   replace_existing_draft: true

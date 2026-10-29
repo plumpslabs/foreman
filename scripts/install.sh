@@ -1,11 +1,14 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# BroCode Universal Installer
+# Foreman Universal Installer
 # Installs the latest binary release from GitHub to /usr/local/bin or ~/.local/bin
+#
+# Usage:
+#   curl -fsSL https://raw.githubusercontent.com/plumpslabs/foreman/main/scripts/install.sh | sh
 
-REPO="plumpslabs/bro-code"
-BINARY_NAME="brocode"
+REPO="plumpslabs/foreman"
+BINARY_NAME="foreman"
 
 # 1. Detect OS
 OS="$(uname -s | tr '[:upper:]' '[:lower:]')"
@@ -41,18 +44,20 @@ else
     mkdir -p "$INSTALL_DIR"
 fi
 
-echo "🚀 Installing BroCode for $OS/$ARCH into $INSTALL_DIR..."
+echo "🚀 Installing Foreman for $OS/$ARCH into $INSTALL_DIR..."
 
 # 4. Fetch latest release version
 LATEST_TAG=$(curl -s "https://api.github.com/repos/$REPO/releases/latest" | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/' || true)
 
-if [ -z "$LATEST_TAG" ]; then
-    LATEST_TAG="v0.1.59"
-fi
-
 EXT="tar.gz"
 if [ "$OS" = "windows" ]; then
     EXT="zip"
+fi
+
+if [ -z "$LATEST_TAG" ]; then
+    echo "⚠️ Could not resolve the latest release tag from GitHub."
+    echo "   Check https://github.com/$REPO/releases and re-run with a tag."
+    exit 1
 fi
 
 ARCHIVE_NAME="${BINARY_NAME}_${LATEST_TAG#v}_${OS}_${ARCH}.${EXT}"
@@ -93,7 +98,7 @@ if curl -sLf "$DOWNLOAD_URL" -o "$TMP_DIR/$ARCHIVE_NAME"; then
         echo "⚠️ checksums.txt not published; skipping verification"
     fi
     # GoReleaser wraps each archive in a per-build directory
-    # (e.g. brocode_0.1.3_darwin_arm64/brocode), so locate the binary rather
+    # (e.g. foreman_0.1.0_darwin_arm64/foreman), so locate the binary rather
     # than assuming it sits at the archive root. Handles .exe on Windows too.
     BIN=$(find "$TMP_DIR" -type f \( -name "$BINARY_NAME" -o -name "${BINARY_NAME}.exe" \) ! -name '*.txt' ! -name '*.md' ! -name 'LICENSE' | head -1)
     if [ -z "$BIN" ]; then
@@ -105,13 +110,13 @@ if curl -sLf "$DOWNLOAD_URL" -o "$TMP_DIR/$ARCHIVE_NAME"; then
         mv "$INSTALL_DIR/$BINARY_NAME" "$INSTALL_DIR/${BINARY_NAME}.exe" 2>/dev/null || true
     fi
     chmod +x "$INSTALL_DIR/$BINARY_NAME"
-    echo "✅ BroCode successfully installed to $INSTALL_DIR/$BINARY_NAME"
+    echo "✅ Foreman successfully installed to $INSTALL_DIR/$BINARY_NAME"
 else
     # Fallback to `go install` if pre-built binary is not yet available
     if command -v go >/dev/null 2>&1; then
         echo "⚠️ Binary download failed, compiling from source with Go..."
-        go install "github.com/$REPO/cmd/brocode@$LATEST_TAG"
-        echo "✅ Installed via Go to $(go env GOPATH)/bin/brocode"
+        go install "github.com/$REPO/cmd/foreman@$LATEST_TAG"
+        echo "✅ Installed via Go to $(go env GOPATH)/bin/foreman"
     else
         echo "❌ Failed to download prebuilt binary. Please check release availability or install with Go."
         exit 1
@@ -119,9 +124,22 @@ else
 fi
 
 # 5. Verify installation
-if command -v brocode >/dev/null 2>&1; then
-    brocode --version
+if command -v foreman >/dev/null 2>&1; then
+    foreman version || foreman --version || true
 else
     echo "💡 Note: Please ensure $INSTALL_DIR is in your PATH."
     echo "   export PATH=\"\$PATH:$INSTALL_DIR\""
+fi
+
+# 6. Runtime check: Foreman drives the OpenHands engine through Python.
+if command -v python3 >/dev/null 2>&1; then
+    if python3 -c "import openhands.sdk" >/dev/null 2>&1; then
+        echo "✅ OpenHands SDK available ($(python3 --version 2>&1))"
+    else
+        echo "⚠️ OpenHands SDK not installed yet. Foreman runs will prompt you to install it:"
+        echo "   python3 -m pip install openhands-sdk openhands-tools"
+    fi
+else
+    echo "⚠️ python3 not found. Foreman's agent engine requires Python 3.10+ with the OpenHands SDK."
+    echo "   Install Python, then: python3 -m pip install openhands-sdk openhands-tools"
 fi

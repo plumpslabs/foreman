@@ -33,14 +33,14 @@ func TestExtractFromZip(t *testing.T) {
 	buf := new(bytes.Buffer)
 	zw := zip.NewWriter(buf)
 
-	f, err := zw.Create("brocode.exe")
+	f, err := zw.Create("foreman.exe")
 	if err != nil {
 		t.Fatal(err)
 	}
 	f.Write([]byte("mock-binary-data"))
 	zw.Close()
 
-	data, err := extractFromZip(buf.Bytes(), "brocode.exe")
+	data, err := extractFromZip(buf.Bytes(), "foreman.exe")
 	if err != nil {
 		t.Fatalf("extractFromZip failed: %v", err)
 	}

@@ -15,7 +15,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/plumpslabs/bro-code/internal/foreman"
+	"github.com/plumpslabs/foreman/internal/foreman"
 )
 
 func main() {

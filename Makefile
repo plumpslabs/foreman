@@ -1,40 +1,35 @@
-# bro-code build tooling — minimal, but complete.
+# Foreman build tooling.
 #
-# Build injects version/commit/date via ldflags (see cmd/brocode/main.go).
+# Build injects version/commit/date via ldflags (see internal/version).
 
 GO      ?= go
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 COMMIT  ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo unknown)
 DATE    ?= $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
-LDFLAGS := -s -w -X main.version=$(VERSION) -X main.commit=$(COMMIT) -X main.date=$(DATE)
+LDFLAGS := -s -w -X github.com/plumpslabs/foreman/internal/version.Version=$(VERSION) -X github.com/plumpslabs/foreman/internal/version.Commit=$(COMMIT) -X github.com/plumpslabs/foreman/internal/version.Date=$(DATE)
 
-BINARY := bin/brocode
-FOREMAN_BINARY := bin/foreman
+BINARY := bin/foreman
 BINDIR ?= $(shell $(GO) env GOPATH)/bin
-FOREMAN_BINDIR ?= $(BINDIR)
 
-.PHONY: all build build-foreman build-all test race vet fmt fmt-check lint tidy check run run-foreman coverage bench measure install install-foreman uninstall uninstall-foreman clean help
+.PHONY: all build web test race vet fmt fmt-check lint tidy check run install uninstall clean help
 
 all: check build
 
-## build: compile binary for current platform
-build:
-	CGO_ENABLED=0 $(GO) build -trimpath -ldflags "$(LDFLAGS)" -o $(BINARY) ./cmd/brocode
+## build: compile binary for current platform (builds web UI first if missing)
+build: web
+	CGO_ENABLED=0 $(GO) build -trimpath -ldflags "$(LDFLAGS)" -o $(BINARY) ./cmd/foreman
 
-## build-foreman: compile the Foreman local workspace CLI
-build-foreman:
-	CGO_ENABLED=0 $(GO) build -trimpath -o $(FOREMAN_BINARY) ./cmd/foreman
+## web: build the embedded Preact dashboard into internal/foreman/web/dist
+web:
+	@if [ -f web/package.json ]; then \
+		cd web && npm ci --no-audit --no-fund 2>/dev/null || npm install --no-audit --no-fund; \
+		npm run build; \
+	else \
+		echo "web/package.json not found; skipping dashboard build"; \
+	fi
 
-## build-all: cross-compile for Linux, Windows, and macOS
-build-all:
-	GOOS=linux GOARCH=amd64 CGO_ENABLED=0 $(GO) build -trimpath -ldflags "$(LDFLAGS)" -o bin/brocode-linux-amd64 ./cmd/brocode
-	GOOS=linux GOARCH=arm64 CGO_ENABLED=0 $(GO) build -trimpath -ldflags "$(LDFLAGS)" -o bin/brocode-linux-arm64 ./cmd/brocode
-	GOOS=windows GOARCH=amd64 CGO_ENABLED=0 $(GO) build -trimpath -ldflags "$(LDFLAGS)" -o bin/brocode-windows-amd64.exe ./cmd/brocode
-	GOOS=darwin GOARCH=amd64 CGO_ENABLED=0 $(GO) build -trimpath -ldflags "$(LDFLAGS)" -o bin/brocode-darwin-amd64 ./cmd/brocode
-	GOOS=darwin GOARCH=arm64 CGO_ENABLED=0 $(GO) build -trimpath -ldflags "$(LDFLAGS)" -o bin/brocode-darwin-arm64 ./cmd/brocode
-
-## run-foreman: launch Foreman for the current project
-run-foreman:
+## run: launch Foreman for the current project
+run:
 	$(GO) run ./cmd/foreman start
 
 ## test: run unit tests
@@ -68,45 +63,23 @@ tidy:
 ## check: run vet + fmt-check (CI-friendly)
 check: vet fmt-check
 
-## run: launch the CLI directly
-run:
-	$(GO) run ./cmd/brocode
-
 ## coverage: run tests and open HTML coverage report
 coverage:
 	$(GO) test -race -coverprofile=coverage.out ./...
 	$(GO) tool cover -html=coverage.out
 
-## bench: run benchmarks with memory stats
-bench:
-	$(GO) test -bench=. -benchmem ./...
-
-## measure: binary size + startup performance (ritual from docs/TECH_STACK.md)
-measure: build
-	@ls -lh $(BINARY) | awk '{print "binary size:", $$5}'
-	@/usr/bin/time -p ./$(BINARY) --search mcp >/dev/null
-
 ## install: build and install to $(BINDIR) (default: ~/go/bin)
 install: build
 	install -d $(BINDIR)
-	install -m 0755 $(BINARY) $(BINDIR)/brocode
+	install -m 0755 $(BINARY) $(BINDIR)/foreman
 
-## install-foreman: build and install Foreman to $(FOREMAN_BINDIR)
-install-foreman: build-foreman
-	install -d $(FOREMAN_BINDIR)
-	install -m 0755 $(FOREMAN_BINARY) $(FOREMAN_BINDIR)/foreman
-
-## uninstall: remove installed BroCode CLI
+## uninstall: remove installed Foreman CLI
 uninstall:
-	rm -f $(BINDIR)/brocode
-
-## uninstall-foreman: remove installed Foreman CLI
-uninstall-foreman:
-	rm -f $(FOREMAN_BINDIR)/foreman
+	rm -f $(BINDIR)/foreman
 
 ## clean: remove build artifacts and coverage files
 clean:
-	rm -rf bin coverage.out *.test *.prof *.pprof *.trace
+	rm -rf bin coverage.out *.test *.prof *.pprof *.trace web/dist
 
 ## help: list available targets
 help:

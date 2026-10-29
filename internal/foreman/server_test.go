@@ -10,9 +10,6 @@ import (
 	"os"
 	"strings"
 	"testing"
-
-	"context"
-	"github.com/plumpslabs/bro-code/internal/tool"
 )
 
 func newTestServer(t *testing.T) (*Server, string) {
@@ -241,27 +238,6 @@ func TestTasksSettingsAndSkillsAPI(t *testing.T) {
 	}
 	if got := call(http.MethodPost, "/api/tasks/"+dependent.ID+"/run", `{}`); got.Code != http.StatusUnprocessableEntity {
 		t.Fatalf("blocked task run status = %d %s", got.Code, got.Body.String())
-	}
-}
-
-func TestWorkspaceBoundaryRejectsTraversalAndExternalSymlink(t *testing.T) {
-	root := t.TempDir()
-	outside := t.TempDir()
-	if err := os.Symlink(outside, root+"/linked"); err != nil {
-		t.Skip(err)
-	}
-	r := tool.NewRegistry()
-	if err := r.SetWorkspaceBoundary(root); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := r.Execute(context.Background(), "read_file", `{"path":"../outside.txt"}`); err == nil {
-		t.Fatal("expected traversal to be rejected")
-	}
-	if _, err := r.Execute(context.Background(), "write_file", `{"path":"linked/new.txt","content":"x"}`); err == nil {
-		t.Fatal("expected symlink escape to be rejected")
-	}
-	if _, err := os.Stat(outside + "/new.txt"); !os.IsNotExist(err) {
-		t.Fatal("escaped file was written")
 	}
 }
 

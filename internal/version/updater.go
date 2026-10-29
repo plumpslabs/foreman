@@ -20,7 +20,7 @@ import (
 
 const (
 	repoOwner = "plumpslabs"
-	repoName  = "bro-code"
+	repoName  = "foreman"
 )
 
 // VersionCache holds the cached latest release info.
@@ -31,10 +31,10 @@ type VersionCache struct {
 	DownloadURL string    `json:"download_url"`
 }
 
-// cacheFilePath returns ~/.config/brocode/version_cache.json
+// cacheFilePath returns ~/.config/foreman/version_cache.json
 func cacheFilePath() string {
 	home, _ := os.UserHomeDir()
-	return filepath.Join(home, ".config", "brocode", "version_cache.json")
+	return filepath.Join(home, ".config", "foreman", "version_cache.json")
 }
 
 // CheckLatestVersion checks GitHub Releases for the latest version with 12h local caching.
@@ -44,11 +44,11 @@ func CheckLatestVersion(ctx context.Context, forceRefresh bool) (string, bool, e
 		if data, err := os.ReadFile(cPath); err == nil {
 			var cache VersionCache
 			if json.Unmarshal(data, &cache) == nil {
-			if time.Since(cache.CheckedAt) < 12*time.Hour {
-				// Re-compare against current binary version so a stale "hasUpdate"
-				// from before an upgrade doesn't keep showing the notification.
-				return cache.LatestTag, isNewerVersion(cache.LatestTag, Version), nil
-			}
+				if time.Since(cache.CheckedAt) < 12*time.Hour {
+					// Re-compare against current binary version so a stale "hasUpdate"
+					// from before an upgrade doesn't keep showing the notification.
+					return cache.LatestTag, isNewerVersion(cache.LatestTag, Version), nil
+				}
 			}
 		}
 	}
@@ -57,7 +57,7 @@ func CheckLatestVersion(ctx context.Context, forceRefresh bool) (string, bool, e
 	if err != nil {
 		return "", false, err
 	}
-	req.Header.Set("User-Agent", "BroCode-Updater")
+	req.Header.Set("User-Agent", "Foreman-Updater")
 
 	client := &http.Client{Timeout: 10 * time.Second}
 	resp, err := client.Do(req)
@@ -145,14 +145,14 @@ func SelfUpdate(ctx context.Context, targetTag string) (string, error) {
 		ext = "zip"
 	}
 
-	archiveName := fmt.Sprintf("brocode_%s_%s_%s.%s", ver, osName, archName, ext)
+	archiveName := fmt.Sprintf("foreman_%s_%s_%s.%s", ver, osName, archName, ext)
 	downloadURL := fmt.Sprintf("https://github.com/%s/%s/releases/download/%s/%s", repoOwner, repoName, targetTag, archiveName)
 
 	req, err := http.NewRequestWithContext(ctx, "GET", downloadURL, nil)
 	if err != nil {
 		return "", err
 	}
-	req.Header.Set("User-Agent", "BroCode-Updater")
+	req.Header.Set("User-Agent", "Foreman-Updater")
 
 	client := &http.Client{Timeout: 60 * time.Second}
 	resp, err := client.Do(req)
@@ -172,9 +172,9 @@ func SelfUpdate(ctx context.Context, targetTag string) (string, error) {
 
 	var newBinary []byte
 	if ext == "zip" {
-		newBinary, err = extractFromZip(archiveData, "brocode.exe")
+		newBinary, err = extractFromZip(archiveData, "foreman.exe")
 	} else {
-		newBinary, err = extractFromTarGz(archiveData, "brocode")
+		newBinary, err = extractFromTarGz(archiveData, "foreman")
 	}
 	if err != nil {
 		return "", fmt.Errorf("failed to extract executable: %w", err)
@@ -206,7 +206,7 @@ func SelfUpdate(ctx context.Context, targetTag string) (string, error) {
 	// Cleanup old binary (best-effort)
 	_ = os.Remove(oldPath)
 
-	return fmt.Sprintf("✅ BroCode successfully upgraded to %s (%s)", targetTag, execPath), nil
+	return fmt.Sprintf("✅ Foreman successfully upgraded to %s (%s)", targetTag, execPath), nil
 }
 
 func extractFromZip(data []byte, targetName string) ([]byte, error) {

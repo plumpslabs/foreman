@@ -14,7 +14,6 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/plumpslabs/bro-code/internal/provider"
 )
 
 func validateProviderInput(id, name, protocol, rawURL, model string) error {
@@ -185,7 +184,7 @@ func testProvider(ctx context.Context, config ProviderConfig, secret string) err
 		}
 		return nil
 	}
-	models, err := provider.FetchOpenAIModels(config.BaseURL, secret)
+	models, err := fetchOpenAIModels(ctx, config.BaseURL, secret)
 	if err != nil {
 		return errors.New("provider connection failed; check the endpoint, network, and credentials")
 	}
@@ -195,4 +194,42 @@ func testProvider(ctx context.Context, config ProviderConfig, secret string) err
 		}
 	}
 	return fmt.Errorf("connection succeeded, but model %q was not returned by /models", config.DefaultModel)
+}
+
+// fetchOpenAIModels lists model IDs from an OpenAI-compatible GET /models
+// endpoint. Local implementation keeps Foreman's security surface self-contained.
+func fetchOpenAIModels(ctx context.Context, baseURL, apiKey string) ([]string, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(baseURL, "/")+"/models", nil)
+	if err != nil {
+		return nil, err
+	}
+	if apiKey != "" {
+		req.Header.Set("Authorization", "Bearer "+apiKey)
+	}
+	resp, err := (&http.Client{Timeout: 8 * time.Second}).Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("HTTP %d", resp.StatusCode)
+	}
+	var payload struct {
+		Data []struct {
+			ID string `json:"id"`
+		} `json:"data"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+		return nil, err
+	}
+	models := make([]string, 0, len(payload.Data))
+	seen := map[string]bool{}
+	for _, item := range payload.Data {
+		id := strings.TrimSpace(item.ID)
+		if id != "" && !seen[id] {
+			seen[id] = true
+			models = append(models, id)
+		}
+	}
+	return models, nil
 }
