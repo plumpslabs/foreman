@@ -101,6 +101,22 @@ gain a mode plus a file tree.
   the choice in the chat.
 - **Changes** — unified diffs from a room's runs render red/green with collapsible files.
 
+## Tool wiring and permissions
+
+An agent's `tools[]` is the real permission list. On a run Foreman resolves it server-side
+(`internal/foreman/tools.go`) into concrete OpenHands imports and passes them to the bridge:
+
+- `file_editor` → `FileEditorTool` (always ensured)
+- `task_tracker` → `TaskTrackerTool`
+- `terminal` → `TerminalTool` — dropped unless the workspace sets `allowProjectCommands`
+- `grep` / `glob` → `GrepTool` / `GlobTool`
+- `apply_patch` → `ApplyPatchTool`, `planning_editor` → `PlanningFileEditorTool`
+- `browser`, `subagents`, `workflow`, `ask_oracle`, `tom_consult`, `sleeptime` — optional; loaded
+  when the SDK install provides the package, otherwise skipped with a status event
+
+Legacy template names (`read`, `search`, `edit`, `run_tests`, `delegate`, …) are normalized to
+canonical ids on import and save, so old workspaces keep working.
+
 ## Permissions model (policy-based, reflected in UI)
 
 | Action | Who | Gate |
@@ -113,7 +129,7 @@ gain a mode plus a file tree.
 | Run concurrency | All | `maxConcurrentRuns` (1–8), enforced server-side |
 | Budget | Per workspace | `budgetUsd`; 0 = unlimited |
 | API keys | Admin only | stored 0600, never returned by API (only `hasApiKey`) |
-| Tool access | Per agent profile (tools[]) | enforced by bridge/runtime; dashboard shows which tools each agent may use |
+| Tool access | Per agent profile (tools[]) | resolved server-side and loaded into the OpenHands run; terminal is dropped unless `allowProjectCommands` |
 | Create / edit agent | Workspace owner | unique name, skill and provider references must exist |
 | Create / import skill | Workspace owner | relative paths only, 256 KiB per file, 1 MiB per bundle |
 | Switch skill mode | Workspace owner | active = context injection, passive = reference only |

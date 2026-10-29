@@ -450,6 +450,9 @@ func (s *Store) ImportTeam(templateID, name string) (Team, error) {
 		Agents: cloned.Agents, Instructions: cloned.Instructions,
 		CreatedAt: time.Now().UTC(),
 	}
+	for i := range t.Agents {
+		t.Agents[i].Tools = NormalizeToolIDs(t.Agents[i].Tools)
+	}
 	previous := s.state.Teams
 	s.state.Teams = append([]Team{t}, previous...)
 	if err := s.save(); err != nil {
@@ -558,6 +561,7 @@ func (s *Store) UpdateTeam(team Team) (Team, error) {
 			return Team{}, errors.New("agents must have unique names and non-empty names and roles")
 		}
 		seen[a.Name] = true
+		a.Tools = NormalizeToolIDs(a.Tools)
 		if a.Name == team.MainAgent {
 			mainFound = true
 		}
@@ -699,6 +703,7 @@ func (s *Store) SaveAgent(agent Agent) (Agent, error) {
 	agent.Description = strings.TrimSpace(agent.Description)
 	agent.Instructions = strings.TrimSpace(agent.Instructions)
 	agent.Model = strings.TrimSpace(agent.Model)
+	agent.Tools = NormalizeToolIDs(agent.Tools)
 	if agent.Name == "" || agent.Role == "" {
 		return Agent{}, errors.New("agent name and role are required")
 	}

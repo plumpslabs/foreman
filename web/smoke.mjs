@@ -126,6 +126,8 @@ view = window.document.body.innerHTML;
 for (const label of ['File editor', 'Terminal', 'Glob', 'Grep', 'Browser', 'Sub-agents']) {
   if (!view.includes(label)) failures.push(`tool catalog missing "${label}"`);
 }
+if (!view.includes('Wired')) failures.push('tool wired badge missing');
+if (!view.includes('Policy gated')) failures.push('terminal policy badge missing');
 
 // Skill detail page with a directory tree.
 click(byText('.nav-btn', 'Skills'));
@@ -170,6 +172,21 @@ if (!addProvider) {
   for (const label of ['Models (one per line', 'Discover models', 'Test connection']) {
     if (!view.includes(label)) failures.push(`provider modal missing "${label}"`);
   }
+  const modelArea = window.document.querySelector('.modal textarea.code-area');
+  if (modelArea && modelArea.value.trim() !== '') failures.push('new provider modal pre-filled models');
+}
+
+// Sidebar collapse toggle (desktop).
+const menuButton = window.document.querySelector('.mobile-menu');
+if (!menuButton) {
+  failures.push('sidebar toggle missing');
+} else {
+  click(menuButton);
+  await flush();
+  if (!window.document.querySelector('.app.collapsed')) failures.push('sidebar collapse did not apply');
+  click(menuButton);
+  await flush();
+  if (window.document.querySelector('.app.collapsed')) failures.push('sidebar did not expand again');
 }
 
 if (failures.length) {

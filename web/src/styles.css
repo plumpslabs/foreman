@@ -45,9 +45,22 @@ img { max-width: 100%; display: block; }
 .project-switch-name { font-size: 11px; font-weight: 650; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .project-switch-path { font-size: 10px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 
+/* Collapsed sidebar (desktop) */
+.app.collapsed { grid-template-columns: 68px minmax(0, 1fr); }
+.app.collapsed .brand { justify-content: center; padding: 0 8px; }
+.app.collapsed .brand-name,
+.app.collapsed .brand-tag,
+.app.collapsed .nav-label,
+.app.collapsed .nav-label-text,
+.app.collapsed .project-switch-text { display: none; }
+.app.collapsed .nav { padding: 12px 8px; }
+.app.collapsed .nav-btn { justify-content: center; padding: 11px 8px; }
+.app.collapsed .project-switch { justify-content: center; padding: 8px; }
+.app.collapsed .sidebar-bottom { padding: 10px 8px; }
+
 .main { min-width: 0; display: flex; flex-direction: column; overflow: hidden; }
 .topbar { height: 68px; flex-shrink: 0; border-bottom: 1px solid var(--line); display: flex; align-items: center; justify-content: space-between; padding: 0 24px; }
-.mobile-menu { display: none; background: transparent; border: 0; color: var(--muted); }
+.mobile-menu { display: grid; background: transparent; border: 0; color: var(--muted); }
 .mobile-menu svg { width: 18px; height: 18px; }
 .breadcrumb { display: flex; align-items: center; gap: 6px; color: var(--muted); font-size: 13px; min-width: 0; }
 .breadcrumb b { color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
@@ -630,6 +643,12 @@ select { cursor: pointer; }
 .field-label-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
 .field-label-row label { font-size: 11px; color: #c0c6d0; font-weight: 600; }
 .chip-default { border-color: #33432a; background: #192116; color: #c5e89b; }
+.chip-add {
+  display: inline-flex; align-items: center; gap: 4px; cursor: pointer;
+  font-family: inherit; color: #aeb6c2;
+}
+.chip-add:hover { border-color: #33432a; color: var(--accent); }
+.chip-add.on { border-color: #33432a; background: #192116; color: #c5e89b; }
 
 .test-result {
   display: flex; align-items: center; gap: 7px; margin-top: 12px; padding: 9px 11px;

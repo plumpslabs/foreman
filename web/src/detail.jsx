@@ -10,7 +10,7 @@ const esc = (s) => String(s ?? '');
 export const TOOL_CATALOG = [
   {
     id: 'file_editor', label: 'File editor', sdk: 'FileEditorTool', group: 'Core', wired: true,
-    desc: 'Create, view, and modify files in the workspace.',
+    desc: 'Create, view, and modify files in the workspace. Always loaded.',
   },
   {
     id: 'task_tracker', label: 'Task tracker', sdk: 'TaskTrackerTool', group: 'Core', wired: true,
@@ -18,46 +18,46 @@ export const TOOL_CATALOG = [
   },
   {
     id: 'terminal', label: 'Terminal', sdk: 'TerminalTool', group: 'Core', wired: true, gated: 'allowProjectCommands',
-    desc: 'Run shell commands, builds, and tests. Gated by the workspace "project commands" policy.',
+    desc: 'Run shell commands, builds, and tests. Dropped unless the workspace allows project commands.',
   },
   {
-    id: 'glob', label: 'Glob', sdk: 'GlobTool', group: 'Search', wired: false,
-    desc: 'Find files by glob pattern.',
-  },
-  {
-    id: 'grep', label: 'Grep', sdk: 'GrepTool', group: 'Search', wired: false,
+    id: 'grep', label: 'Grep', sdk: 'GrepTool', group: 'Search', wired: true,
     desc: 'Search file contents with regular expressions.',
   },
   {
-    id: 'apply_patch', label: 'Apply patch', sdk: 'ApplyPatchTool', group: 'Editing', wired: false,
+    id: 'glob', label: 'Glob', sdk: 'GlobTool', group: 'Search', wired: true,
+    desc: 'Find files by glob pattern.',
+  },
+  {
+    id: 'apply_patch', label: 'Apply patch', sdk: 'ApplyPatchTool', group: 'Editing', wired: true,
     desc: 'Apply unified diffs with exact line matching.',
   },
   {
-    id: 'planning_editor', label: 'Planning file editor', sdk: 'PlanningFileEditorTool', group: 'Editing', wired: false,
+    id: 'planning_editor', label: 'Planning file editor', sdk: 'PlanningFileEditorTool', group: 'Editing', wired: true,
     desc: 'Maintain a plan file across steps.',
   },
   {
-    id: 'browser', label: 'Browser', sdk: 'BrowserToolSet', group: 'Optional', wired: false,
-    desc: 'Navigate pages, read content, and interact with web UIs.',
+    id: 'browser', label: 'Browser', sdk: 'BrowserToolSet', group: 'Optional', wired: true, optional: true,
+    desc: 'Navigate pages and read content. Requires the browser-use package in the SDK install.',
   },
   {
-    id: 'subagents', label: 'Sub-agents', sdk: 'TaskToolSet', group: 'Orchestration', wired: false,
+    id: 'subagents', label: 'Sub-agents', sdk: 'TaskToolSet', group: 'Orchestration', wired: true, optional: true,
     desc: 'Delegate a bounded task to a child agent.',
   },
   {
-    id: 'workflow', label: 'Workflow', sdk: 'WorkflowToolSet', group: 'Orchestration', wired: false,
+    id: 'workflow', label: 'Workflow', sdk: 'WorkflowToolSet', group: 'Orchestration', wired: true, optional: true,
     desc: 'Run multi-step workflow definitions.',
   },
   {
-    id: 'ask_oracle', label: 'Ask oracle', sdk: 'AskOracleTool', group: 'Orchestration', wired: false,
+    id: 'ask_oracle', label: 'Ask oracle', sdk: 'AskOracleTool', group: 'Orchestration', wired: true, optional: true,
     desc: 'Ask a second model for a focused opinion.',
   },
   {
-    id: 'tom_consult', label: 'Consult (Tom)', sdk: 'TomConsultTool', group: 'Orchestration', wired: false,
+    id: 'tom_consult', label: 'Consult (Tom)', sdk: 'TomConsultTool', group: 'Orchestration', wired: true, optional: true,
     desc: 'Consult a deliberation model before acting.',
   },
   {
-    id: 'sleeptime', label: 'Sleeptime compute', sdk: 'SleeptimeComputeTool', group: 'Orchestration', wired: false,
+    id: 'sleeptime', label: 'Sleeptime compute', sdk: 'SleeptimeComputeTool', group: 'Orchestration', wired: true, optional: true,
     desc: 'Run background reasoning between steps.',
   },
 ];
@@ -301,8 +301,8 @@ export function AgentDetailPage({ agentId, state, notify, refresh, onBack }) {
             <div>
               <div class="detail-section-title">Allowed tools</div>
               <div class="section-note">
-                The OpenHands SDK ships these tools. A badge shows which ones Foreman's bridge wires today;
-                the rest are recorded as intent for the agent.
+                These tools are loaded into the OpenHands run for this agent. Terminal is dropped unless
+                the workspace allows project commands; optional tools load when the SDK install provides them.
               </div>
             </div>
           </div>
@@ -318,10 +318,9 @@ export function AgentDetailPage({ agentId, state, notify, refresh, onBack }) {
                       <span class="tool-name">
                         {esc(tool.label)}
                         <code>{esc(tool.sdk)}</code>
-                        {tool.wired
-                          ? <span class="tag green">Wired</span>
-                          : <span class="tag muted">SDK available</span>}
+                        <span class="tag green">Wired</span>
                         {tool.gated ? <span class="tag orange">Policy gated</span> : null}
+                        {tool.optional ? <span class="tag orange">Needs SDK extras</span> : null}
                       </span>
                       <span class="tool-desc">{esc(tool.desc)}</span>
                     </span>

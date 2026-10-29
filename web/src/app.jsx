@@ -81,6 +81,15 @@ export function App() {
   const [toast, setToast] = useState('');
   const toastTimer = useRef(0);
   const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+
+  const toggleSidebar = () => {
+    if (typeof window !== 'undefined' && window.innerWidth <= 760) {
+      setSidebarOpen((v) => !v);
+    } else {
+      setSidebarCollapsed((v) => !v);
+    }
+  };
 
   const notify = (message) => {
     setToast(message);
@@ -191,7 +200,7 @@ export function App() {
     : (NAV_PRIMARY.concat(NAV_SECONDARY).find(([key]) => key === parent) || ['home', 'Overview'])[1];
 
   const renderNav = (items) => items.map(([key, label, icon]) => (
-    <button class={`nav-btn ${parent === key ? 'active' : ''}`} onClick={() => navigate(key)}>
+    <button class={`nav-btn ${parent === key ? 'active' : ''}`} onClick={() => navigate(key)} title={label}>
       <Icon name={icon} />
       <span class="nav-label-text">{label}</span>
     </button>
@@ -240,7 +249,7 @@ export function App() {
             : pageLabel;
 
   return (
-    <div class={`app ${themeClass}`}>
+    <div class={`app ${themeClass} ${sidebarCollapsed ? 'collapsed' : ''}`}>
       <aside class={`sidebar ${sidebarOpen ? 'mobile-open' : ''}`} id="sidebar"
         onClick={(e) => { if (e.target.classList.contains('sidebar')) setSidebarOpen(false); }}>
         <div class="brand">
@@ -269,7 +278,8 @@ export function App() {
       <main class="main">
         <header class="topbar">
           <div style="display:flex;align-items:center;gap:10px;min-width:0">
-            <button class="icon-btn mobile-menu" onClick={() => setSidebarOpen((v) => !v)} aria-label="Toggle menu">
+            <button class="icon-btn mobile-menu" onClick={toggleSidebar}
+              aria-label={sidebarCollapsed ? 'Expand sidebar' : 'Collapse sidebar'}>
               <Icon name="menu" />
             </button>
             <div class="breadcrumb">

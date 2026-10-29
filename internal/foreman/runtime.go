@@ -111,6 +111,7 @@ func (rt *Runtime) execute(ctx context.Context, run AgentRun, task Task, room Ro
 	}
 
 	prompt := buildRunPrompt(room, task, team)
+	agentToolIDs := agentToolIDs(team, task)
 	req := EngineRequest{
 		Workspace:            rt.store.Snapshot().ProjectPath,
 		Prompt:               prompt,
@@ -118,6 +119,7 @@ func (rt *Runtime) execute(ctx context.Context, run AgentRun, task Task, room Ro
 		BaseURL:              config.BaseURL,
 		APIKey:               secret,
 		Model:                config.DefaultModel,
+		Tools:                ResolveEngineTools(agentToolIDs, settings.AllowProjectCommands),
 		MaxIterations:        30,
 		BudgetUSD:            settings.BudgetUSD,
 		AllowProjectCommands: settings.AllowProjectCommands,
@@ -218,6 +220,29 @@ func agentInstructions(team Team, name string) string {
 		}
 	}
 	return ""
+}
+
+// agentToolIDs returns the tool ids for the task's assigned agent, falling back
+// to the team's main agent.
+func agentToolIDs(team *Team, task Task) []string {
+	if team == nil {
+		return nil
+	}
+	target := task.AgentName
+	if target == "" {
+		target = team.MainAgent
+	}
+	for _, agent := range team.Agents {
+		if agent.Name == target {
+			return agent.Tools
+		}
+	}
+	for _, agent := range team.Agents {
+		if agent.Name == team.MainAgent {
+			return agent.Tools
+		}
+	}
+	return nil
 }
 
 func resultOrError(message string, err error) string {

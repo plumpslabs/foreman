@@ -174,19 +174,26 @@ def main():
     emit({"type": "status", "message": "OpenHands engine loaded, preparing workspace"})
 
     tools = []
-    file_tool = load_tool("openhands.tools.file_editor", "FileEditorTool")
-    if file_tool is None:
-        fail("OpenHands file editor tool could not be loaded; the engine install is incomplete")
-    tools.append(file_tool)
-    tracker = load_tool("openhands.tools.task_tracker", "TaskTrackerTool")
-    if tracker is not None:
-        tools.append(tracker)
-    if config.get("allowProjectCommands"):
-        terminal = load_tool("openhands.tools.terminal", "TerminalTool")
-        if terminal is None:
-            terminal = load_tool("openhands.tools.execute_bash", "TerminalTool")
-        if terminal is not None:
-            tools.append(terminal)
+    requested = config.get("tools") or []
+    for spec in requested:
+        if not isinstance(spec, dict):
+            continue
+        module = spec.get("module")
+        class_name = spec.get("class")
+        if not module or not class_name:
+            continue
+        tool = load_tool(module, class_name)
+        if tool is not None:
+            tools.append(tool)
+    if not tools:
+        file_tool = load_tool("openhands.tools.file_editor", "FileEditorTool")
+        if file_tool is None:
+            fail("OpenHands file editor tool could not be loaded; the engine install is incomplete")
+        tools.append(file_tool)
+        tracker = load_tool("openhands.tools.task_tracker", "TaskTrackerTool")
+        if tracker is not None:
+            tools.append(tracker)
+    emit({"type": "status", "message": "Loaded %d tools" % len(tools)})
 
     model = (config.get("model") or "").strip()
     protocol = config.get("protocol") or "openai-compatible"

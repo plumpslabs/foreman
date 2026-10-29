@@ -20,18 +20,26 @@ import (
 //go:embed bridge/agent_bridge.py
 var bridgeScript []byte
 
+// EngineTool is one OpenHands tool to load for a run.
+type EngineTool struct {
+	Name   string `json:"name"`
+	Module string `json:"module"`
+	Class  string `json:"class"`
+}
+
 // EngineRequest describes one bounded OpenHands run executed by the bridge.
 // JSON tags must match the config keys read by bridge/agent_bridge.py.
 type EngineRequest struct {
-	Workspace            string  `json:"workspace"`
-	Prompt               string  `json:"prompt"`
-	Protocol             string  `json:"protocol"`
-	BaseURL              string  `json:"baseUrl"`
-	APIKey               string  `json:"apiKey"`
-	Model                string  `json:"model"`
-	MaxIterations        int     `json:"maxIterations"`
-	BudgetUSD            float64 `json:"budgetUsd"`
-	AllowProjectCommands bool    `json:"allowProjectCommands"`
+	Workspace            string       `json:"workspace"`
+	Prompt               string       `json:"prompt"`
+	Protocol             string       `json:"protocol"`
+	BaseURL              string       `json:"baseUrl"`
+	APIKey               string       `json:"apiKey"`
+	Model                string       `json:"model"`
+	Tools                []EngineTool `json:"tools"`
+	MaxIterations        int          `json:"maxIterations"`
+	BudgetUSD            float64      `json:"budgetUsd"`
+	AllowProjectCommands bool         `json:"allowProjectCommands"`
 }
 
 // EngineEvent is one streamed update from the bridge process.

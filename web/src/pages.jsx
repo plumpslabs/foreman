@@ -946,9 +946,11 @@ function PresetCard({ preset, configured, onOpen }) {
 }
 
 function ProviderModal({ initial, isNew, onClose, notify, refresh }) {
-  const ordered = (initial?.models || []).length
+  const hasSavedModels = !isNew && (initial?.models || []).length > 0;
+  const ordered = hasSavedModels
     ? [initial.defaultModel, ...(initial.models || []).filter((m) => m !== initial.defaultModel)]
     : [];
+  const suggestions = isNew ? (initial?.models || []) : [];
   const [form, setForm] = useState({
     id: initial?.id || '',
     name: initial?.name || '',
@@ -965,6 +967,10 @@ function ProviderModal({ initial, isNew, onClose, notify, refresh }) {
   const set = (field, value) => setForm((prev) => ({ ...prev, [field]: value }));
   const models = modelsText.split(/[\n,]+/).map((m) => m.trim()).filter(Boolean);
   const defaultModel = models[0] || '';
+  const addModel = (model) => {
+    if (models.includes(model)) return;
+    setModelsText([...models, model].join('\n'));
+  };
 
   const config = () => ({
     id: (form.id || slugify(form.name)).trim(),
@@ -1076,10 +1082,22 @@ function ProviderModal({ initial, isNew, onClose, notify, refresh }) {
                 <Icon name="refresh" size={13} />{discovering ? 'Fetching…' : 'Discover models'}
               </button>
             </div>
-            <textarea class="code-area" style="min-height:130px" placeholder={'deepseek-v4.1-flash:free\nclaude-sonnet-5'}
+            {suggestions.length ? (
+              <div class="chip-row" style="margin-bottom:8px">
+                <span class="meta-text" style="margin-right:2px">Suggested:</span>
+                {suggestions.map((model) => (
+                  <button type="button" class={`chip chip-add ${models.includes(model) ? 'on' : ''}`}
+                    onClick={() => addModel(model)}>
+                    <Icon name="plus" size={11} />{esc(model)}
+                  </button>
+                ))}
+              </div>
+            ) : null}
+            <textarea class="code-area" style="min-height:130px"
+              placeholder={'One model id per line, e.g.\ndeepseek-v4.1-flash:free\nclaude-sonnet-5'}
               value={modelsText} onInput={(e) => setModelsText(e.currentTarget.value)} />
             <div class="md-hint">
-              {defaultModel ? `Default model: ${defaultModel}` : 'Add models to choose the default.'}
+              {defaultModel ? `Default model: ${defaultModel}` : 'Add models or pick a suggestion, then save.'}
             </div>
           </div>
 
