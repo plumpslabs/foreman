@@ -58,6 +58,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("DELETE /api/providers/{providerID}", s.deleteProvider)
 	mux.HandleFunc("GET /api/engine/status", s.engineStatus)
 	mux.HandleFunc("POST /api/engine/install", s.engineInstall)
+	mux.HandleFunc("POST /api/global/reset", s.resetGlobal)
 	mux.HandleFunc("PUT /api/settings", s.updateSettings)
 	mux.HandleFunc("POST /api/skills", s.saveSkill)
 	mux.HandleFunc("DELETE /api/skills/{skillID}", s.deleteSkill)
@@ -226,6 +227,26 @@ func (s *Server) engineStatus(w http.ResponseWriter, r *http.Request) {
 		"pythonVersion": diag.PythonVersion,
 		"pipAvailable":  diag.PipAvailable,
 	})
+}
+
+func (s *Server) resetGlobal(w http.ResponseWriter, r *http.Request) {
+	if err := s.verifyProject(r.URL.Query().Get("project")); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	var req struct {
+		Agents bool `json:"agents"`
+		Teams  bool `json:"teams"`
+	}
+	if err := decodeJSON(w, r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if err := s.store.ResetGlobalCollections(req.Agents, req.Teams); err != nil {
+		writeError(w, http.StatusUnprocessableEntity, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
 func (s *Server) engineInstall(w http.ResponseWriter, r *http.Request) {

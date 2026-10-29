@@ -217,8 +217,10 @@ export function App() {
       await refresh();
       notify(`Team "${template.name}" diimpor — ${(template.agents || []).length} agent`);
       openTeam(team.id);
+      return true;
     } catch (error) {
       notify(error.message);
+      return false;
     }
   };
 

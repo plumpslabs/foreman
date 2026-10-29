@@ -899,6 +899,7 @@ select { cursor: pointer; }
 
 .template-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(270px, 1fr)); gap: 14px; }
 .template-card { display: flex; flex-direction: column; }
+.template-err { margin-top: 8px; font-size: 11px; color: #ff9b9b; }
 .template-card .chip-row { margin-top: auto; }
 
 /* ---------- Room runtime status ---------- */

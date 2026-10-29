@@ -683,6 +683,8 @@ func (s *Store) AnswerRoomQuestion(roomID, questionID, answer string) (AgentQues
 	return AgentQuestion{}, fmt.Errorf("unknown room id %q", roomID)
 }
 
+// ImportTeam clones a template into a new team. Team members are copies; the
+// global agent library is left untouched to avoid duplication.
 func (s *Store) ImportTeam(templateID, name string) (Team, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -724,6 +726,20 @@ func (s *Store) ImportTeam(templateID, name string) (Team, error) {
 		return Team{}, err
 	}
 	return t, nil
+}
+
+// ResetGlobalCollections clears user-level collections so users can start
+// clean. Templates and providers are kept; agents/teams are the common reset.
+func (s *Store) ResetGlobalCollections(agents, teams bool) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if agents {
+		s.state.Agents = []Agent{}
+	}
+	if teams {
+		s.state.Teams = []Team{}
+	}
+	return s.save()
 }
 
 func normalizeSettings(v Settings) Settings {

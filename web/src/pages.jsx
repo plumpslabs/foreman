@@ -100,6 +100,7 @@ function RoomRow({ room, onOpen, runs, onDelete }) {
 
 function TemplateCard({ template, onUse }) {
   const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState('');
   return (
     <article class="team-card template-card">
       <div class="team-card-top">
@@ -117,8 +118,10 @@ function TemplateCard({ template, onUse }) {
       <button class="btn" style="width:100%;margin-top:auto" disabled={busy}
         onClick={async () => {
           setBusy(true);
+          setErr('');
           try {
-            await onUse(template);
+            const ok = await onUse(template);
+            if (!ok) setErr('Import gagal — lihat notifikasi.');
           } finally {
             setBusy(false);
           }
@@ -126,6 +129,7 @@ function TemplateCard({ template, onUse }) {
         {busy ? <span class="btn-spin"><Icon name="refresh" size={14} /></span> : <Icon name="plus" size={14} />}
         {busy ? 'Mengimpor…' : 'Use this template'}
       </button>
+      {err ? <div class="template-err">{esc(err)}</div> : null}
     </article>
   );
 }
@@ -1564,8 +1568,7 @@ function ProvidersTab({ state, onPreset, onEdit, onDelete, onToggle }) {
   );
 }
 
-function EngineCard({ notify }) {
-  const [status, setStatus] = useState(null);
+function EngineCard({ notify }) {  const [status, setStatus] = useState(null);
   const [busy, setBusy] = useState(false);
   const [reason, setReason] = useState('');
   const [log, setLog] = useState('');
@@ -1630,6 +1633,49 @@ function EngineCard({ notify }) {
           ) : null}
         </div>
       )}
+    </div>
+  );
+}
+
+function GlobalCleanCard({ notify, refresh }) {
+  const [busy, setBusy] = useState('');
+  const clean = async (kind) => {
+    if (!confirm(kind === 'agents'
+      ? 'Hapus SEMUA agent dari library global?'
+      : 'Hapus SEMUA team dari library global?')) return;
+    setBusy(kind);
+    try {
+      await api('/api/global/reset', {
+        method: 'POST',
+        body: JSON.stringify(kind === 'agents' ? { agents: true } : { teams: true }),
+      });
+      await refresh();
+      notify(kind === 'agents' ? 'Library agent dibersihkan' : 'Team dibersihkan');
+    } catch (error) {
+      notify(error.message);
+    } finally {
+      setBusy('');
+    }
+  };
+  return (
+    <div class="settings-card">
+      <div class="settings-card-head">
+        <div>
+          <h3>Bersihkan library global</h3>
+          <p>Agents &amp; teams tersimpan global dan dipakai semua project.</p>
+        </div>
+      </div>
+      <div style="display:flex;gap:8px">
+        <button class="btn" disabled={!!busy} onClick={() => clean('agents')}>
+          {busy === 'agents' ? 'Menghapus…' : 'Hapus semua agent'}
+        </button>
+        <button class="btn" disabled={!!busy} onClick={() => clean('teams')}>
+          {busy === 'teams' ? 'Menghapus…' : 'Hapus semua team'}
+        </button>
+      </div>
+      <div class="md-hint" style="margin-top:10px">
+        Templates, provider, dan settings tidak terpengaruh. Team yang sudah ada menyimpan salinan agentnya sendiri.
+      </div>
     </div>
   );
 }
@@ -1723,6 +1769,7 @@ export function SettingsPage({ state, notify, refresh }) {
       {tab === 'providers' && (
         <>
           <EngineCard notify={notify} />
+          <GlobalCleanCard notify={notify} refresh={refresh} />
           <ProvidersTab
             state={state}
             onPreset={openPreset}
