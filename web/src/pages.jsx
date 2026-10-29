@@ -1796,6 +1796,11 @@ export function SettingsPage({ state, notify, refresh }) {
                 onChange={(e) => setField('disableQuickReplies', e.currentTarget.checked)} />
               <span>Matikan quick-reply sapaan (semua pesan dijalankan agent)</span>
             </label>
+            <label class="check">
+              <input type="checkbox" checked={Boolean(policy.routeIntentsWithModel)}
+                onChange={(e) => setField('routeIntentsWithModel', e.currentTarget.checked)} />
+              <span>Routing intent dengan model (opsional — lebih akurat, tambah 1 request kecil per pesan)</span>
+            </label>
           </div>
         </div>
       )}

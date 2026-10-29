@@ -184,10 +184,11 @@ func (s *Store) GetOrCreateChatThread(roomID, content string) (Task, error) {
 		prompt = strings.TrimSpace(content)
 	}
 
-	// Reuse the existing (non-running) hidden thread so history is preserved.
+	// Reuse the existing non-running hidden thread for THIS agent so history is
+	// preserved per agent (one conversation per agent in a room).
 	for i := range s.state.Tasks {
 		t := &s.state.Tasks[i]
-		if t.RoomID == roomID && t.Hidden && t.Status != "running" {
+		if t.RoomID == roomID && t.Hidden && t.AgentName == agentName && t.Status != "running" {
 			previous := s.state.Tasks[i].Description
 			t.Description = prompt
 			t.UpdatedAt = time.Now().UTC()

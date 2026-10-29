@@ -268,6 +268,22 @@ func (s *Store) HasRunningRunForTask(taskID string) bool {
 	return false
 }
 
+// FirstEnabledProviderSecret returns the first enabled provider that has a saved
+// credential, with its secret. Used by optional model-backed routing.
+func (s *Store) FirstEnabledProviderSecret() (ProviderConfig, string, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for _, p := range s.state.Providers {
+		if !p.Enabled {
+			continue
+		}
+		if secret, err := s.loadProviderCredential(s.state.ProjectPath, p.ID); err == nil && secret != "" {
+			return p, secret, true
+		}
+	}
+	return ProviderConfig{}, "", false
+}
+
 // RoomRecentContext renders the most recent room chat and answered questions as
 // compact context so a chat run remembers what was said even across messages.
 func (s *Store) RoomRecentContext(roomID string) string {

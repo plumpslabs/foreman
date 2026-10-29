@@ -24,18 +24,19 @@ type WorkspaceState struct {
 }
 
 type Settings struct {
-	Theme                string  `json:"theme"`
-	EffortMode           string  `json:"effortMode"`
-	DefaultEffort        string  `json:"defaultEffort"`
-	MaxConcurrentRuns    int     `json:"maxConcurrentRuns"`
-	MaxWorkersPerTask    int     `json:"maxWorkersPerTask"`
-	MaxDelegationDepth   int     `json:"maxDelegationDepth"`
-	MaxRetries           int     `json:"maxRetries"`
-	MaxExecutionSeconds  int     `json:"maxExecutionSeconds"`
-	BudgetUSD            float64 `json:"budgetUsd"`
-	RequireRunApproval   bool    `json:"requireRunApproval"`
-	AllowProjectCommands bool    `json:"allowProjectCommands"`
-	DisableQuickReplies  bool    `json:"disableQuickReplies"`
+	Theme                 string  `json:"theme"`
+	EffortMode            string  `json:"effortMode"`
+	DefaultEffort         string  `json:"defaultEffort"`
+	MaxConcurrentRuns     int     `json:"maxConcurrentRuns"`
+	MaxWorkersPerTask     int     `json:"maxWorkersPerTask"`
+	MaxDelegationDepth    int     `json:"maxDelegationDepth"`
+	MaxRetries            int     `json:"maxRetries"`
+	MaxExecutionSeconds   int     `json:"maxExecutionSeconds"`
+	BudgetUSD             float64 `json:"budgetUsd"`
+	RequireRunApproval    bool    `json:"requireRunApproval"`
+	AllowProjectCommands  bool    `json:"allowProjectCommands"`
+	DisableQuickReplies   bool    `json:"disableQuickReplies"`
+	RouteIntentsWithModel bool    `json:"routeIntentsWithModel"`
 }
 
 type ProviderConfig struct {

@@ -56,22 +56,33 @@ func TestChatThreadMultiTeamMentionAndReuse(t *testing.T) {
 		t.Fatalf("mention not resolved across teams: %#v", task1)
 	}
 
-	// Later messages reuse the same hidden thread so memory persists.
-	task2, err := store.GetOrCreateChatThread(room.ID, "lanjutkan reviewnya")
+	// Later messages to the same agent reuse the same hidden thread so memory
+	// persists (per-agent history).
+	task2, err := store.GetOrCreateChatThread(room.ID, "@Vera lanjutkan reviewnya")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if task2.ID != task1.ID {
 		t.Fatalf("expected thread reuse (%s != %s)", task1.ID, task2.ID)
 	}
+
+	// A different agent gets its own thread (per-agent history).
+	task3, err := store.GetOrCreateChatThread(room.ID, "@Ferro cek error")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if task3.ID == task1.ID || task3.AgentName != "Ferro" {
+		t.Fatalf("expected separate thread for another agent: %#v", task3)
+	}
+
 	hidden := 0
 	for _, tk := range store.Snapshot().Tasks {
 		if tk.Hidden {
 			hidden++
 		}
 	}
-	if hidden != 1 {
-		t.Fatalf("expected exactly one hidden chat thread, got %d", hidden)
+	if hidden != 2 {
+		t.Fatalf("expected two hidden chat threads (one per agent), got %d", hidden)
 	}
 }
 

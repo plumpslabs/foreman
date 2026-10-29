@@ -190,6 +190,30 @@ func (s *Server) RuntimeEngineInstalled() (bool, string) {
 	return s.runtime.EngineInstalled()
 }
 
+// shouldLightReply decides whether a chat message should be answered locally
+// instead of running the agent. It uses the heuristic, or the configured
+// provider model when routeIntentsWithModel is enabled (falling back to the
+// heuristic on any router error).
+func (s *Server) shouldLightReply(content string) bool {
+	settings := s.store.Snapshot().Settings
+	if settings.DisableQuickReplies {
+		return false
+	}
+	fallback := classifyChatMessage(content) == chatLight
+	if !settings.RouteIntentsWithModel {
+		return fallback
+	}
+	cfg, secret, ok := s.store.FirstEnabledProviderSecret()
+	if !ok {
+		return fallback
+	}
+	kind, err := classifyWithModel(context.Background(), cfg, secret, content)
+	if err != nil {
+		return fallback
+	}
+	return kind == chatLight
+}
+
 func (s *Server) engineStatus(w http.ResponseWriter, r *http.Request) {
 	if err := s.verifyProject(r.URL.Query().Get("project")); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
@@ -274,8 +298,9 @@ func (s *Server) appendRoomMessage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// Short small talk is answered locally so a simple "halo" does not start an
-	// expensive OpenHands run. Can be disabled in Settings (disableQuickReplies).
-	if req.Role == "user" && !s.store.Snapshot().Settings.DisableQuickReplies && classifyChatMessage(req.Content) == chatLight {
+	// expensive OpenHands run. Can be disabled in Settings (disableQuickReplies);
+	// optional model-backed routing (routeIntentsWithModel) refines the decision.
+	if req.Role == "user" && s.shouldLightReply(req.Content) {
 		name := s.store.RoomMainAgentName(r.PathValue("roomID"))
 		if name == "" {
 			name = "Foreman"
