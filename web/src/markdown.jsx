@@ -1,6 +1,9 @@
 // Minimal, dependency-free markdown renderer for previews and chat bubbles.
-// Supports headings, fenced code, lists, blockquotes, rules, bold/italic,
-// inline code, and links. Raw HTML is never injected.
+// Supports headings, tables, fenced code, lists, blockquotes, rules,
+// bold/italic, inline code, and links. Raw HTML is never injected.
+
+import { useState } from 'preact/hooks';
+import { Icon } from './icons.jsx';
 
 const SAFE_HREF = /^(https?:\/\/|\/|#|mailto:)/i;
 
@@ -35,7 +38,35 @@ function inline(text, keyBase) {
   return out;
 }
 
-const BLOCK_START = /^(#{1,6}\s|```|>\s?|\s*[-*+]\s+|\s*\d+\.\s+)/;
+const BLOCK_START = /^(#{1,6}\s|```|>\s?|\s*[-*+]\s+|\s*\d+\.\s+|\s*\|)/;
+
+// A GFM delimiter row: | --- | :--: | ---: |
+const TABLE_DELIM = /^\s*\|?\s*:?-{1,}:?\s*(\|\s*:?-{1,}:?\s*)+\|?\s*$/;
+
+// Split one table row into its cells, unescaping \| so cells can contain pipes.
+function splitTableRow(line) {
+  let s = line.trim();
+  if (s.startsWith('|')) s = s.slice(1);
+  if (s.endsWith('|')) s = s.slice(0, -1);
+  const cells = [];
+  let cur = '';
+  for (let i = 0; i < s.length; i += 1) {
+    const ch = s[i];
+    if (ch === '\\' && s[i + 1] === '|') { cur += '|'; i += 1; continue; }
+    if (ch === '|') { cells.push(cur.trim()); cur = ''; continue; }
+    cur += ch;
+  }
+  cells.push(cur.trim());
+  return cells;
+}
+
+function tableAlign(cell) {
+  const left = cell.startsWith(':');
+  const right = cell.endsWith(':');
+  if (left && right) return 'center';
+  if (right) return 'right';
+  return 'left';
+}
 
 export function Markdown({ text, class: cls = '' }) {
   const lines = String(text || '').replace(/\r\n/g, '\n').split('\n');
@@ -127,13 +158,65 @@ export function Markdown({ text, class: cls = '' }) {
       continue;
     }
 
-    // Paragraph
+    // Table: header row + delimiter row + body rows. Tables used to be
+    // swallowed by the paragraph branch and joined with spaces, which is how a
+    // report ended up as one unreadable wall of pipes.
+    if (line.includes('|') && i + 1 < lines.length && TABLE_DELIM.test(lines[i + 1])) {
+      const header = splitTableRow(line);
+      const aligns = splitTableRow(lines[i + 1]).map(tableAlign);
+      i += 2;
+      const rows = [];
+      while (i < lines.length && lines[i].trim() && lines[i].includes('|') && !TABLE_DELIM.test(lines[i])) {
+        rows.push(splitTableRow(lines[i]));
+        i += 1;
+      }
+      const cols = Math.max(header.length, ...rows.map((r) => r.length), 1);
+      const cellAlign = (n) => (aligns[n] && aligns[n] !== 'left' ? ` md-a-${aligns[n]}` : '');
+      const pad = (cells) => {
+        const out = cells.slice(0, cols);
+        while (out.length < cols) out.push('');
+        return out;
+      };
+      blocks.push(
+        <div key={key++} class="md-table-wrap">
+          <table class="md-table">
+            <thead>
+              <tr>
+                {pad(header).map((c, n) => (
+                  <th key={n} class={cellAlign(n)}>{inline(c, `th${key}-${n}`)}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((row, rn) => (
+                <tr key={rn}>
+                  {pad(row).map((c, cn) => (
+                    <td key={cn} class={cellAlign(cn)}>{inline(c, `td${key}-${rn}-${cn}`)}</td>
+                  ))}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>,
+      );
+      continue;
+    }
+
+    // Paragraph. Stop when a table begins even if there is no blank line
+    // before it — reports commonly put the header right under a sentence.
     const buffer = [];
-    while (i < lines.length && lines[i].trim() && !BLOCK_START.test(lines[i])) {
+    while (
+      i < lines.length
+      && lines[i].trim()
+      && !BLOCK_START.test(lines[i])
+      && !(lines[i].includes('|') && i + 1 < lines.length && TABLE_DELIM.test(lines[i + 1]))
+    ) {
       buffer.push(lines[i]);
       i += 1;
     }
-    if (!buffer.length) { i += 1; continue; }
+    // BLOCK_START can match a line no branch above handles (e.g. a stray "|"
+    // with no delimiter row after it). Emit it instead of dropping it.
+    if (!buffer.length) { buffer.push(lines[i]); i += 1; }
     blocks.push(<p key={key++} class="md-p">{inline(buffer.join(' '), `p${key}`)}</p>);
   }
 
@@ -141,6 +224,35 @@ export function Markdown({ text, class: cls = '' }) {
     return <div class={`md md-empty ${cls}`}>Nothing to preview yet.</div>;
   }
   return <div class={`md ${cls}`}>{blocks}</div>;
+}
+
+// Write/Preview editor used wherever agents or humans edit markdown (agent
+// instructions, task descriptions). Lives here so every surface gets the same
+// preview instead of falling back to a raw textarea.
+export function MarkdownEditor({ value, onInput, placeholder, minHeight = 260, label = 'Markdown' }) {
+  const [mode, setMode] = useState('write');
+  return (
+    <div class="md-editor">
+      <div class="md-editor-bar">
+        <span class="md-editor-label"><Icon name="file-text" size={12} />{label}</span>
+        <div class="seg">
+          <button type="button" class={`seg-btn ${mode === 'write' ? 'on' : ''}`} onClick={() => setMode('write')}>Write</button>
+          <button type="button" class={`seg-btn ${mode === 'preview' ? 'on' : ''}`} onClick={() => setMode('preview')}>Preview</button>
+        </div>
+      </div>
+      {mode === 'preview'
+        ? <div class="md-preview" style={`min-height:${minHeight}px`}><Markdown text={value} /></div>
+        : (
+          <textarea
+            class="code-area md-textarea"
+            style={`min-height:${minHeight}px`}
+            placeholder={placeholder}
+            value={value}
+            onInput={(e) => onInput(e.currentTarget.value)}
+          />
+        )}
+    </div>
+  );
 }
 
 export const STARTER_INSTRUCTIONS = `# Role

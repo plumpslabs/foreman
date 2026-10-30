@@ -1,6 +1,7 @@
 import { useState } from 'preact/hooks';
 import { api } from './api.js';
 import { Icon } from './icons.jsx';
+import { Markdown, MarkdownEditor } from './markdown.jsx';
 
 const esc = (s) => String(s ?? '');
 
@@ -60,7 +61,6 @@ export function ModalHost({ modal, setModal, state, notify, refresh, deleteSkill
       {kind === 'task-detail' && (
         <TaskDetail room={state.rooms.find((r) => r.id === modal.roomId)} state={state} task={modal.task}
           onClose={onClose} notify={notify} refresh={refresh}
-          onEdit={() => setModal({ kind: 'task', roomId: modal.roomId, task: modal.task })}
           onRun={(id) => { onClose(); if (runTask) runTask(id); }} />
       )}
       {kind === 'skill-import' && <SkillImportForm onClose={onClose} notify={notify} refresh={refresh} />}
@@ -216,8 +216,6 @@ function TaskForm({ room, state, onClose, notify, refresh, task }) {
   const [busy, setBusy] = useState(false);
   if (!room) return null;
   const editing = !!task;
-  const available = state.tasks.filter((t) => t.roomId === room.id && t.id !== (task?.id || ''));
-  const teams = state.teams.filter((t) => room.teamIds.includes(t.id));
 
   const set = (f, v) => setForm((p) => ({ ...p, [f]: v }));
 
@@ -259,6 +257,24 @@ function TaskForm({ room, state, onClose, notify, refresh, task }) {
   return (
     <Backdrop onClose={onClose} title={editing ? 'Edit task' : 'Create room task'}
       submitLabel={editing ? 'Save changes' : 'Create task'} onSubmit={submit} busy={busy}>
+      <TaskFormFields form={form} set={set} room={room} state={state} task={task} />
+      <div class="notice">
+        {editing
+          ? 'Changes apply immediately. Move work through status transitions from the task detail panel.'
+          : 'Tasks and dependencies are persisted in this room. Work starts when you click Run.'}
+      </div>
+    </Backdrop>
+  );
+}
+
+// The shared field block, used by the create/edit modal and by the task detail
+// panel when it flips into edit mode (so editing never needs a second modal).
+function TaskFormFields({ form, set, room, state, task }) {
+  const editing = !!task;
+  const available = state.tasks.filter((t) => t.roomId === room.id && t.id !== (task?.id || ''));
+  const teams = state.teams.filter((t) => room.teamIds.includes(t.id));
+  return (
+    <>
       <div class="field">
         <label>Task title</label>
         <input required maxlength="200" placeholder="Implement a bounded change"
@@ -266,8 +282,9 @@ function TaskForm({ room, state, onClose, notify, refresh, task }) {
       </div>
       <div class="field">
         <label>Description</label>
-        <textarea maxlength="16000" placeholder="What should be done and verified?"
-          value={form.description} onInput={(e) => set('description', e.currentTarget.value)} />
+        <MarkdownEditor value={form.description} minHeight={180}
+          placeholder="What should be done and verified?"
+          onInput={(v) => set('description', v)} />
       </div>
       <div class="settings-grid">
         <div class="field">
@@ -297,19 +314,26 @@ function TaskForm({ room, state, onClose, notify, refresh, task }) {
           </select>
         </div>
       </div>
-      <div class="notice">
-        {editing
-          ? 'Changes apply immediately. Move work through status transitions from the task detail panel.'
-          : 'Tasks and dependencies are persisted in this room. Work starts when you click Run.'}
-      </div>
-    </Backdrop>
+    </>
   );
 }
 
 /* ---------- Task detail (read-only, rich) ---------- */
 
-function TaskDetail({ room, state, task, onClose, notify, refresh, onEdit, onRun }) {
+function TaskDetail({ room, state, task, onClose, notify, refresh, onRun }) {
   const [busy, setBusy] = useState(false);
+  // Editing flips this same modal into a form and back. Swapping to a separate
+  // edit modal threw away the rich detail view (tags, evidence, status) and
+  // forced the user through two stacked dialogs for one change.
+  const [editing, setEditing] = useState(false);
+  const [form, setForm] = useState(() => ({
+    title: task?.title || '',
+    description: task?.description || '',
+    priority: normalizePriority(task?.priority),
+    effort: task?.effort || (state.settings && state.settings.defaultEffort) || 'medium',
+    teamId: task?.teamId || '',
+    dependencies: task?.dependencies || [],
+  }));
   if (!room || !task) return null;
   const teams = state.teams || [];
   const team = teams.find((t) => t.id === task.teamId);
@@ -319,6 +343,10 @@ function TaskDetail({ room, state, task, onClose, notify, refresh, onEdit, onRun
     return d ? d.title : id;
   });
   const startable = task.status === 'todo' || task.status === 'backlog';
+  const set = (f, v) => setForm((p) => ({ ...p, [f]: v }));
+  // A <form> wrapper while editing gives Enter-to-save and a real submit
+  // button; in read-only mode it stays a plain div.
+  const Shell = editing ? 'form' : 'div';
 
   const setStatus = async (status) => {
     setBusy(true);
@@ -329,69 +357,112 @@ function TaskDetail({ room, state, task, onClose, notify, refresh, onEdit, onRun
     } catch (e) { notify(e.message); } finally { setBusy(false); }
   };
 
+  const save = async (e) => {
+    e.preventDefault();
+    setBusy(true);
+    try {
+      await api('/api/tasks/' + encodeURIComponent(task.id), {
+        method: 'PUT',
+        body: JSON.stringify({
+          title: form.title,
+          description: form.description,
+          priority: form.priority,
+          effort: form.effort,
+          dependencies: form.dependencies,
+        }),
+      });
+      notify('Task updated');
+      await refresh();
+      setEditing(false);
+    } catch (err) { notify(err.message); } finally { setBusy(false); }
+  };
+
   return (
     <div class="modal-backdrop open" onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}>
-      <div class="modal modal-lg">
+      <Shell class="modal modal-lg" onSubmit={editing ? save : undefined}>
         <header class="modal-head">
           <div>
-            <h3 style="margin:0">{esc(task.title)}</h3>
+            <h3 style="margin:0">{esc(editing ? form.title || task.title : task.title)}</h3>
             <div style="display:flex;gap:6px;margin-top:8px;flex-wrap:wrap">
               <span class={`tag ${task.status === 'done' ? 'green' : task.status === 'blocked' ? 'orange' : task.status === 'review' ? 'blue' : ''}`}>{esc(task.status)}</span>
-              <span class={`tag ${priorityColor(task.priority)}`}>priority: {esc(priorityLabel(task.priority))}</span>
-              <span class="tag">effort: {esc(task.effort)}</span>
+              <span class={`tag ${priorityColor(editing ? form.priority : task.priority)}`}>priority: {esc(priorityLabel(editing ? form.priority : task.priority))}</span>
+              <span class="tag">effort: {esc(editing ? form.effort : task.effort)}</span>
               {task.agentName && <span class="tag blue">@ {esc(task.agentName)}</span>}
               {team && <span class="tag">team: {esc(team.name)}</span>}
               {task.hidden && <span class="tag">chat thread</span>}
               {task.retryCount > 0 && <span class="tag orange">rework ×{task.retryCount}</span>}
+              {editing && <span class="tag orange">editing</span>}
             </div>
           </div>
           <button type="button" class="icon-btn" aria-label="Close" onClick={onClose}><Icon name="x" /></button>
         </header>
-        <div class="modal-body">
-          <div class="field">
-            <label>Description</label>
-            <div style="white-space:pre-wrap;font-size:13px;line-height:1.6;background:var(--bg-subtle);padding:10px;border-radius:6px">
-              {esc(task.description || 'No description.')}
+        {editing ? (
+          <div class="modal-body">
+            <TaskFormFields form={form} set={set} room={room} state={state} task={task} />
+            <div class="notice">
+              Editing in place — status stays under your control in the footer. Save applies the changes and returns to the detail view.
             </div>
           </div>
-          {depTitles.length > 0 && (
+        ) : (
+          <div class="modal-body">
             <div class="field">
-              <label>Dependencies</label>
-              <div style="display:flex;flex-direction:column;gap:4px;align-items:flex-start">
-                {depTitles.map((t) => <span class="tag" key={t}>{esc(t)}</span>)}
-              </div>
+              <label>Description</label>
+              {task.description
+                ? (
+                  <div class="md-preview" style="padding:12px 14px;border:1px solid var(--line);border-radius:8px">
+                    <Markdown text={task.description} />
+                  </div>
+                )
+                : <div class="notice meta-text">No description.</div>}
             </div>
-          )}
-          {task.evidence && (
-            <div class="field">
-              <label>Evidence</label>
-              <div style="background:var(--bg-subtle);padding:10px;border-radius:6px;font-size:12px;word-break:break-word;white-space:pre-wrap">
-                {esc(task.evidence)}
+            {depTitles.length > 0 && (
+              <div class="field">
+                <label>Dependencies</label>
+                <div style="display:flex;flex-direction:column;gap:4px;align-items:flex-start">
+                  {depTitles.map((t) => <span class="tag" key={t}>{esc(t)}</span>)}
+                </div>
               </div>
+            )}
+            {task.evidence && (
+              <div class="field">
+                <label>Evidence</label>
+                <div style="background:var(--bg-subtle);padding:10px;border-radius:6px;font-size:12px;word-break:break-word;white-space:pre-wrap">
+                  {esc(task.evidence)}
+                </div>
+              </div>
+            )}
+            <div class="notice meta-text">
+              Created {task.createdAt ? new Date(task.createdAt).toLocaleString() : '—'} · Updated {task.updatedAt ? new Date(task.updatedAt).toLocaleString() : '—'}
+              · id {esc(task.id)}
             </div>
-          )}
-          <div class="notice meta-text">
-            Created {task.createdAt ? new Date(task.createdAt).toLocaleString() : '—'} · Updated {task.updatedAt ? new Date(task.updatedAt).toLocaleString() : '—'}
-            · id {esc(task.id)}
           </div>
-        </div>
+        )}
         <footer class="modal-foot">
-          <div style="display:flex;gap:8px;align-items:center;margin-right:auto">
-            <select class="select small" value={task.status === 'backlog' ? 'todo' : task.status} disabled={busy}
-              onChange={(e) => setStatus(e.currentTarget.value)}>
-              <option value="todo">Backlog</option>
-              <option value="in_progress">In progress</option>
-              <option value="review">Review</option>
-              <option value="blocked">Blocked</option>
-              <option value="done">Done</option>
-              <option value="cancelled">Cancelled</option>
-            </select>
-            {startable && <button type="button" class="btn primary small" disabled={busy} onClick={() => onRun(task.id)}>Run</button>}
-          </div>
-          <button type="button" class="btn" onClick={onEdit}>Edit</button>
-          <button type="button" class="btn primary" onClick={onClose}>Close</button>
+          {editing ? (
+            <>
+              <button type="button" class="btn" disabled={busy} onClick={() => setEditing(false)}>Back to details</button>
+              <button type="submit" class="btn primary" disabled={busy}>Save changes</button>
+            </>
+          ) : (
+            <>
+              <div style="display:flex;gap:8px;align-items:center;margin-right:auto">
+                <select class="select small" value={task.status === 'backlog' ? 'todo' : task.status} disabled={busy}
+                  onChange={(e) => setStatus(e.currentTarget.value)}>
+                  <option value="todo">Backlog</option>
+                  <option value="in_progress">In progress</option>
+                  <option value="review">Review</option>
+                  <option value="blocked">Blocked</option>
+                  <option value="done">Done</option>
+                  <option value="cancelled">Cancelled</option>
+                </select>
+                {startable && <button type="button" class="btn primary small" disabled={busy} onClick={() => onRun(task.id)}>Run</button>}
+              </div>
+              <button type="button" class="btn" onClick={() => setEditing(true)}>Edit</button>
+              <button type="button" class="btn primary" onClick={onClose}>Close</button>
+            </>
+          )}
         </footer>
-      </div>
+      </Shell>
     </div>
   );
 }

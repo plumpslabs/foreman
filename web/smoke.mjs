@@ -20,6 +20,11 @@ const workspace = {
     messages: [
       { id: 'm1', role: 'agent', agentName: 'Quick Coordinator', content: 'saya siap', createdAt: new Date().toISOString() },
       { id: 'm2', role: 'agent', agentName: 'Implementer', content: 'OpenHands SDK is not installed in this Python environment. pip install openhands-sdk', createdAt: new Date().toISOString() },
+      {
+        id: 'm3', role: 'agent', agentName: 'Implementer',
+        content: 'Root cause — 3 bugs found:\n\n| # | Location | Issue |\n| :-- | --- | --: |\n| A | `ticket-helpers.ts:335` | stale `awaitingResponse` keeps it yellow |\n| B | `BoardCard.tsx:117` | bypasses `getWaitingSide()` |\n',
+        createdAt: new Date().toISOString(),
+      },
     ],
     createdAt: new Date().toISOString(),
     questions: [{ id: 'q1', prompt: 'Proceed with the refactor?', options: ['Yes', 'No'], answer: '', createdAt: new Date().toISOString() }],
@@ -91,6 +96,13 @@ let view = window.document.body.innerHTML;
 for (const label of ['Chat', 'Kanban', 'Plan', 'Changes', 'Task progress', 'Execution policy', 'Room team']) {
   if (!view.includes(label)) failures.push(`room detail missing "${label}"`);
 }
+// Markdown tables must render as real tables, not a wall of pipes.
+if (!window.document.querySelector('.md-table thead th')) failures.push('markdown table header missing');
+const tableCells = [...window.document.querySelectorAll('.md-table tbody td')].map((el) => el.textContent.trim());
+if (!tableCells.some((t) => t.includes('ticket-helpers.ts:335'))) failures.push('markdown table cells missing');
+if (!window.document.querySelector('.md-table .md-a-right')) failures.push('table column alignment missing');
+if (view.includes('|---|') || view.includes('| --: |')) failures.push('table delimiter row leaked as raw text');
+
 if (!view.includes('Running')) failures.push('room runtime status missing');
 // Stop-only UX: a running agent is stopped, never paused from the room view.
 if (view.includes('Pause run')) failures.push('pause control should be removed (stop-only UX)');
@@ -168,6 +180,42 @@ if (!window.document.querySelector('.changes-layout')) failures.push('diff viewe
 if (!window.document.querySelector('.changes-tree')) failures.push('changed-files tree missing');
 if (!view.includes('src/app.js')) failures.push('diff file path missing');
 if (!view.includes('Split') || !view.includes('Unified')) failures.push('diff view-mode toggle missing');
+
+// Task detail: editing happens inside the SAME modal (view <-> edit), never in
+// a second stacked dialog, and the description previews as markdown.
+click(byText('.room-tab', 'Kanban'));
+await flush();
+const boardCard = window.document.querySelector('.board-task');
+if (!boardCard) {
+  failures.push('kanban card missing');
+} else {
+  click(boardCard);
+  await flush();
+  if (window.document.querySelectorAll('.modal-backdrop').length !== 1) failures.push('task detail did not open exactly one modal');
+  if (!window.document.querySelector('.modal .md-preview')) failures.push('task description is not rendered as markdown');
+  const editBtn = byText('.modal-foot .btn', 'Edit');
+  if (!editBtn) {
+    failures.push('task edit button missing');
+  } else {
+    click(editBtn);
+    await flush();
+    if (window.document.querySelectorAll('.modal-backdrop').length !== 1) {
+      failures.push('edit must reuse the open modal instead of stacking a second one');
+    }
+    if (!window.document.querySelector('.modal .md-editor')) failures.push('edit mode markdown editor missing');
+    const backBtn = byText('.modal-foot .btn', 'Back to details');
+    if (!backBtn) {
+      failures.push('edit mode lacks a back-to-details action');
+    } else {
+      click(backBtn);
+      await flush();
+      if (window.document.querySelectorAll('.modal-backdrop').length !== 1) failures.push('returning from edit changed the modal');
+      if (!window.document.querySelector('.modal .md-preview')) failures.push('back did not restore the detail view');
+    }
+  }
+  const closeBtn = window.document.querySelector('.modal-head .icon-btn');
+  if (closeBtn) { click(closeBtn); await flush(); }
+}
 
 const back = window.document.querySelector('[aria-label="Back to rooms"]');
 if (!back) {

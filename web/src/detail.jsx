@@ -1,7 +1,7 @@
 import { useState } from 'preact/hooks';
 import { api } from './api.js';
 import { Icon } from './icons.jsx';
-import { Markdown, STARTER_INSTRUCTIONS } from './markdown.jsx';
+import { Markdown, MarkdownEditor, STARTER_INSTRUCTIONS } from './markdown.jsx';
 import { AgentAvatar } from './avatar.jsx';
 
 const esc = (s) => String(s ?? '');
@@ -215,32 +215,6 @@ function DetailShell({ kicker, title, subtitle, tabs, tab, onTab, onBack, action
         ))}
       </div>
       <div class="detail-body">{children}</div>
-    </div>
-  );
-}
-
-function MarkdownEditor({ value, onInput, placeholder, minHeight = 260 }) {
-  const [mode, setMode] = useState('write');
-  return (
-    <div class="md-editor">
-      <div class="md-editor-bar">
-        <span class="md-editor-label"><Icon name="file-text" size={12} />Markdown</span>
-        <div class="seg">
-          <button type="button" class={`seg-btn ${mode === 'write' ? 'on' : ''}`} onClick={() => setMode('write')}>Write</button>
-          <button type="button" class={`seg-btn ${mode === 'preview' ? 'on' : ''}`} onClick={() => setMode('preview')}>Preview</button>
-        </div>
-      </div>
-      {mode === 'preview'
-        ? <div class="md-preview" style={`min-height:${minHeight}px`}><Markdown text={value} /></div>
-        : (
-          <textarea
-            class="code-area md-textarea"
-            style={`min-height:${minHeight}px`}
-            placeholder={placeholder}
-            value={value}
-            onInput={(e) => onInput(e.currentTarget.value)}
-          />
-        )}
     </div>
   );
 }

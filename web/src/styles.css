@@ -730,6 +730,26 @@ select { cursor: pointer; }
   background: #12160f; color: #c8d3bd; border-radius: 0 8px 8px 0;
 }
 .md-hr { border: 0; border-top: 1px solid var(--line); margin: 14px 0; }
+/* Tables: bordered, zebra-striped and horizontally scrollable so a wide report
+   stays readable inside a chat bubble instead of wrapping into a pipe wall. */
+.md-table-wrap {
+  max-width: 100%; overflow-x: auto; margin: 0 0 12px;
+  border: 1px solid var(--line); border-radius: 8px; background: #0d1014;
+}
+.md-table { border-collapse: collapse; width: 100%; font-size: 12.5px; }
+.md-table th, .md-table td {
+  padding: 7px 11px; text-align: left; vertical-align: top;
+  border-bottom: 1px solid var(--line); line-height: 1.55;
+}
+.md-table th {
+  background: #141920; color: var(--accent); font-weight: 650; white-space: nowrap;
+}
+.md-table tbody tr:last-child td { border-bottom: 0; }
+.md-table tbody tr:nth-child(even) td { background: rgba(255, 255, 255, 0.02); }
+.md-table tbody tr:hover td { background: rgba(199, 243, 107, 0.06); }
+.md-table code { white-space: nowrap; }
+.md-a-center { text-align: center; }
+.md-a-right { text-align: right; }
 .md a { color: var(--blue); text-decoration: none; }
 .md a:hover { text-decoration: underline; }
 .md strong { color: #fff; }
