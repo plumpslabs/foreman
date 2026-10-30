@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -29,11 +30,12 @@ type RunEngine interface {
 }
 
 type Runtime struct {
-	store        *Store
-	engine       RunEngine
-	mu           sync.Mutex
-	active       map[string]*activeRun
-	semaphore    chan struct{}
+	store       *Store
+	engine      RunEngine
+	mu          sync.Mutex
+	active      map[string]*activeRun
+	activeCount int
+	// watchdogStop halts the background heartbeat watchdog.
 	watchdogStop chan struct{}
 	stopOnce     sync.Once
 }
@@ -43,8 +45,12 @@ func NewRuntime(st *Store) *Runtime {
 		store:        st,
 		engine:       NewADKEngine(st),
 		active:       map[string]*activeRun{},
-		semaphore:    make(chan struct{}, 8),
 		watchdogStop: make(chan struct{}),
+	}
+	// Wake queued spawned/review tasks the moment they are enqueued, instead of
+	// waiting for another run to finish. EnqueueAutoStart fires this hook.
+	if st != nil {
+		st.SetOnAutoStart(func() { go rt.drainAutoStart() })
 	}
 	rt.startWatchdog()
 	return rt
@@ -115,13 +121,25 @@ func (rt *Runtime) StartTask(parent context.Context, taskID string) (AgentRun, e
 	if limit < 1 {
 		limit = 1
 	}
-	select {
-	case rt.semaphore <- struct{}{}:
-	default:
+	if limit > 8 {
+		limit = 8
+	}
+	// Reserve a concurrency slot, honoring the configured run limit. activeCount
+	// is the real cap (the old fixed-size semaphore ignored the setting).
+	rt.mu.Lock()
+	if rt.activeCount >= limit {
+		rt.mu.Unlock()
 		return AgentRun{}, errors.New("maximum concurrent Foreman runs reached")
 	}
+	rt.activeCount++
+	rt.mu.Unlock()
+	release := func() {
+		rt.mu.Lock()
+		rt.activeCount--
+		rt.mu.Unlock()
+	}
 	if err := rt.store.MarkTaskRunning(taskID); err != nil {
-		<-rt.semaphore
+		release()
 		return AgentRun{}, err
 	}
 	run := AgentRun{
@@ -135,7 +153,7 @@ func (rt *Runtime) StartTask(parent context.Context, taskID string) (AgentRun, e
 		Events:    []RunEvent{{ID: uuid.NewString(), Type: "status", Message: "Agent runtime started", CreatedAt: time.Now().UTC()}},
 	}
 	if err := rt.store.CreateRun(run); err != nil {
-		<-rt.semaphore
+		release()
 		_, _ = rt.store.UpdateTaskStatus(taskID, "todo", false)
 		return AgentRun{}, err
 	}
@@ -151,7 +169,7 @@ func (rt *Runtime) StartTask(parent context.Context, taskID string) (AgentRun, e
 			rt.mu.Lock()
 			delete(rt.active, run.ID)
 			rt.mu.Unlock()
-			<-rt.semaphore
+			release()
 			// Wake any spawned/delegated tasks now that a run slot is free.
 			go rt.drainAutoStart()
 		}()
@@ -191,7 +209,7 @@ func (rt *Runtime) drainAutoStart() {
 		}
 		_, err := rt.StartTask(context.Background(), id)
 		if err != nil && strings.Contains(err.Error(), "maximum concurrent") {
-			rt.store.EnqueueAutoStart(id)
+			rt.store.requeueAutoStart(id)
 			return
 		}
 		if err != nil {
@@ -249,36 +267,48 @@ func (rt *Runtime) execute(ctx context.Context, control *RunControl, run AgentRu
 		return run
 	}
 
-	prompt := buildRunPrompt(room, task, team, skillsContext(team, task, rt.store.Snapshot().Skills))
+	agentToolIDs := agentToolIDs(team, task)
+	prompt := buildRunPrompt(room, task, team, skillsContext(team, task, rt.store.Snapshot().Skills), agentToolIDs)
 	if mcpServers := rt.store.MCPServersByIDs(room.MCPServerIDs); len(mcpServers) > 0 {
 		names := make([]string, 0, len(mcpServers))
 		for _, srv := range mcpServers {
 			names = append(names, srv.Name)
 		}
 		prompt += "\n\n## External tools (MCP)\nServers available in this room: " + strings.Join(names, ", ") +
-			".\nTheir tools are exposed as `mcp__<server>_<tool>`. Use them when they are the right tool for the job (e.g. querying a connected service, database, or documentation) instead of guessing or fabricating data."
+			".\nTheir tools are exposed as `mcp__<server>_<tool>`. Use them when they are the right tool for the job (e.g. querying a connected service, database, or documentation) instead of guessing or fabricating data." +
+			"\nIf a context/memory server (e.g. Kuma) is listed, call its read/init action for the project FIRST (e.g. `mcp__kuma_kuma_context` with action=`init`, then `research` on the area you are about to touch) before editing unfamiliar code."
 	}
-	if task.Hidden {
-		if recent := rt.store.RoomRecentContext(room.ID); recent != "" {
-			prompt += "\n\n## Recent room conversation\n\n" + recent
-		}
+	// Every run — chat threads and delegated/spawned tasks alike — gets the
+	// recent room conversation so the agent keeps context of what was said.
+	if recent := rt.store.RoomRecentContext(room.ID); recent != "" {
+		prompt += "\n\n## Recent room conversation\n\n" + recent
 	}
 	_ = rt.store.AppendRoomNotice(room.ID, task.AgentName, "run.started",
 		fmt.Sprintf("🚀 @%s started working on: %s", task.AgentName, task.Title))
 	slog.Info("run started", "room", room.ID[:8], "task", task.ID[:8], "agent", task.AgentName)
-	agentToolIDs := agentToolIDs(team, task)
 	snapshot := rt.store.Snapshot()
 	primaryModel, fallbackModels := resolveModelChain(config, team, task)
 
 	var result EngineResult
 	var lastErr error
-	maxRetries := 3
+	maxRetries := settings.MaxRetries
+	if maxRetries < 1 {
+		maxRetries = 3
+	}
 	attempt := 0
 	attemptsUsed := 0
 
+	// Model chain cycles across attempts so a rate-limited primary model is not
+	// retried with itself: attempt 0 uses the primary, attempt 1 the first
+	// fallback, and so on, wrapping around.
+	modelChain := append([]string{primaryModel}, fallbackModels...)
+	if len(modelChain) == 0 || modelChain[0] == "" {
+		modelChain = []string{config.DefaultModel}
+	}
+
 	for ; attempt <= maxRetries; attempt++ {
 		if attempt > 0 {
-			backoff := time.Duration(1<<attempt) * time.Second
+			backoff := backoffForAttempt(lastErr, attempt)
 			_ = rt.store.RecordActivity(room.ID, task.AgentName, "retry",
 				fmt.Sprintf("⚠️ Run attempt %d failed (%v). Retrying in %v...", attempt, lastErr, backoff),
 				nil)
@@ -287,10 +317,9 @@ func (rt *Runtime) execute(ctx context.Context, control *RunControl, run AgentRu
 			time.Sleep(backoff)
 		}
 
-		// Escalate to the next fallback model on retries when available.
-		modelForAttempt := primaryModel
-		if attempt > 0 && len(fallbackModels) >= attempt {
-			modelForAttempt = fallbackModels[attempt-1]
+		// Rotate to the next model in the chain on every retry.
+		modelForAttempt := modelChain[attempt%len(modelChain)]
+		if attempt > 0 && modelForAttempt != primaryModel {
 			_ = rt.store.AppendRoomNotice(room.ID, task.AgentName, "run.model_escalate",
 				fmt.Sprintf("🔁 Retry %d using model %s", attempt, modelForAttempt))
 		}
@@ -312,7 +341,7 @@ func (rt *Runtime) execute(ctx context.Context, control *RunControl, run AgentRu
 			AllowedTools:         agentToolIDs,
 			PersistenceDir:       filepath.Join(snapshot.ProjectPath, ".foreman", "agent-conversations"),
 			MCPServerIDs:         room.MCPServerIDs,
-			ConversationID:       task.ID,
+			ConversationID:       conversationID(room.ID, task),
 			MaxIterations:        30,
 			BudgetUSD:            settings.BudgetUSD,
 			AllowProjectCommands: settings.AllowProjectCommands,
@@ -440,7 +469,7 @@ func parseAgentQuestions(message string) []AgentQuestion {
 	return questions
 }
 
-func buildRunPrompt(room Room, task Task, team *Team, skills string) string {
+func buildRunPrompt(room Room, task Task, team *Team, skills string, allowedTools []string) string {
 	tier := room.TriageTier
 	if tier == "" {
 		tier = "standard"
@@ -510,26 +539,11 @@ func buildRunPrompt(room Room, task Task, team *Team, skills string) string {
 ## Delegation rules:
 - You are the coordinator when teammates are present. Rely on the team: use spawn_agent with the exact member name from the Team Roster (e.g. debugger, reviewer, planner roles) instead of doing specialist work yourself.
 - Delegation creates a real Kanban task; give the teammate a clear title and description including file paths and acceptance criteria.
-- If a delegation tool errors, retry once with an unassigned create_task (omit agent_name) so the work is not lost, then note the failure in your summary.
-
-## Available Autonomous Tools (exact names):
-- create_task: create a task card on Kanban (assigns to you if agent_name omitted).
-- update_task: move task card (todo/in_progress/review/blocked/done/cancelled).
-- claim_task: claim an open task card atomically.
-- list_tasks: list current tasks on the board.
-- finish_task: MUST call this when finishing a task to record results, changed files, and evidence! Never just say done in chat without calling finish_task.
-- spawn_agent: delegate work to a teammate agent (creates a Kanban task for them).
-- create_plan: save plan checklist and diagram nodes/edges to the Plan tab.
-- send_message: message teammates in mailbox.
-- ask_human: if you encounter ambiguity or require confirmation, do NOT make assumptions—call ask_human and wait. Set severity (info|warning|blocker) so it is triaged correctly.
-- escalate: report blockers to supervisor. Set severity (info|warning|blocker); blocker halts, warning needs a decision soon, info is FYI.
-- run_checks: run test/lint commands (only available when project commands are allowed).
-- git_ops: inspect git diff/status, or commit changes (commit requires human confirmation).
-- memory: read/write shared cross-agent memory.
-- register_panel: register custom UI panels (table, markdown, chart, kanban, diagram).`
+- If a delegation tool errors, retry once with an unassigned create_task (omit agent_name) so the work is not lost, then note the failure in your summary.`
 
 	sections = append(sections,
 		triageGuidance,
+		advertisedToolsSection(allowedTools),
 		"Work only on this task. Keep changes within the active project workspace. Report what changed and what you verified.",
 		`## Agent contract (summary; full reference in AGENT_CONTRACT.md)
 - Language: reply in the same language as the user's latest message.
@@ -785,4 +799,120 @@ func resolveModelChain(config ProviderConfig, team *Team, task Task) (string, []
 		fallbacks = candidates[1:]
 	}
 	return primary, fallbacks
+}
+
+// conversationID scopes a run's conversation to the room + agent rather than a
+// single task, so repeated prompts in the same room keep the same thread.
+func conversationID(roomID string, task Task) string {
+	if task.AgentName == "" {
+		return roomID
+	}
+	return roomID + ":" + task.AgentName
+}
+
+// backoffForAttempt returns how long to wait before retrying a failed run. It
+// honors a "Retry-After" hint in the provider error when present, otherwise it
+// backs off exponentially (2s, 4s, 8s, ...) capped at 30s.
+func backoffForAttempt(err error, attempt int) time.Duration {
+	if attempt < 1 {
+		attempt = 1
+	}
+	if secs, ok := parseRetryAfter(err); ok {
+		d := time.Duration(secs) * time.Second
+		if d > 60*time.Second {
+			d = 60 * time.Second
+		}
+		if d < time.Second {
+			d = time.Second
+		}
+		return d
+	}
+	d := time.Duration(1<<attempt) * time.Second
+	if d > 30*time.Second {
+		d = 30 * time.Second
+	}
+	return d
+}
+
+// parseRetryAfter extracts a seconds hint from an error string such as
+// "retry-after: 20" or "retry after 20 seconds".
+func parseRetryAfter(err error) (int, bool) {
+	if err == nil {
+		return 0, false
+	}
+	text := strings.ToLower(err.Error())
+	idx := strings.Index(text, "retry-after")
+	marker := len("retry-after")
+	if idx < 0 {
+		idx = strings.Index(text, "retry after")
+		marker = len("retry after")
+	}
+	if idx < 0 {
+		return 0, false
+	}
+	rest := text[idx+marker:]
+	rest = strings.TrimLeft(rest, " :=\t")
+	digits := ""
+	for _, r := range rest {
+		if r >= '0' && r <= '9' {
+			digits += string(r)
+			continue
+		}
+		break
+	}
+	if digits == "" {
+		return 0, false
+	}
+	n, convErr := strconv.Atoi(digits)
+	if convErr != nil || n <= 0 {
+		return 0, false
+	}
+	return n, true
+}
+
+// autonomousToolDocs is the single source of truth for how Foreman tools are
+// described to agents. advertisedToolsSection prints only the ones actually
+// registered for this run, so the prompt never promises a tool the agent lacks.
+var autonomousToolDocs = []struct{ name, doc string }{
+	{"create_task", "create a task card on Kanban (assigns to you if agent_name omitted)."},
+	{"update_task", "move a task card (todo/in_progress/review/blocked/done/cancelled) or edit its title/description/priority/effort."},
+	{"claim_task", "claim an open task card atomically."},
+	{"list_tasks", "list current tasks on the board."},
+	{"delete_task", "delete a task card."},
+	{"finish_task", "MUST call this when finishing a task to record results, changed files, and evidence! Never just say done in chat without calling finish_task."},
+	{"spawn_agent", "delegate work to a teammate agent (creates a Kanban task for them)."},
+	{"request_spawn", "ask the lead/supervisor to spawn a teammate (workers only)."},
+	{"create_plan", "save plan checklist and diagram nodes/edges to the Plan tab."},
+	{"delete_plan", "remove a saved plan."},
+	{"send_message", "message teammates in mailbox."},
+	{"ask_human", "if you encounter ambiguity or require confirmation, do NOT make assumptions—call ask_human and wait. Set severity (info|warning|blocker) so it is triaged correctly."},
+	{"escalate", "report blockers to supervisor. Set severity (info|warning|blocker); blocker halts, warning needs a decision soon, info is FYI."},
+	{"run_checks", "run test/lint commands (only available when project commands are allowed)."},
+	{"diagnose", "run read-only vet/build/test/lint for the detected language."},
+	{"git_ops", "inspect git diff/status, or commit changes (commit requires human confirmation)."},
+	{"memory", "read/write shared cross-agent memory."},
+	{"repo_map", "get a compact repository topology before exploring unfamiliar code."},
+	{"search_index", "full-text search across indexed source files."},
+	{"register_panel", "register custom UI panels (table, markdown, chart, kanban, diagram)."},
+}
+
+// advertisedToolsSection renders the "Available Autonomous Tools" list from the
+// tools that are actually registered for this run (see allowedADKToolNames).
+func advertisedToolsSection(allowedTools []string) string {
+	registered := allowedADKToolNames(allowedTools)
+	var b strings.Builder
+	b.WriteString("## Available Autonomous Tools (exact names, only the ones listed here are wired up):\n")
+	any := false
+	for _, d := range autonomousToolDocs {
+		if !registered[d.name] {
+			continue
+		}
+		any = true
+		fmt.Fprintf(&b, "- %s: %s\n", d.name, d.doc)
+	}
+	if !any {
+		b.WriteString("- (none beyond the core set)\n")
+	}
+	b.WriteString("\nDo not attempt to call a tool that is not in this list; if a capability is missing, work with the tools you have or escalate.")
+	return b.String()
 }

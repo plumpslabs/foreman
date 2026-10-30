@@ -307,13 +307,15 @@ func (s *Store) GetOrCreateChatThread(roomID, content string) (Task, error) {
 
 	team, agentName, prompt := resolveChatMentions(content, invitedTeams)
 
-	// Reuse the existing hidden thread for THIS agent only when it is idle in
-	// "todo" (after a finished/cancelled run the hidden thread resets to todo).
-	// Other states create a fresh thread so a weird state can never block a new
-	// prompt or clobber a running conversation.
+	// Reuse the existing hidden thread for THIS agent when it is idle — a fresh
+	// "todo" thread, or one paused/continued from a prior message — so a room
+	// keeps a single conversation per agent instead of spawning duplicate
+	// threads. A thread that is actively running is guarded separately in
+	// StartChatRun; review/done threads are not reused.
 	for i := range s.state.Tasks {
 		t := &s.state.Tasks[i]
-		if t.RoomID == roomID && t.Hidden && t.AgentName == agentName && t.Status == "todo" {
+		if t.RoomID == roomID && t.Hidden && t.AgentName == agentName &&
+			(t.Status == "todo" || t.Status == "in_progress" || t.Status == "paused") {
 			previous := s.state.Tasks[i].Description
 			t.Description = prompt
 			t.UpdatedAt = time.Now().UTC()

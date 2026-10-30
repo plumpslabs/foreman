@@ -62,10 +62,14 @@ type createTaskArgs struct {
 }
 
 type updateTaskArgs struct {
-	TaskID   string `json:"task_id"`
-	Status   string `json:"status"`
-	Severity string `json:"severity,omitempty"`
-	Approved bool   `json:"approved"`
+	TaskID      string `json:"task_id"`
+	Status      string `json:"status,omitempty"`
+	Severity    string `json:"severity,omitempty"`
+	Title       string `json:"title,omitempty"`
+	Description string `json:"description,omitempty"`
+	Priority    string `json:"priority,omitempty"`
+	Effort      string `json:"effort,omitempty"`
+	Approved    bool   `json:"approved,omitempty"`
 }
 
 type claimTaskArgs struct {
@@ -229,6 +233,11 @@ func makeADKTools(ctx adkToolContext) []tool.Tool {
 		if deps == nil {
 			deps = []string{}
 		}
+		// Stop duplicate cards: the same agent + title in this room that is not
+		// yet finished means the work is already tracked.
+		if existing, dup := ctx.Store.FindOpenTaskByTitle(roomID, args.AgentName, args.Title); dup {
+			return map[string]any{"task_id": existing.ID, "status": "exists", "note": "an open task with this title already exists for this agent; not creating a duplicate"}, nil
+		}
 		task := Task{
 			ID:           uuid.NewString(),
 			RoomID:       roomID,
@@ -259,38 +268,70 @@ func makeADKTools(ctx adkToolContext) []tool.Tool {
 	// update_task
 	add(functiontool.New[updateTaskArgs, map[string]any](functiontool.Config{
 		Name:        "update_task",
-		Description: "Move a task card to a new status.",
+		Description: "Move a task card to a new status and/or edit its title, description, priority (P0-P3) or effort.",
 	}, func(ac agent.Context, args updateTaskArgs) (map[string]any, error) {
 		if ctx.Store == nil {
 			return nil, fmt.Errorf("store unavailable")
 		}
-		if args.TaskID == "" {
-			args.TaskID = ctx.TaskID
+		taskID := args.TaskID
+		if taskID == "" {
+			taskID = ctx.TaskID
 		}
-		// Severity-only update: change the issue colour without moving status.
-		if strings.TrimSpace(args.Status) == "" {
-			if strings.TrimSpace(args.Severity) == "" {
-				return nil, fmt.Errorf("provide status or severity")
+		// Detail edits (title/description/priority/effort) may happen without a
+		// status change.
+		edited := false
+		if args.Title != "" || args.Description != "" || args.Priority != "" || args.Effort != "" {
+			patch := TaskDetailsPatch{}
+			if args.Title != "" {
+				v := args.Title
+				patch.Title = &v
 			}
-			updated, err := ctx.Store.SetTaskSeverity(args.TaskID, args.Severity)
+			if args.Description != "" {
+				v := args.Description
+				patch.Description = &v
+			}
+			if args.Priority != "" {
+				v := args.Priority
+				patch.Priority = &v
+			}
+			if args.Effort != "" {
+				v := args.Effort
+				patch.Effort = &v
+			}
+			if _, err := ctx.Store.UpdateTaskDetails(taskID, patch); err != nil {
+				return nil, err
+			}
+			edited = true
+		}
+		if strings.TrimSpace(args.Severity) != "" {
+			if _, err := ctx.Store.SetTaskSeverity(taskID, args.Severity); err != nil {
+				return nil, err
+			}
+			edited = true
+		}
+		if strings.TrimSpace(args.Status) != "" {
+			updated, err := ctx.Store.UpdateTaskStatus(taskID, args.Status, args.Approved)
 			if err != nil {
 				return nil, err
 			}
-			return map[string]any{"task_id": updated.ID, "status": updated.Status, "severity": updated.Severity}, nil
+			_ = ctx.Store.RecordActivity(ctx.RoomID, ctx.AgentName, "task.moved", fmt.Sprintf("Task %s moved to %s", taskID, args.Status), nil)
+			_ = ctx.Store.AppendRoomNotice(ctx.RoomID, ctx.AgentName, "task.moved",
+				fmt.Sprintf("📌 @%s moved a task to %s", ctx.AgentName, args.Status))
+			return map[string]any{"task_id": updated.ID, "status": updated.Status}, nil
 		}
-		updated, err := ctx.Store.UpdateTaskStatus(args.TaskID, args.Status, args.Approved)
-		if err != nil {
-			return nil, err
+		if !edited {
+			return nil, fmt.Errorf("provide status, severity, or fields to edit")
 		}
-		if strings.TrimSpace(args.Severity) != "" {
-			if u2, serr := ctx.Store.SetTaskSeverity(args.TaskID, args.Severity); serr == nil {
-				updated = u2
+		if edited {
+			_ = ctx.Store.AppendRoomNotice(ctx.RoomID, ctx.AgentName, "task.edited",
+				fmt.Sprintf("✏️ @%s edited a task card", ctx.AgentName))
+		}
+		for _, t := range ctx.Store.Snapshot().Tasks {
+			if t.ID == taskID {
+				return map[string]any{"task_id": t.ID, "status": t.Status, "priority": t.Priority, "severity": t.Severity}, nil
 			}
 		}
-		_ = ctx.Store.RecordActivity(ctx.RoomID, ctx.AgentName, "task.moved", fmt.Sprintf("Task %s moved to %s", args.TaskID, args.Status), nil)
-		_ = ctx.Store.AppendRoomNotice(ctx.RoomID, ctx.AgentName, "task.moved",
-			fmt.Sprintf("📌 @%s moved a task to %s", ctx.AgentName, args.Status))
-		return map[string]any{"task_id": updated.ID, "status": updated.Status}, nil
+		return map[string]any{"task_id": taskID, "status": "updated"}, nil
 	}))
 
 	// claim_task
@@ -674,12 +715,16 @@ func makeADKTools(ctx adkToolContext) []tool.Tool {
 			return nil, fmt.Errorf("only the lead agent (%s) may spawn teammates; use request_spawn through the lead", supervisor)
 		}
 		// Depth cap: walk the parent task chain (default max 2).
+		depthCap := ctx.Store.Snapshot().Settings.MaxDelegationDepth
+		if depthCap <= 0 {
+			depthCap = maxSpawnDepth
+		}
 		depth := 0
 		cur := ctx.TaskID
 		for cur != "" {
 			depth++
-			if depth >= maxSpawnDepth {
-				return nil, fmt.Errorf("spawn depth limit (%d) reached", maxSpawnDepth)
+			if depth >= depthCap {
+				return nil, fmt.Errorf("spawn depth limit (%d) reached", depthCap)
 			}
 			next := ""
 			for _, t := range ctx.Store.Snapshot().Tasks {
@@ -712,6 +757,11 @@ func makeADKTools(ctx adkToolContext) []tool.Tool {
 			Priority:     "normal",
 			Effort:       "medium",
 			Dependencies: []string{},
+			ParentID:     ctx.TaskID,
+		}
+		// Duplicate guard: don't hand the same agent a second identical card.
+		if existing, dup := ctx.Store.FindOpenTaskByTitle(ctx.RoomID, args.AgentName, title); dup {
+			return map[string]any{"status": "exists", "agent": args.AgentName, "task_id": existing.ID, "note": "that agent already has an open task with this title"}, nil
 		}
 		created, err := ctx.Store.CreateTask(task)
 		if err != nil {

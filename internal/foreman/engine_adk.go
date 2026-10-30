@@ -55,7 +55,7 @@ func allowedADKToolNames(allowed []string) map[string]bool {
 		case "terminal", "run_tests", "run_commands":
 			add("run_checks", "diagnose")
 		case "task_tracker", "delegate", "subagents", "synthesize":
-			add("create_task", "update_task", "claim_task", "spawn_agent", "delete_task", "delete_artifact")
+			add("create_task", "update_task", "claim_task", "spawn_agent", "delete_task", "delete_artifact", "create_plan", "delete_plan")
 		case "apply_patch", "diff_audit":
 			add("git_ops")
 		case "planning_editor", "workflow", "planning":

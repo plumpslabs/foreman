@@ -21,6 +21,10 @@ type Store struct {
 	state      WorkspaceState
 	db         *DB
 	onChange   func()
+	// onAutoStart is invoked (async-friendly) whenever a task is enqueued for
+	// auto-start so the runtime can drain the queue immediately instead of
+	// waiting for another run to finish.
+	onAutoStart func()
 	// autoStart is an in-memory FIFO of task IDs whose agents should wake up
 	// to work as soon as run capacity is available (spawned/delegated tasks).
 	autoStart []string
@@ -289,6 +293,14 @@ func (s *Store) migrate() (bool, error) {
 	s.syncAgentsFromTeamsLocked()
 	s.syncSkillsFromDefaultLocked()
 	s.state.Settings = normalizeSettings(s.state.Settings)
+	// Normalize task priorities to the P0..P3 scale (legacy names like
+	// urgent/high/normal/low are migrated once).
+	for i := range s.state.Tasks {
+		if canon, ok := NormalizePriority(s.state.Tasks[i].Priority); ok && canon != s.state.Tasks[i].Priority {
+			s.state.Tasks[i].Priority = canon
+			migrated = true
+		}
+	}
 	// Reconcile orphans left by a previous process: any task still
 	// "in_progress" cannot have an active run (runs die with the process),
 	// so it must not block new prompts or run starts. Reset it to "todo".
@@ -541,16 +553,44 @@ func (s *Store) ReviewerForRoom(roomID, exclude string) string {
 	return ""
 }
 
-// EnqueueAutoStart marks a task for automatic start once run capacity frees.
+// EnqueueAutoStart marks a task for automatic start once run capacity frees,
+// and immediately nudges the runtime to try starting it now.
 func (s *Store) EnqueueAutoStart(taskID string) {
+	s.enqueueAutoStart(taskID, true)
+}
+
+// requeueAutoStart re-queues a task without re-triggering the auto-start hook.
+// Used by the drain loop when capacity is momentarily full, so it does not spin.
+func (s *Store) requeueAutoStart(taskID string) {
+	s.enqueueAutoStart(taskID, false)
+}
+
+func (s *Store) enqueueAutoStart(taskID string, trigger bool) {
+	if taskID == "" {
+		return
+	}
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	for _, id := range s.autoStart {
 		if id == taskID {
+			s.mu.Unlock()
 			return
 		}
 	}
 	s.autoStart = append(s.autoStart, taskID)
+	fn := s.onAutoStart
+	s.mu.Unlock()
+	if trigger && fn != nil {
+		go fn()
+	}
+}
+
+// SetOnAutoStart registers a callback fired whenever a task is enqueued for
+// auto-start. The runtime uses it to drain the queue without waiting for a run
+// to finish.
+func (s *Store) SetOnAutoStart(fn func()) {
+	s.mu.Lock()
+	s.onAutoStart = fn
+	s.mu.Unlock()
 }
 
 // PopAutoStart returns and removes the oldest pending auto-start task id.
@@ -1061,8 +1101,11 @@ func normalizeSettings(v Settings) Settings {
 	if v.DefaultEffort != "low" && v.DefaultEffort != "medium" && v.DefaultEffort != "high" {
 		v.DefaultEffort = "medium"
 	}
-	if v.MaxConcurrentRuns <= 0 {
-		v.MaxConcurrentRuns = 1
+	if v.MaxConcurrentRuns <= 1 {
+		// 1 was the legacy default but was never actually enforced (a fixed
+		// 8-slot semaphore was). Default to 4 so spawned/delegated agents can
+		// run in parallel; the user can lower this deliberately from Settings.
+		v.MaxConcurrentRuns = 4
 	}
 	if v.MaxConcurrentRuns > 8 {
 		v.MaxConcurrentRuns = 8
@@ -1712,15 +1755,10 @@ func (s *Store) CreateTask(task Task) (Task, error) {
 			}
 		}
 	}
-	if task.Priority == "" {
-		task.Priority = "normal"
-	}
-	// tolerate the common "medium" alias used by agents
-	if task.Priority == "medium" {
-		task.Priority = "normal"
-	}
-	if task.Priority != "low" && task.Priority != "normal" && task.Priority != "high" && task.Priority != "urgent" {
-		return Task{}, errors.New("priority must be low, normal, high, or urgent")
+	if canon, ok := NormalizePriority(task.Priority); ok {
+		task.Priority = canon
+	} else {
+		return Task{}, errors.New("priority must be P0, P1, P2, or P3")
 	}
 	if task.Effort == "" {
 		task.Effort = s.state.Settings.DefaultEffort
@@ -1779,6 +1817,36 @@ func (s *Store) CreateTask(task Task) (Task, error) {
 		return Task{}, err
 	}
 	return task, nil
+}
+
+// FindOpenTaskByTitle returns an existing, not-yet-finished task in the room
+// assigned to the same agent with the same normalized title. It is used to stop
+// agents from creating the exact same card twice (a common source of duplicate
+// Kanban cards).
+func (s *Store) FindOpenTaskByTitle(roomID, agentName, title string) (Task, bool) {
+	norm := normalizeTitleKey(title)
+	if norm == "" {
+		return Task{}, false
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for i := range s.state.Tasks {
+		t := s.state.Tasks[i]
+		if t.RoomID != roomID || t.AgentName != agentName {
+			continue
+		}
+		if t.Status == "done" || t.Status == "cancelled" {
+			continue
+		}
+		if normalizeTitleKey(t.Title) == norm {
+			return t, true
+		}
+	}
+	return Task{}, false
+}
+
+func normalizeTitleKey(title string) string {
+	return strings.ToLower(strings.Join(strings.Fields(strings.TrimSpace(title)), " "))
 }
 
 // maxReworkCycles bounds how many times a task may be sent back for rework
@@ -1884,6 +1952,117 @@ func (s *Store) SetTaskSeverity(taskID, severity string) (Task, error) {
 	previous := append([]Task(nil), s.state.Tasks...)
 	task := &s.state.Tasks[idx]
 	task.Severity = normalizeSeverity(severity)
+	task.UpdatedAt = time.Now().UTC()
+	if err := s.save(); err != nil {
+		s.state.Tasks = previous
+		return Task{}, err
+	}
+	return *task, nil
+}
+
+// TaskDetailsPatch carries the editable fields for UpdateTaskDetails. A nil
+// field is left unchanged; a non-nil pointer (even to "") sets it.
+type TaskDetailsPatch struct {
+	Title        *string   `json:"title,omitempty"`
+	Description  *string   `json:"description,omitempty"`
+	Priority     *string   `json:"priority,omitempty"`
+	Effort       *string   `json:"effort,omitempty"`
+	AgentName    *string   `json:"agentName,omitempty"`
+	Dependencies *[]string `json:"dependencies,omitempty"`
+}
+
+// UpdateTaskDetails applies an edit to a task's title/description/priority/
+// effort/assignee/dependencies. Status changes stay in UpdateTaskStatus so the
+// two concerns do not interfere.
+func (s *Store) UpdateTaskDetails(taskID string, patch TaskDetailsPatch) (Task, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	idx := -1
+	for i := range s.state.Tasks {
+		if s.state.Tasks[i].ID == taskID {
+			idx = i
+			break
+		}
+	}
+	if idx < 0 {
+		return Task{}, fmt.Errorf("unknown task id %q", taskID)
+	}
+	previous := append([]Task(nil), s.state.Tasks...)
+	task := &s.state.Tasks[idx]
+
+	if patch.Title != nil {
+		title := strings.TrimSpace(*patch.Title)
+		if title == "" || len(title) > 200 {
+			return Task{}, errors.New("task title is required and must be at most 200 characters")
+		}
+		task.Title = title
+	}
+	if patch.Description != nil {
+		desc := strings.TrimSpace(*patch.Description)
+		if len(desc) > 16000 {
+			return Task{}, errors.New("description must be at most 16000 characters")
+		}
+		task.Description = desc
+	}
+	if patch.Priority != nil {
+		canon, ok := NormalizePriority(*patch.Priority)
+		if !ok {
+			return Task{}, errors.New("priority must be P0, P1, P2, or P3")
+		}
+		task.Priority = canon
+	}
+	if patch.Effort != nil {
+		effort := strings.TrimSpace(*patch.Effort)
+		if effort != "" && effort != "low" && effort != "medium" && effort != "high" {
+			return Task{}, errors.New("effort must be low, medium, or high")
+		}
+		if effort != "" {
+			task.Effort = effort
+		}
+	}
+	if patch.AgentName != nil {
+		agentName := strings.TrimSpace(*patch.AgentName)
+		if agentName != "" {
+			ok := false
+			for _, team := range s.state.Teams {
+				if team.ID != task.TeamID {
+					continue
+				}
+				for _, a := range team.Agents {
+					if a.Name == agentName {
+						ok = true
+						break
+					}
+				}
+			}
+			if !ok {
+				return Task{}, errors.New("assigned agent must belong to the task's team")
+			}
+		}
+		task.AgentName = agentName
+	}
+	if patch.Dependencies != nil {
+		deps := make([]string, 0, len(*patch.Dependencies))
+		seen := map[string]bool{}
+		for _, depID := range *patch.Dependencies {
+			if depID == task.ID || seen[depID] {
+				continue
+			}
+			var dep *Task
+			for i := range s.state.Tasks {
+				if s.state.Tasks[i].ID == depID {
+					dep = &s.state.Tasks[i]
+					break
+				}
+			}
+			if dep == nil || dep.RoomID != task.RoomID {
+				return Task{}, fmt.Errorf("dependency %q must be an existing task in the same room", depID)
+			}
+			seen[depID] = true
+			deps = append(deps, depID)
+		}
+		task.Dependencies = deps
+	}
 	task.UpdatedAt = time.Now().UTC()
 	if err := s.save(); err != nil {
 		s.state.Tasks = previous

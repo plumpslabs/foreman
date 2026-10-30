@@ -2,12 +2,47 @@ package foreman
 
 import (
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
 )
 
 const SchemaVersion = 3
+
+// Priority levels run P0 (critical, do first) through P3 (low). Legacy names
+// (urgent/high/normal/low/medium) are accepted and normalized so existing data
+// keeps working.
+func NormalizePriority(p string) (string, bool) {
+	switch strings.ToLower(strings.TrimSpace(p)) {
+	case "p0", "urgent", "critical", "blocker":
+		return "p0", true
+	case "p1", "high":
+		return "p1", true
+	case "p2", "normal", "medium", "":
+		return "p2", true
+	case "p3", "low":
+		return "p3", true
+	default:
+		return "", false
+	}
+}
+
+// PriorityRank sorts P0 first (0) through P3 (3); unknown sorts last.
+func PriorityRank(p string) int {
+	switch strings.ToLower(strings.TrimSpace(p)) {
+	case "p0":
+		return 0
+	case "p1":
+		return 1
+	case "p2":
+		return 2
+	case "p3":
+		return 3
+	default:
+		return 4
+	}
+}
 
 type WorkspaceState struct {
 	SchemaVersion int              `json:"schemaVersion"`

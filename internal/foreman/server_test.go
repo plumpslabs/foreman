@@ -51,7 +51,7 @@ func TestDashboardServesEmbeddedUIAndWorkspaceAPI(t *testing.T) {
 	if err := json.Unmarshal(response.Body.Bytes(), &state); err != nil {
 		t.Fatal(err)
 	}
-	if len(state.Templates) != 5 || state.ProjectPath != project || state.Settings.MaxConcurrentRuns != 1 || len(state.Tasks) != 0 {
+	if len(state.Templates) != 5 || state.ProjectPath != project || state.Settings.MaxConcurrentRuns != 4 || len(state.Tasks) != 0 {
 		t.Fatalf("unexpected workspace response: %#v", state)
 	}
 }
@@ -397,6 +397,58 @@ func TestTasksSettingsAndSkillsAPI(t *testing.T) {
 	}
 	if got := call(http.MethodPost, "/api/tasks/"+dependent.ID+"/run", `{}`); got.Code != http.StatusUnprocessableEntity {
 		t.Fatalf("blocked task run status = %d %s", got.Code, got.Body.String())
+	}
+}
+
+func TestTaskEditAndPriorityNormalizationAPI(t *testing.T) {
+	server, project := newTestServer(t)
+	handler := server.Handler()
+	base := "?project=" + url.QueryEscape(project)
+	call := func(method, path, body string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(method, path+base, strings.NewReader(body))
+		req.RemoteAddr = "127.0.0.1:1234"
+		req.Host = "127.0.0.1:8080"
+		res := httptest.NewRecorder()
+		handler.ServeHTTP(res, req)
+		return res
+	}
+	teamRes := call(http.MethodPost, "/api/teams/import", `{"templateId":"quick-fix","name":"Team"}`)
+	var team Team
+	if err := json.Unmarshal(teamRes.Body.Bytes(), &team); err != nil || teamRes.Code != http.StatusCreated {
+		t.Fatalf("team: %d %s %v", teamRes.Code, teamRes.Body.String(), err)
+	}
+	roomRes := call(http.MethodPost, "/api/rooms", fmt.Sprintf(`{"name":"Room","teamIds":[%q]}`, team.ID))
+	var room Room
+	if err := json.Unmarshal(roomRes.Body.Bytes(), &room); err != nil || roomRes.Code != http.StatusCreated {
+		t.Fatalf("room: %d %s %v", roomRes.Code, roomRes.Body.String(), err)
+	}
+
+	// Legacy "urgent" is normalized to the canonical P0 scale on create.
+	taskRes := call(http.MethodPost, "/api/rooms/"+room.ID+"/tasks", `{"title":"legacy priority","priority":"urgent"}`)
+	var task Task
+	if err := json.Unmarshal(taskRes.Body.Bytes(), &task); err != nil || taskRes.Code != http.StatusCreated {
+		t.Fatalf("task: %d %s %v", taskRes.Code, taskRes.Body.String(), err)
+	}
+	if task.Priority != "p0" {
+		t.Fatalf("legacy priority not normalized: %q", task.Priority)
+	}
+
+	// Edit title, description, priority and effort via the new endpoint.
+	editRes := call(http.MethodPut, "/api/tasks/"+task.ID, `{"title":"edited title","description":"now clearer","priority":"p3","effort":"high"}`)
+	var edited Task
+	if err := json.Unmarshal(editRes.Body.Bytes(), &edited); err != nil || editRes.Code != http.StatusOK {
+		t.Fatalf("edit: %d %s %v", editRes.Code, editRes.Body.String(), err)
+	}
+	if edited.Title != "edited title" || edited.Description != "now clearer" || edited.Priority != "p3" || edited.Effort != "high" {
+		t.Fatalf("task edit not applied: %#v", edited)
+	}
+
+	// Invalid priority and empty title are rejected.
+	if got := call(http.MethodPut, "/api/tasks/"+task.ID, `{"priority":"nope"}`); got.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("invalid priority status = %d %s", got.Code, got.Body.String())
+	}
+	if got := call(http.MethodPut, "/api/tasks/"+task.ID, `{"title":"  "}`); got.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("empty title status = %d %s", got.Code, got.Body.String())
 	}
 }
 

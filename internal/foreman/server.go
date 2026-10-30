@@ -58,6 +58,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("PUT /api/rooms/{roomID}/questions/{questionID}", s.answerRoomQuestion)
 	mux.HandleFunc("POST /api/rooms/{roomID}/tasks", s.createTask)
 	mux.HandleFunc("PUT /api/tasks/{taskID}/status", s.updateTaskStatus)
+	mux.HandleFunc("PUT /api/tasks/{taskID}", s.updateTaskDetails)
 	mux.HandleFunc("POST /api/tasks/{taskID}/run", s.startTask)
 	mux.HandleFunc("POST /api/runs/{runID}/cancel", s.cancelRun)
 	mux.HandleFunc("POST /api/runs/{runID}/pause", s.pauseRun)
@@ -546,6 +547,24 @@ func (s *Server) updateTaskStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	task, err := s.store.UpdateTaskStatus(r.PathValue("taskID"), req.Status, req.Approved)
+	if err != nil {
+		writeError(w, http.StatusUnprocessableEntity, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, task)
+}
+
+func (s *Server) updateTaskDetails(w http.ResponseWriter, r *http.Request) {
+	if err := s.verifyProject(r.URL.Query().Get("project")); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	var patch TaskDetailsPatch
+	if err := decodeJSON(w, r, &patch); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	task, err := s.store.UpdateTaskDetails(r.PathValue("taskID"), patch)
 	if err != nil {
 		writeError(w, http.StatusUnprocessableEntity, err.Error())
 		return
