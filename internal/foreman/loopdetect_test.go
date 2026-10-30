@@ -74,18 +74,86 @@ func TestDetectorBenignExplorationNeverStops(t *testing.T) {
 	}
 }
 
-// Multi-tool batches must clear the window so parallel work never looks like a
-// loop.
-func TestDetectorResetClearsState(t *testing.T) {
+// A multi-tool batch whose arguments keep changing is normal parallel work, not
+// a loop, and must not trip the detector.
+func TestDetectorBatchWithVaryingArgsNeverStops(t *testing.T) {
 	d := &actionDetector{}
-	d.observe("read_file:a")
-	d.observe("read_file:a")
-	d.reset()
-	if len(d.window) != 0 || d.sameCount != 0 || d.lowProg != 0 {
-		t.Fatalf("reset did not clear detector state: %+v", d)
+	for i := 0; i < 12; i++ {
+		sigs := []string{
+			fmt.Sprintf("view_file:src/a_%d.go", i),
+			fmt.Sprintf("grep_files:pattern_%d", i),
+			fmt.Sprintf("edit_file:src/b_%d.go", i),
+		}
+		if stop, reason := d.observeRound(sigs); stop {
+			t.Fatalf("batch round %d stopped unexpectedly: %q", i, reason)
+		}
 	}
-	if stop, _ := d.observe("read_file:a"); stop {
-		t.Fatalf("detector stopped immediately after reset")
+}
+
+// Repeating the exact same batch (same tools, same args) is a genuine loop.
+func TestDetectorIdenticalBatchStops(t *testing.T) {
+	d := &actionDetector{}
+	batch := []string{"view_file:src/a.go", "grep_files:foo"}
+	var stop bool
+	var reason string
+	for i := 0; i < 4; i++ {
+		stop, reason = d.observeRound(batch)
+		if stop {
+			break
+		}
+	}
+	if !stop || !strings.Contains(reason, "cycle") {
+		t.Fatalf("expected a cycle stop for an identical repeating batch, got stop=%v reason=%q", stop, reason)
+	}
+}
+
+// argsSignature must fingerprint the whole argument object, not a truncated
+// display prefix, or two long-but-different calls could collide.
+func TestArgsSignatureDistinguishesLongArgs(t *testing.T) {
+	base := strings.Repeat("x", 80)
+	a := argsSignature(map[string]any{"path": base + "A"})
+	b := argsSignature(map[string]any{"path": base + "B"})
+	if a == "" || b == "" {
+		t.Fatalf("expected non-empty signatures, got %q and %q", a, b)
+	}
+	if a == b {
+		t.Fatal("args differing past the display prefix must produce different signatures")
+	}
+}
+
+// Regression for the "repeating cycle ... (batch)" false positive: batches with
+// the same tool names but different files are different work, not a loop.
+func TestDetectorSameToolNamesDifferentArgsIsNotACycle(t *testing.T) {
+	d := &actionDetector{}
+	for i := 0; i < 8; i++ {
+		sigs := []string{
+			"view_file:" + argsSignature(map[string]any{"path": fmt.Sprintf("src/f%d.go", i)}),
+			"grep_files:" + argsSignature(map[string]any{"pattern": fmt.Sprintf("sym%d", i)}),
+		}
+		if stop, reason := d.observeRound(sigs); stop {
+			t.Fatalf("round %d stopped on distinct work: %q", i, reason)
+		}
+	}
+}
+
+// Low-progress is counted per round, so a batch-heavy agent that spins on two
+// tools is judged like a single-call one (rounds, not calls).
+func TestDetectorLowProgressCountsRounds(t *testing.T) {
+	d := &actionDetector{}
+	var stop bool
+	var reason string
+	for i := 0; i < 40; i++ {
+		sigs := []string{
+			fmt.Sprintf("read_file:a_%d", i),
+			fmt.Sprintf("grep_files:b_%d", i),
+		}
+		stop, reason = d.observeRound(sigs)
+		if stop {
+			break
+		}
+	}
+	if !stop || !strings.Contains(reason, "Low progress") {
+		t.Fatalf("expected a low-progress stop for two-tool batches, got stop=%v reason=%q", stop, reason)
 	}
 }
 

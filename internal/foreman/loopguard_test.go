@@ -73,17 +73,6 @@ func TestIsReadOnlyTool(t *testing.T) {
 	}
 }
 
-func TestBatchSignatureStable(t *testing.T) {
-	a := batchSignature([]string{"view_file", "grep_files"})
-	b := batchSignature([]string{"grep_files", "view_file"})
-	if a != b {
-		t.Fatalf("batch signature must be order-independent: %q vs %q", a, b)
-	}
-	if a == batchSignature([]string{"view_file"}) {
-		t.Fatal("different batches must produce different signatures")
-	}
-}
-
 func TestEffectiveBudgets(t *testing.T) {
 	settings := Settings{MaxIterations: 30, ReadOnlyBudget: 40}
 	// Inherit when the agent sets nothing.

@@ -2,6 +2,8 @@ package foreman
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -234,6 +236,22 @@ func compactArgs(a any) string {
 	return out
 }
 
+// argsSignature returns a stable, full fingerprint of tool-call args for loop
+// detection. Unlike compactArgs (which truncates for display), this hashes the
+// entire argument object so two calls that differ only past the display prefix
+// are never mistaken for a repeated action.
+func argsSignature(a any) string {
+	if a == nil {
+		return ""
+	}
+	b, err := json.Marshal(a)
+	if err != nil {
+		return fmt.Sprintf("%v", a)
+	}
+	sum := sha256.Sum256(b)
+	return hex.EncodeToString(sum[:8])
+}
+
 func (e *ADKEngine) Run(ctx context.Context, req EngineRequest, emit func(EngineEvent)) (EngineResult, error) {
 	return e.RunControlled(ctx, req, emit, nil)
 }
@@ -424,19 +442,22 @@ func (e *ADKEngine) RunControlled(ctx context.Context, req EngineRequest, emit f
 				break
 			}
 		}
-		// Doom/cycle detection. A multi-tool batch is fed as a composite
-		// signature (sorted tool names, no args) so it still participates in
-		// cycle/low-progress detection instead of wiping the window — the old
-		// full reset let churn with interleaved batches evade the detector
-		// entirely.
-		if len(toolNames) == 1 {
-			sig := toolNames[0] + ":" + compactArgs(ev.Content.Parts[0].FunctionCall.Args)
-			if stop, reason := det.observe(sig); stop {
-				doomHit = true
-				doomMsg = reason
-				break
+		// Doom/cycle detection runs per tool call, each with its own args, and
+		// the whole round is fed at once so the window stays continuous across
+		// multi-tool batches (the old full reset let churn hidden between
+		// batches evade the detector). Keeping the args is essential: two
+		// batches with the same tool names but different files are different
+		// work, not a loop.
+		sigs := make([]string, 0, len(toolNames))
+		if ev.Content != nil {
+			for _, p := range ev.Content.Parts {
+				if p.FunctionCall == nil {
+					continue
+				}
+				sigs = append(sigs, p.FunctionCall.Name+":"+argsSignature(p.FunctionCall.Args))
 			}
-		} else if stop, reason := det.observe(batchSignature(toolNames)); stop {
+		}
+		if stop, reason := det.observeRound(sigs); stop {
 			doomHit = true
 			doomMsg = reason
 			break

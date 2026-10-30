@@ -2,29 +2,26 @@ package foreman
 
 import (
 	"fmt"
-	"sort"
 	"strings"
 )
 
-// batchSignature builds a stable signature for a multi-tool round (sorted tool
-// names, no args) so a batch still participates in the cycle/low-progress
-// heuristics instead of resetting the detector.
-func batchSignature(names []string) string {
-	sorted := append([]string(nil), names...)
-	sort.Strings(sorted)
-	return "batch:" + strings.Join(sorted, "+")
-}
-
 // actionDetector implements the loop guard heuristics (doom repeat, period
 // cycles, low-progress) as a pure state machine so it can be unit-tested
-// without any LLM. Call observe with the signature of each single-tool round.
+// without any LLM.
+//
+// Signatures are per tool *call* ("tool:args"). A multi-tool round is fed as a
+// single observeRound call. Judging each call on its own arguments matters: an
+// earlier version folded a whole batch into one argument-less signature, which
+// made two different batches (same tool names, different files) look identical
+// and could trip a false "repeating cycle" almost immediately.
 //
 // Heuristics, in order of strength:
-//   - doom:      the same tool + same args, 3 rounds in a row.
+//   - doom:      the same tool + same args, 3 calls in a row.
 //   - cycle:     the last 2p signatures form a clean period-p loop (p = 2..4).
-//   - lowScore:  1–2 distinct *tools* used for many rounds in a row, even when
-//     the arguments keep changing (which evades doom/cycle). This is the
-//     "spinning on the same tool" case.
+//   - lowScore:  the recent window uses at most 2 distinct *tools* for many
+//     rounds in a row, even when the arguments keep changing (which evades
+//     doom/cycle). Counted once per *round* so a batch-heavy agent is judged
+//     the same way as a single-call one.
 type actionDetector struct {
 	window      []string // last tool signatures, bounded to detectorWindowSize
 	lastSig     string
@@ -47,47 +44,61 @@ func toolName(sig string) string {
 	return sig
 }
 
-// observe ingests one tool-round signature and reports stop/reason.
+// observe ingests one tool-call signature. Kept for callers and tests that
+// already work one call at a time; it is a thin wrapper over observeRound.
 func (d *actionDetector) observe(sig string) (bool, string) {
+	return d.observeRound([]string{sig})
+}
+
+// observeRound ingests every tool call made in one model round and reports
+// stop/reason. Feeding the whole round at once keeps the window continuous
+// across multi-tool rounds instead of wiping it, so churn hidden between
+// batches can no longer evade detection.
+func (d *actionDetector) observeRound(sigs []string) (bool, string) {
+	if len(sigs) == 0 {
+		return false, ""
+	}
 	d.totalRounds++
 
-	// Maintain the recent window first so every heuristic sees the full
-	// history, including the round that just happened.
-	d.window = append(d.window, sig)
-	if len(d.window) > detectorWindowSize {
-		d.window = d.window[len(d.window)-detectorWindowSize:]
-	}
-
-	// doom: same action repeated back-to-back.
-	if sig == d.lastSig {
-		d.sameCount++
-		if d.sameCount >= detectorSameLimit {
-			return true, fmt.Sprintf("Repeated identical action %q %d× without progress — likely stuck.", toolName(sig), detectorSameLimit)
+	for _, sig := range sigs {
+		d.window = append(d.window, sig)
+		if len(d.window) > detectorWindowSize {
+			d.window = d.window[len(d.window)-detectorWindowSize:]
 		}
-	} else {
-		d.lastSig = sig
-		d.sameCount = 1
-	}
 
-	n := len(d.window)
-	// cycle: last 2p signatures form a period-p loop (p = 2..4).
-	if n >= 4 {
-		for p := 2; p <= 4 && p*2 <= n; p++ {
-			ok := true
-			for i := n - p*2; i < n-p; i++ {
-				if d.window[i] != d.window[i+p] {
-					ok = false
-					break
+		// doom: same action repeated back-to-back.
+		if sig == d.lastSig {
+			d.sameCount++
+			if d.sameCount >= detectorSameLimit {
+				return true, fmt.Sprintf("Repeated identical action %q %d× without progress — likely stuck.", toolName(sig), detectorSameLimit)
+			}
+		} else {
+			d.lastSig = sig
+			d.sameCount = 1
+		}
+
+		// cycle: last 2p signatures form a period-p loop (p = 2..4).
+		n := len(d.window)
+		if n >= 4 {
+			for p := 2; p <= 4 && p*2 <= n; p++ {
+				ok := true
+				for i := n - p*2; i < n-p; i++ {
+					if d.window[i] != d.window[i+p] {
+						ok = false
+						break
+					}
+				}
+				if ok {
+					return true, fmt.Sprintf("Detected a repeating cycle of %d steps without progress.", p)
 				}
 			}
-			if ok {
-				return true, fmt.Sprintf("Detected a repeating cycle of %d steps (%q) without progress.", p, toolName(sig))
-			}
 		}
 	}
-	// low progress: only 1–2 distinct tools over many rounds, even if the
-	// arguments keep changing. Resets as soon as a third tool appears.
-	if n >= 8 {
+
+	// low progress: only 1–2 distinct tools across the window, even if the
+	// arguments keep changing. Counted once per round; resets as soon as a
+	// third distinct tool appears.
+	if len(d.window) >= 8 {
 		tools := map[string]bool{}
 		for _, s := range d.window {
 			tools[toolName(s)] = true
@@ -102,12 +113,4 @@ func (d *actionDetector) observe(sig string) (bool, string) {
 		}
 	}
 	return false, ""
-}
-
-// reset clears state when a multi-tool batch is seen.
-func (d *actionDetector) reset() {
-	d.window = nil
-	d.lastSig = ""
-	d.sameCount = 0
-	d.lowProg = 0
 }
