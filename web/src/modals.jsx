@@ -24,7 +24,7 @@ function Backdrop({ onClose, title, submitLabel, onSubmit, busy, children, wide 
   );
 }
 
-export function ModalHost({ modal, setModal, state, notify, refresh }) {
+export function ModalHost({ modal, setModal, state, notify, refresh, deleteSkill, runTask }) {
   if (!modal) return null;
   const onClose = () => setModal(null);
   const { kind } = modal;
@@ -35,12 +35,94 @@ export function ModalHost({ modal, setModal, state, notify, refresh }) {
         <TaskForm room={state.rooms.find((r) => r.id === modal.roomId)} state={state} task={modal.task}
           onClose={onClose} notify={notify} refresh={refresh} />
       )}
+      {kind === 'task-detail' && (
+        <TaskDetail room={state.rooms.find((r) => r.id === modal.roomId)} state={state} task={modal.task}
+          onClose={onClose} notify={notify} refresh={refresh}
+          onEdit={() => setModal({ kind: 'task', roomId: modal.roomId, task: modal.task })}
+          onRun={(id) => { onClose(); if (runTask) runTask(id); }} />
+      )}
       {kind === 'skill-import' && <SkillImportForm onClose={onClose} notify={notify} refresh={refresh} />}
       {kind === 'attach' && <AttachContext onClose={onClose} notify={notify} />}
       {kind === 'route' && <RouteAgent agents={modal.agents || []} current={modal.current} onClose={onClose} onPick={modal.onPick} />}
       {kind === 'effort' && <EffortPicker current={modal.current} onClose={onClose} />}
       {kind === 'approval' && <ApprovalInfo required={modal.required} onClose={onClose} />}
+      {kind === 'approvals' && <ApprovalsInbox approvals={state.approvals || []} onClose={onClose} notify={notify} refresh={refresh} />}
     </>
+  );
+}
+
+function ApprovalsInbox({ approvals, onClose, notify, refresh }) {
+  const [busyId, setBusyId] = useState(null);
+  const SEV_RANK = { blocker: 0, warning: 1, info: 2 };
+  const SEV_LABEL = { blocker: 'Blocker', warning: 'Warning', info: 'Info' };
+  const pending = (approvals || [])
+    .filter((a) => a.status === 'pending')
+    .sort((a, b) => (SEV_RANK[a.severity] ?? 2) - (SEV_RANK[b.severity] ?? 2));
+
+  const resolve = async (id, status) => {
+    setBusyId(id);
+    try {
+      await api('/api/approvals/' + id + '/resolve', {
+        method: 'POST',
+        body: { status },
+      });
+      notify('Approval marked as ' + status, 'success');
+      await refresh();
+    } catch (err) {
+      notify('Failed to resolve approval: ' + err.message, 'error');
+    } finally {
+      setBusyId(null);
+    }
+  };
+
+  const sev = (a) => (['blocker', 'warning'].includes(a.severity) ? a.severity : 'info');
+
+  return (
+    <div class="modal-backdrop open" onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}>
+      <div class="modal modal-lg">
+        <header class="modal-head">
+          <div style="display:flex;align-items:center;gap:8px">
+            <Icon name="alert-triangle" size={16} />
+            <h3 style="margin:0">Human Approvals Inbox ({pending.length})</h3>
+          </div>
+          <button type="button" class="icon-btn" aria-label="Close" onClick={onClose}><Icon name="x" /></button>
+        </header>
+        <div class="modal-body">
+          {pending.length === 0 ? (
+            <div class="empty">No pending approvals. All actions are clear.</div>
+          ) : (
+            <div style="display:flex;flex-direction:column;gap:12px">
+              {pending.map((app) => (
+                <article key={app.id} class={`panel approval-item sev-${sev(app)}`} style="padding:14px">
+                  <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:10px">
+                    <div>
+                      <div style="display:flex;align-items:center;gap:6px">
+                        <span class={`tag sev-badge sev-${sev(app)}`}>{SEV_LABEL[sev(app)]}</span>
+                        <span class="tag orange">{esc(app.type || 'Approval')}</span>
+                        <span class="meta-text">{app.createdAt ? new Date(app.createdAt).toLocaleTimeString() : ''}</span>
+                      </div>
+                      <div style="font-weight:600;margin-top:6px;font-size:14px">{esc(app.description)}</div>
+                      {app.payloadJson && app.payloadJson !== '{}' && (
+                        <pre style="background:var(--bg-subtle);padding:8px;border-radius:4px;font-size:12px;margin-top:8px;overflow-x:auto">
+                          {esc(app.payloadJson)}
+                        </pre>
+                      )}
+                    </div>
+                    <div style="display:flex;gap:8px">
+                      <button type="button" class="btn small" disabled={busyId === app.id} onClick={() => resolve(app.id, 'rejected')}>Reject</button>
+                      <button type="button" class="btn primary small" disabled={busyId === app.id} onClick={() => resolve(app.id, 'approved')}>Approve</button>
+                    </div>
+                  </div>
+                </article>
+              ))}
+            </div>
+          )}
+        </div>
+        <footer class="modal-foot">
+          <button type="button" class="btn" onClick={onClose}>Close</button>
+        </footer>
+      </div>
+    </div>
   );
 }
 
@@ -185,6 +267,96 @@ function TaskForm({ room, state, onClose, notify, refresh, task }) {
           : 'Tasks and dependencies are persisted in this room. Work starts when you click Run.'}
       </div>
     </Backdrop>
+  );
+}
+
+/* ---------- Task detail (read-only, rich) ---------- */
+
+function TaskDetail({ room, state, task, onClose, notify, refresh, onEdit, onRun }) {
+  const [busy, setBusy] = useState(false);
+  if (!room || !task) return null;
+  const teams = state.teams || [];
+  const team = teams.find((t) => t.id === task.teamId);
+  const tasks = state.tasks || [];
+  const depTitles = (task.dependencies || []).map((id) => {
+    const d = tasks.find((x) => x.id === id);
+    return d ? d.title : id;
+  });
+  const startable = task.status === 'todo' || task.status === 'backlog';
+
+  const setStatus = async (status) => {
+    setBusy(true);
+    try {
+      await api('/api/tasks/' + task.id + '/status', { method: 'PUT', body: { status } });
+      notify('Status updated');
+      await refresh();
+    } catch (e) { notify(e.message); } finally { setBusy(false); }
+  };
+
+  return (
+    <div class="modal-backdrop open" onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}>
+      <div class="modal modal-lg">
+        <header class="modal-head">
+          <div>
+            <h3 style="margin:0">{esc(task.title)}</h3>
+            <div style="display:flex;gap:6px;margin-top:8px;flex-wrap:wrap">
+              <span class={`tag ${task.status === 'done' ? 'green' : task.status === 'blocked' ? 'orange' : task.status === 'review' ? 'blue' : ''}`}>{esc(task.status)}</span>
+              <span class={`tag ${['high', 'urgent'].includes(task.priority) ? 'orange' : ''}`}>priority: {esc(task.priority)}</span>
+              <span class="tag">effort: {esc(task.effort)}</span>
+              {task.agentName && <span class="tag blue">@ {esc(task.agentName)}</span>}
+              {team && <span class="tag">team: {esc(team.name)}</span>}
+              {task.hidden && <span class="tag">chat thread</span>}
+              {task.retryCount > 0 && <span class="tag orange">rework ×{task.retryCount}</span>}
+            </div>
+          </div>
+          <button type="button" class="icon-btn" aria-label="Close" onClick={onClose}><Icon name="x" /></button>
+        </header>
+        <div class="modal-body">
+          <div class="field">
+            <label>Description</label>
+            <div style="white-space:pre-wrap;font-size:13px;line-height:1.6;background:var(--bg-subtle);padding:10px;border-radius:6px">
+              {esc(task.description || 'No description.')}
+            </div>
+          </div>
+          {depTitles.length > 0 && (
+            <div class="field">
+              <label>Dependencies</label>
+              <div style="display:flex;flex-direction:column;gap:4px;align-items:flex-start">
+                {depTitles.map((t) => <span class="tag" key={t}>{esc(t)}</span>)}
+              </div>
+            </div>
+          )}
+          {task.evidence && (
+            <div class="field">
+              <label>Evidence</label>
+              <div style="background:var(--bg-subtle);padding:10px;border-radius:6px;font-size:12px;word-break:break-word;white-space:pre-wrap">
+                {esc(task.evidence)}
+              </div>
+            </div>
+          )}
+          <div class="notice meta-text">
+            Created {task.createdAt ? new Date(task.createdAt).toLocaleString() : '—'} · Updated {task.updatedAt ? new Date(task.updatedAt).toLocaleString() : '—'}
+            · id {esc(task.id)}
+          </div>
+        </div>
+        <footer class="modal-foot">
+          <div style="display:flex;gap:8px;align-items:center;margin-right:auto">
+            <select class="select small" value={task.status === 'backlog' ? 'todo' : task.status} disabled={busy}
+              onChange={(e) => setStatus(e.currentTarget.value)}>
+              <option value="todo">Backlog</option>
+              <option value="in_progress">In progress</option>
+              <option value="review">Review</option>
+              <option value="blocked">Blocked</option>
+              <option value="done">Done</option>
+              <option value="cancelled">Cancelled</option>
+            </select>
+            {startable && <button type="button" class="btn primary small" disabled={busy} onClick={() => onRun(task.id)}>Run</button>}
+          </div>
+          <button type="button" class="btn" onClick={onEdit}>Edit</button>
+          <button type="button" class="btn primary" onClick={onClose}>Close</button>
+        </footer>
+      </div>
+    </div>
   );
 }
 

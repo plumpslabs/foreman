@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -17,25 +18,78 @@ type activeRun struct {
 	control *RunControl
 }
 
+// RunEngine is the minimal engine surface the runtime depends on. The real
+// implementation is *ADKEngine; tests inject a fake to drive orchestration
+// deterministically without calling any LLM.
+type RunEngine interface {
+	RunControlled(ctx context.Context, req EngineRequest, emit func(EngineEvent), control *RunControl) (EngineResult, error)
+	sdkInstalledCached() (bool, string)
+	diagnostics() EngineDiag
+	installSDK(ctx context.Context) (string, error)
+}
+
 type Runtime struct {
-	store     *Store
-	engine    *Engine
-	mu        sync.Mutex
-	active    map[string]*activeRun
-	semaphore chan struct{}
+	store        *Store
+	engine       RunEngine
+	mu           sync.Mutex
+	active       map[string]*activeRun
+	semaphore    chan struct{}
+	watchdogStop chan struct{}
+	stopOnce     sync.Once
 }
 
 func NewRuntime(st *Store) *Runtime {
-	return &Runtime{
-		store:     st,
-		engine:    NewEngine(),
-		active:    map[string]*activeRun{},
-		semaphore: make(chan struct{}, 8),
+	rt := &Runtime{
+		store:        st,
+		engine:       NewADKEngine(st),
+		active:       map[string]*activeRun{},
+		semaphore:    make(chan struct{}, 8),
+		watchdogStop: make(chan struct{}),
 	}
+	rt.startWatchdog()
+	return rt
+}
+
+// stopWatchdog halts the background heartbeat watchdog (used by tests to keep
+// goroutine-leak checks clean; production keeps it running for the process).
+func (rt *Runtime) stopWatchdog() {
+	rt.stopOnce.Do(func() { close(rt.watchdogStop) })
+}
+
+func (rt *Runtime) startWatchdog() {
+	go func() {
+		ticker := time.NewTicker(10 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-rt.watchdogStop:
+				return
+			case <-ticker.C:
+			}
+			if rt.store == nil || rt.store.DB() == nil {
+				continue
+			}
+			for _, room := range rt.store.Snapshot().Rooms {
+				stalled, err := rt.store.DB().CheckStalledAgents(room.ID, 45*time.Second)
+				if err != nil || len(stalled) == 0 {
+					continue
+				}
+				supervisor := rt.store.RoomMainAgentName(room.ID)
+				if supervisor == "" {
+					supervisor = "Supervisor"
+				}
+				for _, agent := range stalled {
+					_ = rt.store.RecordActivity(room.ID, "Watchdog", "watchdog.stalled",
+						fmt.Sprintf("⚠️ Heartbeat alert: Agent @%s stalled (>45s without heartbeat). Supervisor @%s notified.", agent, supervisor),
+						nil)
+				}
+			}
+		}
+	}()
 }
 
 // SetEngine swaps the bridge engine; used by tests to inject a fake engine.
-func (rt *Runtime) SetEngine(e *Engine) { rt.engine = e }
+func (rt *Runtime) SetEngine(e RunEngine) { rt.engine = e }
 
 // EngineInstalled reports whether the OpenHands SDK is importable.
 func (rt *Runtime) EngineInstalled() (bool, string) {
@@ -50,24 +104,6 @@ func (rt *Runtime) EngineDiagnostics() EngineDiag {
 // InstallEngine installs the OpenHands SDK into the engine's Python.
 func (rt *Runtime) InstallEngine(ctx context.Context) (string, error) {
 	return rt.engine.installSDK(ctx)
-}
-
-// Exported engine health helpers used by the CLI (cmd/foreman).
-
-// SDKInstalled reports whether the OpenHands SDK is importable.
-func (e *Engine) SDKInstalled() (bool, string) { return e.sdkInstalledCached() }
-
-// PythonVersion returns the engine interpreter's version string.
-func (e *Engine) PythonVersion() string { return e.pythonVersion() }
-
-// PipAvailable reports whether pip is available in the engine's Python.
-func (e *Engine) PipAvailable() bool {
-	return e.diagnostics().PipAvailable
-}
-
-// InstallSDK installs the OpenHands SDK (same as the dashboard's install).
-func (e *Engine) InstallSDK(ctx context.Context) (string, error) {
-	return e.installSDK(ctx)
 }
 
 func (rt *Runtime) StartTask(parent context.Context, taskID string) (AgentRun, error) {
@@ -109,17 +145,60 @@ func (rt *Runtime) StartTask(parent context.Context, taskID string) (AgentRun, e
 	rt.active[run.ID] = &activeRun{cancel: cancel, control: control}
 	rt.mu.Unlock()
 	go func() {
+		var finished AgentRun
 		defer func() {
 			cancel()
 			rt.mu.Lock()
 			delete(rt.active, run.ID)
 			rt.mu.Unlock()
 			<-rt.semaphore
+			// Wake any spawned/delegated tasks now that a run slot is free.
+			go rt.drainAutoStart()
 		}()
-		finished := rt.execute(runCtx, control, run, task, room, team, providerConfig, secret, settings)
+		defer func() {
+			if rec := recover(); rec != nil {
+				slog.Error("agent run goroutine panic", "err", fmt.Sprint(rec), "run", run.ID[:8], "task", task.ID[:8])
+				if finished.ID == "" {
+					finished = AgentRun{
+						ID: run.ID, TaskID: task.ID, RoomID: room.ID,
+						Provider: providerConfig.ID, Model: run.Model,
+						Status: "failed", Error: "agent panic: " + fmt.Sprint(rec),
+						StartedAt: run.StartedAt, EndedAt: time.Now().UTC(),
+					}
+				}
+				_ = rt.store.FinishRun(finished)
+			}
+		}()
+		finished = rt.execute(runCtx, control, run, task, room, team, providerConfig, secret, settings)
 		_ = rt.store.FinishRun(finished)
 	}()
 	return run, nil
+}
+
+// drainAutoStart starts queued spawned tasks (FIFO) as capacity allows. When
+// the global run limit is reached it requeues the remainder and stops; the
+// next finished run tries again.
+func (rt *Runtime) drainAutoStart() {
+	defer func() {
+		if rec := recover(); rec != nil {
+			slog.Error("drainAutoStart panic", "err", fmt.Sprint(rec))
+		}
+	}()
+	for {
+		id := rt.store.PopAutoStart()
+		if id == "" {
+			return
+		}
+		_, err := rt.StartTask(context.Background(), id)
+		if err != nil && strings.Contains(err.Error(), "maximum concurrent") {
+			rt.store.EnqueueAutoStart(id)
+			return
+		}
+		if err != nil {
+			// Permanent failure (task deleted/unknown) — drop and keep draining.
+			continue
+		}
+	}
 }
 
 // CancelRun immediately stops a run (hard kill).
@@ -171,41 +250,125 @@ func (rt *Runtime) execute(ctx context.Context, control *RunControl, run AgentRu
 	}
 
 	prompt := buildRunPrompt(room, task, team, skillsContext(team, task, rt.store.Snapshot().Skills))
+	if mcpServers := rt.store.MCPServersByIDs(room.MCPServerIDs); len(mcpServers) > 0 {
+		names := make([]string, 0, len(mcpServers))
+		for _, srv := range mcpServers {
+			names = append(names, srv.Name)
+		}
+		prompt += "\n\n## External tools (MCP)\nServers available in this room: " + strings.Join(names, ", ") +
+			".\nTheir tools are exposed as `mcp__<server>_<tool>`. Use them when they are the right tool for the job (e.g. querying a connected service, database, or documentation) instead of guessing or fabricating data."
+	}
 	if task.Hidden {
 		if recent := rt.store.RoomRecentContext(room.ID); recent != "" {
 			prompt += "\n\n## Recent room conversation\n\n" + recent
 		}
 	}
+	_ = rt.store.AppendRoomNotice(room.ID, task.AgentName, "run.started",
+		fmt.Sprintf("🚀 @%s started working on: %s", task.AgentName, task.Title))
+	slog.Info("run started", "room", room.ID[:8], "task", task.ID[:8], "agent", task.AgentName)
 	agentToolIDs := agentToolIDs(team, task)
 	snapshot := rt.store.Snapshot()
-	req := EngineRequest{
-		Workspace:            snapshot.ProjectPath,
-		Prompt:               prompt,
-		Protocol:             config.Protocol,
-		BaseURL:              config.BaseURL,
-		APIKey:               secret,
-		Model:                config.DefaultModel,
-		Tools:                ResolveEngineTools(agentToolIDs, settings.AllowProjectCommands),
-		PersistenceDir:       filepath.Join(snapshot.ProjectPath, ".foreman", "agent-conversations"),
-		ConversationID:       task.ID,
-		MaxIterations:        30,
-		BudgetUSD:            settings.BudgetUSD,
-		AllowProjectCommands: settings.AllowProjectCommands,
-	}
-	result, err := rt.engine.RunControlled(ctx, req, func(ev EngineEvent) {
-		msg := ev.Message
-		if msg == "" {
-			msg = ev.Type
+	primaryModel, fallbackModels := resolveModelChain(config, team, task)
+
+	var result EngineResult
+	var lastErr error
+	maxRetries := 3
+	attempt := 0
+	attemptsUsed := 0
+
+	for ; attempt <= maxRetries; attempt++ {
+		if attempt > 0 {
+			backoff := time.Duration(1<<attempt) * time.Second
+			_ = rt.store.RecordActivity(room.ID, task.AgentName, "retry",
+				fmt.Sprintf("⚠️ Run attempt %d failed (%v). Retrying in %v...", attempt, lastErr, backoff),
+				nil)
+			_ = rt.store.AppendRoomNotice(room.ID, task.AgentName, "run.retry",
+				fmt.Sprintf("⚠️ Attempt %d failed (%v). Retrying in %v…", attempt, lastErr, backoff))
+			time.Sleep(backoff)
 		}
-		_ = rt.store.AppendRunEvent(run.ID, ev.Type, safeRuntimeError(errors.New(msg), secret))
-	}, control)
-	if err != nil {
-		final := finish(result.Status, resultOrError(result.Message, err), err, result.Tokens, result.CostUSD)
+
+		// Escalate to the next fallback model on retries when available.
+		modelForAttempt := primaryModel
+		if attempt > 0 && len(fallbackModels) >= attempt {
+			modelForAttempt = fallbackModels[attempt-1]
+			_ = rt.store.AppendRoomNotice(room.ID, task.AgentName, "run.model_escalate",
+				fmt.Sprintf("🔁 Retry %d using model %s", attempt, modelForAttempt))
+		}
+
+		req := EngineRequest{
+			Workspace:            snapshot.ProjectPath,
+			RoomID:               room.ID,
+			TaskID:               task.ID,
+			AgentName:            task.AgentName,
+			TriageTier:           room.TriageTier,
+			StepTimeout:          60,
+			Prompt:               prompt,
+			Protocol:             config.Protocol,
+			BaseURL:              config.BaseURL,
+			APIKey:               secret,
+			Model:                modelForAttempt,
+			FallbackModels:       fallbackModels,
+			Tools:                ResolveEngineTools(agentToolIDs, settings.AllowProjectCommands),
+			AllowedTools:         agentToolIDs,
+			PersistenceDir:       filepath.Join(snapshot.ProjectPath, ".foreman", "agent-conversations"),
+			MCPServerIDs:         room.MCPServerIDs,
+			ConversationID:       task.ID,
+			MaxIterations:        30,
+			BudgetUSD:            settings.BudgetUSD,
+			AllowProjectCommands: settings.AllowProjectCommands,
+		}
+
+		result, lastErr = rt.engine.RunControlled(ctx, req, func(ev EngineEvent) {
+			msg := ev.Message
+			if msg == "" {
+				msg = ev.Type
+			}
+			_ = rt.store.AppendRunEvent(run.ID, ev.Type, safeRuntimeError(errors.New(msg), secret))
+		}, control)
+		attemptsUsed = attempt + 1
+
+		// Break immediately when the whole-run budget/deadline is gone or the
+		// run was stopped: retrying can only fail again and burns time.
+		if lastErr == nil || ctx.Err() != nil || result.Status == "paused" || result.Status == "blocked" {
+			break
+		}
+	}
+
+	if result.Status == "paused" && task.Hidden {
+		_, _ = rt.store.UpdateTaskStatus(task.ID, "paused", false)
+	}
+	if lastErr != nil && result.Status != "paused" {
+		supervisor := rt.store.RoomMainAgentName(room.ID)
+		if supervisor == "" {
+			supervisor = "Supervisor"
+		}
+		finalStatus := "blocked"
+		noticeType := "task.blocked"
+		noticeText := fmt.Sprintf("⛔ Task %s blocked after %d attempts: %v", task.Title, attemptsUsed, lastErr)
+		switch {
+		case errors.Is(ctx.Err(), context.DeadlineExceeded):
+			finalStatus = "timed_out"
+			noticeType = "run.timed_out"
+			noticeText = fmt.Sprintf("⏱️ Run stopped: the execution time limit (%ds) was reached. Send a narrower prompt to continue, or raise Max Execution Seconds in Settings.", settings.MaxExecutionSeconds)
+		case finalStatus == "cancelled" || result.Status == "cancelled":
+			finalStatus = "cancelled"
+			noticeType = "run.cancelled"
+			noticeText = fmt.Sprintf("🛑 Run stopped by you before finishing. The task is marked blocked — send a new prompt to continue.")
+		}
+		_ = rt.store.RecordActivity(room.ID, task.AgentName, "task.blocked",
+			fmt.Sprintf("🚨 Task blocked after %d attempts: %v. Supervisor @%s notified.", attemptsUsed, lastErr, supervisor),
+			nil)
+		_, _ = rt.store.UpdateTaskStatus(task.ID, "blocked", false)
+		_ = rt.store.AppendRoomNotice(room.ID, task.AgentName, noticeType, noticeText)
+
+		final := finish(finalStatus, humanizeFinalFailure(finalStatus, lastErr, task, settings, attemptsUsed), lastErr, result.Tokens, result.CostUSD)
+		slog.Warn("run stopped", "room", room.ID[:8], "task", task.ID[:8], "status", final.Status, "error", lastErr.Error(), "tokens", final.Tokens, "cost", final.CostUSD)
 		if task.Hidden && final.Result != "" {
 			_ = rt.store.AppendAgentReply(room.ID, task.AgentName, final.Result)
 		}
 		return final
 	}
+
 	if result.Message == "" {
 		result.Message = "Agent run finished."
 	}
@@ -216,9 +379,20 @@ func (rt *Runtime) execute(ctx context.Context, control *RunControl, run AgentRu
 			_, _ = rt.store.AddRoomQuestion(room.ID, question)
 		}
 	}
+	if task.Hidden && result.Status != "paused" && result.Status != "blocked" {
+		_, _ = rt.store.UpdateTaskStatus(task.ID, "todo", false)
+	}
 	final := finish(result.Status, result.Message, nil, result.Tokens, result.CostUSD)
+	slog.Info("run finished", "room", room.ID[:8], "task", task.ID[:8], "status", final.Status, "tokens", final.Tokens, "cost", final.CostUSD)
 	if task.Hidden && final.Result != "" {
 		_ = rt.store.AppendAgentReply(room.ID, task.AgentName, final.Result)
+	} else if !task.Hidden {
+		statusEmoji := "✅"
+		if result.Status == "failed" || result.Status == "timed_out" || result.Status == "cancelled" {
+			statusEmoji = "⚠️"
+		}
+		_ = rt.store.AppendRoomNotice(room.ID, task.AgentName, "run.finished",
+			fmt.Sprintf("%s Task %s finished — status: %s", statusEmoji, task.Title, result.Status))
 	}
 	return final
 }
@@ -267,24 +441,145 @@ func parseAgentQuestions(message string) []AgentQuestion {
 }
 
 func buildRunPrompt(room Room, task Task, team *Team, skills string) string {
+	tier := room.TriageTier
+	if tier == "" {
+		tier = "standard"
+	}
+	goal := room.Goal
+	if goal == "" {
+		goal = "Resolve requested issue"
+	}
 	sections := []string{
 		fmt.Sprintf("Room: %s", room.Name),
-		fmt.Sprintf("Room goal: %s", room.Goal),
+		fmt.Sprintf("Room goal: %s", goal),
+		fmt.Sprintf("Triage Tier: %s", strings.ToUpper(tier)),
 		fmt.Sprintf("Task: %s", task.Title),
 		fmt.Sprintf("Description: %s", task.Description),
 	}
 	if team != nil {
+		activeAgent := task.AgentName
+		if activeAgent == "" {
+			activeAgent = team.MainAgent
+		}
 		sections = append(sections,
-			strings.TrimSpace(strings.Join([]string{team.Purpose, team.Instructions, agentInstructions(*team, task.AgentName)}, "\n\n")))
+			fmt.Sprintf("You are currently acting as **%s**.", activeAgent),
+			teamRoster(*team, activeAgent),
+			team.Instructions,
+			agentInstructions(*team, activeAgent),
+		)
+		var role string
+		for _, a := range team.Agents {
+			if a.Name == activeAgent {
+				role = a.Role
+				break
+			}
+		}
+		if activeAgent == team.MainAgent {
+			sections = append(sections, `## Your role: Coordinator (lead agent)
+- You are the ONLY agent who delegates: create tasks, spawn specialists, and decide scope. Specialists do not spawn or reassign work.
+- Decompose the goal, hand each piece to the right teammate (spawn_agent), track the board, and enforce gates (review before done).
+- Keep the human informed; escalate decisions you cannot make (ask_human) instead of guessing.`)
+		} else {
+			spec := `## Your role: Specialist
+- Work ONLY on your assigned task. Do NOT spawn other agents, do NOT change scope, do NOT reassign work — that is the coordinator's job.
+- Finish with finish_task (status review/done + summary + changed files + evidence). If blocked or you need a decision, use ask_human or escalate to the coordinator.`
+			if strings.Contains(strings.ToLower(role), "review") {
+				spec += `
+
+## You are the Reviewer
+- Review independently; do not self-approve your own work. Be specific and fair.
+- If changes are needed: finish the review task with status "blocked" and a clear summary of what must change. The system will automatically reopen the implementer's task for rework (bounded), so do not edit the code yourself unless asked.`
+			}
+			sections = append(sections, spec)
+		}
 	}
 	if skills != "" {
 		sections = append(sections, "# Skills\n\n"+skills)
 	}
+
+	triageGuidance := `## Before starting (important):
+- First inspect existing tasks/plan/backlog (list_tasks, existing plan) for this room.
+- If unfinished work exists, ask the human whether to continue, skip, or replace it before proceeding.
+- Do not assume previous work is irrelevant.
+
+## Orchestration Protocol & Triage Tiers:
+- Quick tier: 1 agent, minimal fix. Directly diagnose, inspect files, apply minimal bounded fix, verify, and call finish_task(status="review" or "done", summary="...", changed_files=[...], evidence="..."). Do not create large plans.
+- Standard tier: Create a short checklist plan (create_plan), create tasks on Kanban (create_task), delegate to the right specialist with spawn_agent (it creates a real task for that teammate), execute, run verify steps you have permission for, and move the task to review.
+- Epic tier: Create full plan with dependencies, spawn parallel specialist agents (spawn_agent), manage the task board (create_task/update_task/claim_task), enforce review gates, and summarize when all tasks complete.
+
+## Delegation rules:
+- You are the coordinator when teammates are present. Rely on the team: use spawn_agent with the exact member name from the Team Roster (e.g. debugger, reviewer, planner roles) instead of doing specialist work yourself.
+- Delegation creates a real Kanban task; give the teammate a clear title and description including file paths and acceptance criteria.
+- If a delegation tool errors, retry once with an unassigned create_task (omit agent_name) so the work is not lost, then note the failure in your summary.
+
+## Available Autonomous Tools (exact names):
+- create_task: create a task card on Kanban (assigns to you if agent_name omitted).
+- update_task: move task card (todo/in_progress/review/blocked/done/cancelled).
+- claim_task: claim an open task card atomically.
+- list_tasks: list current tasks on the board.
+- finish_task: MUST call this when finishing a task to record results, changed files, and evidence! Never just say done in chat without calling finish_task.
+- spawn_agent: delegate work to a teammate agent (creates a Kanban task for them).
+- create_plan: save plan checklist and diagram nodes/edges to the Plan tab.
+- send_message: message teammates in mailbox.
+- ask_human: if you encounter ambiguity or require confirmation, do NOT make assumptions—call ask_human and wait. Set severity (info|warning|blocker) so it is triaged correctly.
+- escalate: report blockers to supervisor. Set severity (info|warning|blocker); blocker halts, warning needs a decision soon, info is FYI.
+- run_checks: run test/lint commands (only available when project commands are allowed).
+- git_ops: inspect git diff/status, or commit changes (commit requires human confirmation).
+- memory: read/write shared cross-agent memory.
+- register_panel: register custom UI panels (table, markdown, chart, kanban, diagram).`
+
 	sections = append(sections,
+		triageGuidance,
 		"Work only on this task. Keep changes within the active project workspace. Report what changed and what you verified.",
-		"Need a decision from the human before continuing? End your reply with a fenced block:\n\n```question\n<the question>\n- option one\n- option two\n```\n\nThen stop and wait for the answer.",
+		`## Agent contract (summary; full reference in AGENT_CONTRACT.md)
+- Language: reply in the same language as the user's latest message.
+- Tasks: concise title (verb + object, ≤10 words); description includes context + acceptance criteria.
+- Navigation: call repo_map once on unfamiliar codebases before grepping/reading many files.
+- Loop Governor (enforced in code): hard limits (steps/tokens/cost/wall time); repeated tool+args or short cycles stop with a visible reason; no progress → stop and report; always finish with finish_task(result) including summary, changed files, evidence; if stuck, escalate or ask the human.
+- Search: prefer repo_map first, then targeted grep/glob; grep uses RE2; results are capped with a truncated flag — refine the query rather than repeat the same call.
+- Diagnostics: run the diagnose tool (vet/build/test/lint for the detected language) to find bugs and to gather evidence before finishing; it is read-only and needs project-command permission.
+- Deliberation: discussions/reviews follow an evidence-gated protocol (critique = claim + evidence + severity + suggested fix), position changes require new evidence, disputes are settled by running tools/tests, and decisions are recorded with dissent. Debates are moderated and bounded (max 2 rounds); full debate is reserved for Epic-tier design decisions; Standard tier uses a single critic.
+- Spawn: hierarchical — spawning goes through the lead (can_spawn = false | request | limited); each spawn carries task + scope paths + budget + reason; depth/concurrency/total agent caps apply; duplicate check against the board; child budget is carved from the parent's remaining budget. Workers may message peers, and may use request_spawn (approval) instead of spawning directly.`,
+		"Need a decision from the human before continuing? Use AskHumanTool or end your reply with a fenced block:\n\n```question\n<the question>\n- option one\n- option two\n```\n\nThen stop and wait for the answer.",
 	)
 	return strings.Join(sections, "\n\n")
+}
+
+func teamRoster(team Team, activeAgent string) string {
+	var b strings.Builder
+	b.WriteString("## Team Roster\n")
+	b.WriteString(fmt.Sprintf("Team: %s (Main agent: %s)\n", team.Name, team.MainAgent))
+	if team.Purpose != "" {
+		b.WriteString(fmt.Sprintf("Team purpose: %s\n", team.Purpose))
+	}
+	b.WriteString("\n### Members:\n")
+	reviewer := ""
+	for _, a := range team.Agents {
+		marker := ""
+		if a.Name == activeAgent {
+			marker = " [CURRENT TURN - YOU]"
+		} else if a.Name == team.MainAgent {
+			marker = " [MAIN AGENT]"
+		}
+		b.WriteString(fmt.Sprintf("- **%s** (%s)%s: %s\n", a.Name, a.Role, marker, a.Description))
+		if reviewer == "" && a.Name != activeAgent && strings.Contains(strings.ToLower(a.Role+" "+a.Description), "review") {
+			reviewer = a.Name
+		}
+	}
+	b.WriteString("\n### Multi-Agent Coordination & Delegation Rules:\n")
+	b.WriteString("1. You are operating as part of this collaborative team in Foreman.\n")
+	b.WriteString("2. If you are the Coordinator / Lead, break down goals into structured steps or tasks.\n")
+	b.WriteString("3. If delegating to or calling on a specialist teammate, specify the delegation clearly using `@TeammateName <task>` in your response so the user and room can track handoffs.\n")
+	b.WriteString("4. Always report actions taken, files inspected or modified, and verification evidence.\n")
+	b.WriteString("\n### Who to contact for what:\n")
+	b.WriteString("- Work feedback, quality issues, or change requests → route to the agent who owns that task/file (see Members above).\n")
+	if reviewer != "" {
+		b.WriteString(fmt.Sprintf("- Independent review of completed work → @%s (Reviewer).\n", reviewer))
+	}
+	b.WriteString(fmt.Sprintf("- Decisions about scope, new tasks, or delegation → @%s (Coordinator).\n", team.MainAgent))
+	b.WriteString("- Blockers you cannot resolve → escalate to the Coordinator; if the Coordinator needs a human decision, they will use ask_human.\n")
+	b.WriteString("- Direct question to a teammate → send_message to them (via @Name); keep teammates informed when your work affects theirs.\n")
+	return b.String()
 }
 
 // skillsContext renders the assigned agent's skills into the run prompt.
@@ -421,6 +716,21 @@ func resultOrError(message string, err error) string {
 	return err.Error()
 }
 
+// humanizeFinalFailure renders a failed/timeout/cancelled run as a humane,
+// actionable message instead of a raw Go error string.
+func humanizeFinalFailure(status string, err error, task Task, settings Settings, attempts int) string {
+	switch status {
+	case "timed_out":
+		return fmt.Sprintf("Stopped: the execution time limit (%ds) was reached while working on %q. Partial work already saved (tasks, diffs, artifacts) stays visible. To continue, send a narrower prompt or raise Max Execution Seconds in Settings.", settings.MaxExecutionSeconds, task.Title)
+	case "cancelled":
+		return fmt.Sprintf("Run stopped by you while working on %q. Send a new prompt to continue.", task.Title)
+	case "blocked":
+		return fmt.Sprintf("Blocked after %d attempts: %v. You can retry, narrow the scope, or check the activity log.", attempts, err)
+	default:
+		return fmt.Sprintf("Failed: %v.", err)
+	}
+}
+
 func safeRuntimeError(err error, secret string) string {
 	if err == nil {
 		return ""
@@ -430,4 +740,49 @@ func safeRuntimeError(err error, secret string) string {
 		text = strings.ReplaceAll(text, secret, "[REDACTED]")
 	}
 	return text
+}
+
+func resolveModelChain(config ProviderConfig, team *Team, task Task) (string, []string) {
+	var candidates []string
+	seen := map[string]bool{}
+	add := func(m string) {
+		m = strings.TrimSpace(m)
+		if m != "" && !strings.EqualFold(m, "auto") && !seen[m] {
+			seen[m] = true
+			candidates = append(candidates, m)
+		}
+	}
+
+	agentModel := ""
+	if team != nil {
+		target := task.AgentName
+		if target == "" {
+			target = team.MainAgent
+		}
+		for _, agent := range team.Agents {
+			if agent.Name == target {
+				agentModel = agent.Model
+				break
+			}
+		}
+	}
+	if agentModel != "" {
+		for _, part := range strings.Split(agentModel, ",") {
+			add(part)
+		}
+	}
+	add(config.DefaultModel)
+	for _, m := range config.Models {
+		add(m)
+	}
+
+	if len(candidates) == 0 {
+		return config.DefaultModel, nil
+	}
+	primary := candidates[0]
+	var fallbacks []string
+	if len(candidates) > 1 {
+		fallbacks = candidates[1:]
+	}
+	return primary, fallbacks
 }

@@ -1,0 +1,1027 @@
+package foreman
+
+import (
+	"bytes"
+	"encoding/json"
+	"fmt"
+	"os"
+	"os/exec"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/google/uuid"
+
+	"google.golang.org/adk/v2/agent"
+	"google.golang.org/adk/v2/tool"
+	"google.golang.org/adk/v2/tool/functiontool"
+)
+
+type adkToolContext struct {
+	Store     *Store
+	RoomID    string
+	TaskID    string
+	Workspace string
+	AgentName string
+	AllowCmds bool
+	Emit      func(EngineEvent)
+	// diff remembers the pre-run content of each file changed in this run so
+	// emitted diffs stay cumulative (one diff per file, latest state).
+	diff *diffTracker
+}
+
+// diffTracker keeps the pre-run ("origin") content of every file an agent has
+// edited during one run, guarded for concurrent tool calls.
+type diffTracker struct {
+	mu      sync.Mutex
+	origins map[string]string
+}
+
+func (d *diffTracker) originOf(rel, fallback string) string {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.origins == nil {
+		d.origins = map[string]string{}
+	}
+	if prev, ok := d.origins[rel]; ok {
+		return prev
+	}
+	d.origins[rel] = fallback
+	return fallback
+}
+
+type createTaskArgs struct {
+	Title        string   `json:"title"`
+	Description  string   `json:"description"`
+	AgentName    string   `json:"agent_name"`
+	TeamID       string   `json:"team_id"`
+	Priority     string   `json:"priority"`
+	Severity     string   `json:"severity"`
+	Effort       string   `json:"effort"`
+	Dependencies []string `json:"dependencies"`
+}
+
+type updateTaskArgs struct {
+	TaskID   string `json:"task_id"`
+	Status   string `json:"status"`
+	Severity string `json:"severity,omitempty"`
+	Approved bool   `json:"approved"`
+}
+
+type claimTaskArgs struct {
+	TaskID    string `json:"task_id"`
+	AgentName string `json:"agent_name"`
+}
+
+type finishTaskArgs struct {
+	TaskID       string   `json:"task_id"`
+	Summary      string   `json:"summary"`
+	ChangedFiles []string `json:"changed_files"`
+	Evidence     string   `json:"evidence"`
+	Status       string   `json:"status"`
+}
+
+type listTasksArgs struct {
+	RoomID string `json:"room_id"`
+}
+
+type createPlanArgs struct {
+	RoomID    string `json:"room_id"`
+	Title     string `json:"title"`
+	Tier      string `json:"tier"`
+	Markdown  string `json:"markdown"`
+	NodesJSON string `json:"nodes_json"`
+	EdgesJSON string `json:"edges_json"`
+}
+
+type runChecksArgs struct {
+	Command string `json:"command"`
+}
+
+type diagnoseArgs struct {
+	// Scope optionally narrows the run: "build", "vet", "test", or "" for all.
+	Scope string `json:"scope"`
+}
+
+type gitOpsArgs struct {
+	Operation string `json:"operation"`
+	Message   string `json:"message"`
+}
+
+type memoryArgs struct {
+	Action string `json:"action"`
+	Key    string `json:"key"`
+	Value  string `json:"value"`
+}
+
+type askHumanArgs struct {
+	Question string `json:"question"`
+	Severity string `json:"severity,omitempty"` // info (default), warning, blocker
+}
+
+type requestSpawnArgs struct {
+	AgentName string `json:"agent_name"`
+	TaskTitle string `json:"task_title"`
+	TaskDesc  string `json:"task_desc"`
+	Reason    string `json:"reason"`
+}
+
+type spawnAgentArgs struct {
+	AgentName string `json:"agent_name"`
+	TaskTitle string `json:"task_title"`
+	TaskDesc  string `json:"task_desc"`
+}
+
+// maxSpawnDepth caps hierarchical spawn chain depth (lead → worker → helper).
+const maxSpawnDepth = 2
+
+type registerPanelArgs struct {
+	RoomID    string `json:"room_id"`
+	PanelType string `json:"panel_type"`
+	Title     string `json:"title"`
+	DataJSON  string `json:"data_json"`
+}
+
+type sendMessageArgs struct {
+	RoomID  string `json:"room_id"`
+	Content string `json:"content"`
+}
+
+type escalateArgs struct {
+	Message  string `json:"message"`
+	Title    string `json:"title,omitempty"`
+	Severity string `json:"severity,omitempty"` // info, warning (default), blocker
+}
+
+type grepFilesArgs struct {
+	Pattern         string `json:"pattern"`
+	Path            string `json:"path"`
+	Before          int    `json:"before,omitempty"`
+	After           int    `json:"after,omitempty"`
+	MaxMatches      int    `json:"max_matches,omitempty"`
+	CaseInsensitive bool   `json:"case_insensitive,omitempty"`
+}
+
+type globFilesArgs struct {
+	Pattern string `json:"pattern"`
+	Path    string `json:"path"`
+}
+
+type repoMapArgs struct {
+	MaxChars int    `json:"max_chars,omitempty"`
+	Path     string `json:"path,omitempty"`
+}
+
+type searchIndexArgs struct {
+	Query string `json:"query"`
+	Limit int    `json:"limit,omitempty"`
+}
+
+type deleteTaskArgs struct {
+	TaskID string `json:"task_id"`
+}
+
+type deletePlanArgs struct {
+	RoomID string `json:"room_id"`
+}
+
+type deleteArtifactArgs struct {
+	ArtifactID string `json:"artifact_id"`
+}
+
+func makeADKTools(ctx adkToolContext) []tool.Tool {
+	var tools []tool.Tool
+	add := func(t tool.Tool, err error) {
+		if err == nil && t != nil {
+			tools = append(tools, t)
+		}
+	}
+
+	// create_task
+	add(functiontool.New[createTaskArgs, map[string]any](functiontool.Config{
+		Name:        "create_task",
+		Description: "Create a task card on the Kanban board.",
+	}, func(ac agent.Context, args createTaskArgs) (map[string]any, error) {
+		if ctx.Store == nil {
+			return nil, fmt.Errorf("store unavailable")
+		}
+		roomID := ctx.RoomID
+		if args.AgentName == "" {
+			args.AgentName = ctx.AgentName
+		}
+		// Resolve the team for the assigned agent so assignment succeeds.
+		teamID := args.TeamID
+		if teamID == "" {
+			teamID = ctx.Store.TeamIDForRoomAgent(roomID, args.AgentName)
+		}
+		if teamID == "" {
+			return nil, fmt.Errorf("cannot assign task to %q: not a member of a team invited to this room (available teammates: %s). Omit agent_name to assign the task to yourself", args.AgentName, strings.Join(ctx.Store.RoomAgentNames(roomID), ", "))
+		}
+		priority := args.Priority
+		if priority == "" {
+			priority = "normal"
+		}
+		effort := args.Effort
+		if effort == "" {
+			effort = "medium"
+		}
+		deps := args.Dependencies
+		if deps == nil {
+			deps = []string{}
+		}
+		task := Task{
+			ID:           uuid.NewString(),
+			RoomID:       roomID,
+			AgentName:    args.AgentName,
+			TeamID:       teamID,
+			Title:        args.Title,
+			Description:  args.Description,
+			Status:       "todo",
+			Priority:     priority,
+			Severity:     normalizeSeverity(args.Severity),
+			Effort:       effort,
+			Dependencies: deps,
+		}
+		created, err := ctx.Store.CreateTask(task)
+		if err != nil {
+			return nil, err
+		}
+		_ = ctx.Store.RecordActivity(roomID, ctx.AgentName, "task.created", fmt.Sprintf("Created task: %s", args.Title), nil)
+		mention := ""
+		if args.AgentName != "" && args.AgentName != ctx.AgentName {
+			mention = fmt.Sprintf(" for @%s", args.AgentName)
+		}
+		_ = ctx.Store.AppendRoomNotice(roomID, ctx.AgentName, "task.created",
+			fmt.Sprintf("📋 @%s created task %s%s", ctx.AgentName, args.Title, mention))
+		return map[string]any{"task_id": created.ID, "status": "created"}, nil
+	}))
+
+	// update_task
+	add(functiontool.New[updateTaskArgs, map[string]any](functiontool.Config{
+		Name:        "update_task",
+		Description: "Move a task card to a new status.",
+	}, func(ac agent.Context, args updateTaskArgs) (map[string]any, error) {
+		if ctx.Store == nil {
+			return nil, fmt.Errorf("store unavailable")
+		}
+		if args.TaskID == "" {
+			args.TaskID = ctx.TaskID
+		}
+		// Severity-only update: change the issue colour without moving status.
+		if strings.TrimSpace(args.Status) == "" {
+			if strings.TrimSpace(args.Severity) == "" {
+				return nil, fmt.Errorf("provide status or severity")
+			}
+			updated, err := ctx.Store.SetTaskSeverity(args.TaskID, args.Severity)
+			if err != nil {
+				return nil, err
+			}
+			return map[string]any{"task_id": updated.ID, "status": updated.Status, "severity": updated.Severity}, nil
+		}
+		updated, err := ctx.Store.UpdateTaskStatus(args.TaskID, args.Status, args.Approved)
+		if err != nil {
+			return nil, err
+		}
+		if strings.TrimSpace(args.Severity) != "" {
+			if u2, serr := ctx.Store.SetTaskSeverity(args.TaskID, args.Severity); serr == nil {
+				updated = u2
+			}
+		}
+		_ = ctx.Store.RecordActivity(ctx.RoomID, ctx.AgentName, "task.moved", fmt.Sprintf("Task %s moved to %s", args.TaskID, args.Status), nil)
+		_ = ctx.Store.AppendRoomNotice(ctx.RoomID, ctx.AgentName, "task.moved",
+			fmt.Sprintf("📌 @%s moved a task to %s", ctx.AgentName, args.Status))
+		return map[string]any{"task_id": updated.ID, "status": updated.Status}, nil
+	}))
+
+	// claim_task
+	add(functiontool.New[claimTaskArgs, map[string]any](functiontool.Config{
+		Name:        "claim_task",
+		Description: "Claim a task card atomically.",
+	}, func(ac agent.Context, args claimTaskArgs) (map[string]any, error) {
+		if ctx.Store == nil {
+			return nil, fmt.Errorf("store unavailable")
+		}
+		agentName := args.AgentName
+		if agentName == "" {
+			agentName = ctx.AgentName
+		}
+		claimed, err := ctx.Store.DB().AtomicClaimTask(args.TaskID, agentName)
+		if err != nil {
+			return nil, err
+		}
+		return map[string]any{"claimed": claimed}, nil
+	}))
+
+	// finish_task
+	add(functiontool.New[finishTaskArgs, map[string]any](functiontool.Config{
+		Name:        "finish_task",
+		Description: "Finish a task and record results, changed files, and evidence.",
+	}, func(ac agent.Context, args finishTaskArgs) (map[string]any, error) {
+		if ctx.Store == nil {
+			return nil, fmt.Errorf("store unavailable")
+		}
+		if args.TaskID == "" {
+			args.TaskID = ctx.TaskID
+		}
+		status := args.Status
+		if status == "" {
+			status = "done"
+		}
+		_, err := ctx.Store.UpdateTaskStatus(args.TaskID, status, true)
+		if err != nil {
+			return nil, err
+		}
+		var taskTitle string
+		var parentID string
+		for _, t := range ctx.Store.Snapshot().Tasks {
+			if t.ID == args.TaskID {
+				taskTitle = t.Title
+				parentID = t.ParentID
+				break
+			}
+		}
+		var filesList string
+		if len(args.ChangedFiles) > 0 {
+			var files []string
+			for _, f := range args.ChangedFiles {
+				files = append(files, "- `"+f+"`")
+			}
+			filesList = "\n\n**Changed files:**\n" + strings.Join(files, "\n")
+		}
+		artifact := ArtifactRecord{
+			ID:        uuid.NewString(),
+			RoomID:    ctx.RoomID,
+			Type:      "report",
+			Title:     "Task result: " + taskTitle,
+			Summary:   args.Summary,
+			Content:   args.Evidence + filesList,
+			CreatedAt: time.Now().UTC(),
+		}
+		_ = ctx.Store.SaveArtifact(artifact)
+		_ = ctx.Store.RecordActivity(ctx.RoomID, ctx.AgentName, "task.finished", fmt.Sprintf("Finished task %s", args.TaskID), nil)
+		_ = ctx.Store.AppendRoomNotice(ctx.RoomID, ctx.AgentName, "task.finished",
+			fmt.Sprintf("✅ Task %s marked %s by @%s — report saved in the Artifacts tab", taskTitle, status, ctx.AgentName))
+
+		// Reviewer requested changes (review task finished as "blocked"):
+		// reopen the original implementer task for rework, bounded by retries.
+		if status == "blocked" && parentID != "" {
+			orig, reopened, rerr := ctx.Store.ReopenForRework(parentID)
+			if rerr != nil {
+				return nil, rerr
+			}
+			if reopened {
+				ctx.Store.EnqueueAutoStart(orig.ID)
+				_ = ctx.Store.AppendRoomNotice(ctx.RoomID, orig.AgentName, "review.rework",
+					fmt.Sprintf("🔄 Review requested changes (cycle %d). Task reopened for @%s: %q", orig.RetryCount, orig.AgentName, orig.Title))
+			} else {
+				_, _ = ctx.Store.CreateApproval(ApprovalRecord{
+					RoomID:      ctx.RoomID,
+					Type:        "review",
+					Description: fmt.Sprintf("Rework limit reached for %q after %d cycles. Review the discussion and decide next steps.", orig.Title, orig.RetryCount),
+				})
+				_ = ctx.Store.AppendRoomNotice(ctx.RoomID, ctx.AgentName, "review.escalated",
+					fmt.Sprintf("🚩 Rework limit reached for %q — escalated to the human for a decision.", orig.Title))
+			}
+		}
+
+		// A "review" status hands the work to a reviewer teammate: create their
+		// review task automatically and wake them up, so review actually happens.
+		if status == "review" {
+			reviewer := ctx.Store.ReviewerForRoom(ctx.RoomID, ctx.AgentName)
+			if reviewer != "" {
+				teamID := ctx.Store.TeamIDForRoomAgent(ctx.RoomID, reviewer)
+				if teamID != "" {
+					reviewTask := Task{
+						ID:           uuid.NewString(),
+						RoomID:       ctx.RoomID,
+						AgentName:    reviewer,
+						TeamID:       teamID,
+						Title:        "Review: " + taskTitle,
+						Description:  fmt.Sprintf("Review the fix for task %q. Verify against acceptance criteria, check the diff and tests, then move the task to done or request changes (status blocked).", taskTitle),
+						Status:       "todo",
+						Priority:     "normal",
+						Effort:       "medium",
+						Dependencies: []string{},
+						ParentID:     args.TaskID,
+					}
+					if _, err := ctx.Store.CreateTask(reviewTask); err == nil {
+						ctx.Store.EnqueueAutoStart(reviewTask.ID)
+						_ = ctx.Store.AppendRoomNotice(ctx.RoomID, reviewer, "review.assigned",
+							fmt.Sprintf("🔎 Review task created for @%s: %q", reviewer, reviewTask.Title))
+					}
+				}
+			}
+		}
+
+		return map[string]any{"task_id": args.TaskID, "status": status}, nil
+	}))
+
+	// list_tasks
+	add(functiontool.New[listTasksArgs, map[string]any](functiontool.Config{
+		Name:        "list_tasks",
+		Description: "List current tasks on the board.",
+	}, func(ac agent.Context, args listTasksArgs) (map[string]any, error) {
+		if ctx.Store == nil {
+			return nil, fmt.Errorf("store unavailable")
+		}
+		roomID := args.RoomID
+		if roomID == "" {
+			roomID = ctx.RoomID
+		}
+		var out []map[string]any
+		for _, t := range ctx.Store.Snapshot().Tasks {
+			if t.RoomID == roomID {
+				out = append(out, map[string]any{
+					"id": t.ID, "title": t.Title, "status": t.Status, "agent": t.AgentName,
+				})
+			}
+		}
+		return map[string]any{"tasks": out}, nil
+	}))
+
+	// create_plan
+	add(functiontool.New[createPlanArgs, map[string]any](functiontool.Config{
+		Name:        "create_plan",
+		Description: "Save a plan checklist and diagram nodes/edges to the Plan tab.",
+	}, func(ac agent.Context, args createPlanArgs) (map[string]any, error) {
+		if ctx.Store == nil {
+			return nil, fmt.Errorf("store unavailable")
+		}
+		roomID := args.RoomID
+		if roomID == "" {
+			roomID = ctx.RoomID
+		}
+		tier := args.Tier
+		if tier == "" {
+			tier = "standard"
+		}
+		plan := PlanRecord{
+			RoomID:    roomID,
+			Title:     args.Title,
+			Tier:      tier,
+			Markdown:  args.Markdown,
+			NodesJSON: args.NodesJSON,
+			EdgesJSON: args.EdgesJSON,
+		}
+		if err := ctx.Store.SavePlan(plan); err != nil {
+			return nil, err
+		}
+		return map[string]any{"status": "saved"}, nil
+	}))
+
+	// diagnose (bug/ops): run language-appropriate static checks and return a
+	// structured, read-only summary. Gated on project command execution.
+	if ctx.AllowCmds {
+		add(functiontool.New[diagnoseArgs, map[string]any](functiontool.Config{
+			Name:        "diagnose",
+			Description: "Run static checks (vet/build/test/lint) for the workspace and return a structured summary of failures. Read-only; use it to find bugs before finishing a task.",
+		}, func(ac agent.Context, args diagnoseArgs) (map[string]any, error) {
+			checks := diagnoseChecks(ctx.Workspace, args.Scope)
+			results := make([]map[string]any, 0, len(checks))
+			failed := 0
+			for _, c := range checks {
+				cmd := exec.Command("sh", "-c", c.command)
+				cmd.Dir = ctx.Workspace
+				out, err := cmd.CombinedOutput()
+				status := "passed"
+				if err != nil {
+					status = "failed"
+					failed++
+				}
+				text := string(out)
+				if len(text) > 4000 {
+					text = text[:4000] + "\n…(truncated)"
+				}
+				results = append(results, map[string]any{
+					"check":    c.name,
+					"command":  c.command,
+					"status":   status,
+					"output":   text,
+					"language": c.language,
+				})
+			}
+			return map[string]any{
+				"checks":  results,
+				"failed":  failed,
+				"summary": fmt.Sprintf("%d/%d checks failed", failed, len(results)),
+			}, nil
+		}))
+	}
+
+	// run_checks (only when project command execution is enabled — otherwise
+	// granting it just wastes an agent turn on "project commands disabled")
+	if ctx.AllowCmds {
+		add(functiontool.New[runChecksArgs, map[string]any](functiontool.Config{
+			Name:        "run_checks",
+			Description: "Run a test/lint command in the workspace.",
+		}, func(ac agent.Context, args runChecksArgs) (map[string]any, error) {
+			if !ctx.AllowCmds {
+				return nil, fmt.Errorf("project commands disabled")
+			}
+			cmd := exec.Command("sh", "-c", args.Command)
+			cmd.Dir = ctx.Workspace
+			out, err := cmd.CombinedOutput()
+			status := "passed"
+			if err != nil {
+				status = "failed"
+			}
+			return map[string]any{"status": status, "output": string(out)}, nil
+		}))
+	}
+
+	// git_ops
+	add(functiontool.New[gitOpsArgs, map[string]any](functiontool.Config{
+		Name:        "git_ops",
+		Description: "Inspect git diff/status or commit changes.",
+		RequireConfirmationProvider: func(args gitOpsArgs) bool {
+			return args.Operation == "commit"
+		},
+	}, func(ac agent.Context, args gitOpsArgs) (map[string]any, error) {
+		op := args.Operation
+		var cmd *exec.Cmd
+		switch op {
+		case "status":
+			cmd = exec.Command("git", "status", "--short")
+		case "diff":
+			cmd = exec.Command("git", "diff")
+		case "commit":
+			msg := args.Message
+			if msg == "" {
+				msg = "foreman: update"
+			}
+			cmd = exec.Command("git", "add", "-A")
+			cmd.Dir = ctx.Workspace
+			_ = cmd.Run()
+			cmd = exec.Command("git", "commit", "-m", msg)
+		default:
+			cmd = exec.Command("git", "status")
+		}
+		cmd.Dir = ctx.Workspace
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			return map[string]any{"status": "error", "output": string(out), "error": err.Error()}, nil
+		}
+		// Surface diffs in the room's Changes tab.
+		if op == "diff" {
+			ctx.emitDiff("", string(out))
+		}
+		return map[string]any{"status": "ok", "output": string(out)}, nil
+	}))
+
+	// memory
+	add(functiontool.New[memoryArgs, map[string]any](functiontool.Config{
+		Name:        "memory",
+		Description: "Read or write shared cross-agent memory.",
+	}, func(ac agent.Context, args memoryArgs) (map[string]any, error) {
+		if ctx.Store == nil {
+			return nil, fmt.Errorf("store unavailable")
+		}
+		db := ctx.Store.DB()
+		switch args.Action {
+		case "set":
+			err := db.SetMemory(ctx.RoomID, args.Key, args.Value, ctx.AgentName)
+			if err != nil {
+				return nil, err
+			}
+			return map[string]any{"status": "saved"}, nil
+		default:
+			val, err := db.GetMemory(ctx.RoomID, args.Key)
+			if err != nil {
+				return nil, err
+			}
+			return map[string]any{"value": val}, nil
+		}
+	}))
+
+	// ask_human
+	add(functiontool.New[askHumanArgs, map[string]any](functiontool.Config{
+		Name:        "ask_human",
+		Description: "Ask the human a question and wait for approval.",
+	}, func(ac agent.Context, args askHumanArgs) (map[string]any, error) {
+		if ctx.Store == nil {
+			return nil, fmt.Errorf("store unavailable")
+		}
+		id, err := ctx.Store.CreateApproval(ApprovalRecord{
+			RoomID:      ctx.RoomID,
+			Type:        "question",
+			Description: args.Question,
+			Severity:    normalizeSeverity(args.Severity),
+		})
+		if err != nil {
+			return nil, err
+		}
+		return map[string]any{"approval_id": id, "status": "pending"}, nil
+	}))
+
+	// request_spawn
+	add(functiontool.New[requestSpawnArgs, map[string]any](functiontool.Config{
+		Name:        "request_spawn",
+		Description: "Request the lead agent to spawn a teammate. Creates an approval for the human/lead; the task is created only after approval.",
+	}, func(ac agent.Context, args requestSpawnArgs) (map[string]any, error) {
+		if ctx.Store == nil {
+			return nil, fmt.Errorf("store unavailable")
+		}
+		if args.AgentName == "" {
+			return nil, fmt.Errorf("agent_name is required")
+		}
+		names := ctx.Store.RoomAgentNames(ctx.RoomID)
+		found := false
+		for _, n := range names {
+			if n == args.AgentName {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return nil, fmt.Errorf("cannot request spawn: %q is not a member of a team invited to this room", args.AgentName)
+		}
+		title := args.TaskTitle
+		if title == "" {
+			title = "Delegated task for " + args.AgentName
+		}
+		desc := args.TaskDesc
+		if desc == "" {
+			desc = title
+		}
+		payload, _ := json.Marshal(map[string]string{
+			"action": "request_spawn", "agent_name": args.AgentName,
+			"title": title, "desc": desc,
+		})
+		id, err := ctx.Store.CreateApproval(ApprovalRecord{
+			RoomID: ctx.RoomID, Type: "request_spawn",
+			Description: fmt.Sprintf("🆘 @%s requests spawning @%s: %s — reason: %s", ctx.AgentName, args.AgentName, title, args.Reason),
+			PayloadJSON: string(payload),
+		})
+		if err != nil {
+			return nil, err
+		}
+		_ = ctx.Store.AppendRoomNotice(ctx.RoomID, ctx.AgentName, "spawn.requested",
+			fmt.Sprintf("🆘 @%s requests spawning @%s — awaiting lead/human approval.", ctx.AgentName, args.AgentName))
+		return map[string]any{"status": "pending", "approval_id": id}, nil
+	}))
+
+	// spawn_agent
+	add(functiontool.New[spawnAgentArgs, map[string]any](functiontool.Config{
+		Name:        "spawn_agent",
+		Description: "Delegate work to a teammate agent (by exact team roster name). Creates a Kanban task assigned to that agent, which starts their run when capacity allows. Only the room's lead agent may spawn.",
+	}, func(ac agent.Context, args spawnAgentArgs) (map[string]any, error) {
+		if ctx.Store == nil {
+			return nil, fmt.Errorf("store unavailable")
+		}
+		// Spawn model: hierarchical — only the lead agent may spawn peers.
+		// Workers needing help send request_spawn, which the lead approves.
+		if supervisor := ctx.Store.RoomMainAgentName(ctx.RoomID); supervisor != "" && ctx.AgentName != supervisor {
+			return nil, fmt.Errorf("only the lead agent (%s) may spawn teammates; use request_spawn through the lead", supervisor)
+		}
+		// Depth cap: walk the parent task chain (default max 2).
+		depth := 0
+		cur := ctx.TaskID
+		for cur != "" {
+			depth++
+			if depth >= maxSpawnDepth {
+				return nil, fmt.Errorf("spawn depth limit (%d) reached", maxSpawnDepth)
+			}
+			next := ""
+			for _, t := range ctx.Store.Snapshot().Tasks {
+				if t.ID == cur {
+					next = t.ParentID
+					break
+				}
+			}
+			cur = next
+		}
+		title := args.TaskTitle
+		if title == "" {
+			title = "Delegated task for " + args.AgentName
+		}
+		if args.AgentName == "" {
+			return nil, fmt.Errorf("agent_name is required (available teammates: %d agents)", len(ctx.Store.RoomAgentNames(ctx.RoomID)))
+		}
+		teamID := ctx.Store.TeamIDForRoomAgent(ctx.RoomID, args.AgentName)
+		if teamID == "" {
+			return nil, fmt.Errorf("cannot spawn %q: not a member of a team invited to this room (available teammates: %s)", args.AgentName, strings.Join(ctx.Store.RoomAgentNames(ctx.RoomID), ", "))
+		}
+		task := Task{
+			ID:           uuid.NewString(),
+			RoomID:       ctx.RoomID,
+			AgentName:    args.AgentName,
+			TeamID:       teamID,
+			Title:        title,
+			Description:  args.TaskDesc,
+			Status:       "todo",
+			Priority:     "normal",
+			Effort:       "medium",
+			Dependencies: []string{},
+		}
+		created, err := ctx.Store.CreateTask(task)
+		if err != nil {
+			return nil, err
+		}
+		_ = ctx.Store.RecordActivity(ctx.RoomID, ctx.AgentName, "agent.spawned", fmt.Sprintf("Spawning agent @%s (task %s)", args.AgentName, created.ID), nil)
+		_ = ctx.Store.AppendRoomNotice(ctx.RoomID, ctx.AgentName, "agent.spawned",
+			fmt.Sprintf("🤝 @%s delegated to @%s: %s — task created on the Kanban board", ctx.AgentName, args.AgentName, title))
+		// Wake the teammate up: their run auto-starts as soon as capacity frees.
+		ctx.Store.EnqueueAutoStart(created.ID)
+		return map[string]any{"status": "spawned", "agent": args.AgentName, "task_id": created.ID}, nil
+	}))
+
+	// register_panel
+	add(functiontool.New[registerPanelArgs, map[string]any](functiontool.Config{
+		Name:        "register_panel",
+		Description: "Register a custom UI panel.",
+	}, func(ac agent.Context, args registerPanelArgs) (map[string]any, error) {
+		if ctx.Store == nil {
+			return nil, fmt.Errorf("store unavailable")
+		}
+		roomID := args.RoomID
+		if roomID == "" {
+			roomID = ctx.RoomID
+		}
+		id, err := ctx.Store.RegisterPanel(PanelRecord{
+			RoomID:       roomID,
+			Title:        args.Title,
+			Renderer:     args.PanelType,
+			ManifestJSON: args.DataJSON,
+			Status:       "pending",
+			CreatedAt:    time.Now().UTC(),
+		})
+		if err != nil {
+			return nil, err
+		}
+		return map[string]any{"panel_id": id, "status": "pending"}, nil
+	}))
+
+	// send_message
+	add(functiontool.New[sendMessageArgs, map[string]any](functiontool.Config{
+		Name:        "send_message",
+		Description: "Send a message to the room chat.",
+	}, func(ac agent.Context, args sendMessageArgs) (map[string]any, error) {
+		if ctx.Store == nil {
+			return nil, fmt.Errorf("store unavailable")
+		}
+		roomID := args.RoomID
+		if roomID == "" {
+			roomID = ctx.RoomID
+		}
+		_, err := ctx.Store.AppendRoomMessage(roomID, "assistant", args.Content)
+		if err != nil {
+			return nil, err
+		}
+		return map[string]any{"status": "sent"}, nil
+	}))
+
+	// escalate
+	add(functiontool.New[escalateArgs, map[string]any](functiontool.Config{
+		Name:        "escalate",
+		Description: "Report a blocker or issue to the human/lead. Creates a review item with a severity (info|warning|blocker) so it is visible in the Approvals Inbox with the right colour.",
+	}, func(ac agent.Context, args escalateArgs) (map[string]any, error) {
+		if ctx.Store == nil {
+			return nil, fmt.Errorf("store unavailable")
+		}
+		raw := args.Severity
+		if raw == "" {
+			raw = "warning"
+		}
+		sev := normalizeSeverity(raw)
+		title := strings.TrimSpace(args.Title)
+		if title == "" {
+			title = "Escalation"
+		}
+		id, err := ctx.Store.CreateApproval(ApprovalRecord{
+			RoomID:      ctx.RoomID,
+			Type:        "escalation",
+			Description: args.Message,
+			Severity:    sev,
+		})
+		if err != nil {
+			return nil, err
+		}
+		_ = ctx.Store.RecordActivity(ctx.RoomID, ctx.AgentName, "task.blocked", args.Message, nil)
+		icon := map[string]string{"blocker": "🛑", "warning": "⚠️", "info": "ℹ️"}[sev]
+		_ = ctx.Store.AppendRoomNotice(ctx.RoomID, ctx.AgentName, "task.escalated",
+			fmt.Sprintf("%s @%s raised a %s issue: %s", icon, ctx.AgentName, sev, args.Message))
+		return map[string]any{"status": "escalated", "approval_id": id, "severity": sev}, nil
+	}))
+
+	// grep_files
+	add(functiontool.New[grepFilesArgs, map[string]any](functiontool.Config{
+		Name:        "grep_files",
+		Description: "Search files for a regex pattern. Respects ignore rules, skips hidden/binary/large files, returns path:line:column:text (up to 100 matches).",
+	}, func(ac agent.Context, args grepFilesArgs) (map[string]any, error) {
+		root := ctx.Workspace
+		if args.Path != "" {
+			root = args.Path
+		}
+		re := safeRegexp(args.Pattern, args.CaseInsensitive)
+		before := args.Before
+		if before < 0 {
+			before = 0
+		}
+		after := args.After
+		if after < 0 {
+			after = 0
+		}
+		maxMatches := args.MaxMatches
+		if maxMatches <= 0 {
+			maxMatches = 100
+		}
+		if maxMatches > 500 {
+			maxMatches = 500
+		}
+		// Prefer ripgrep when available (fast, respects .gitignore), except
+		// when context lines are requested (Go fallback handles those).
+		if rgAvailable() && before == 0 && after == 0 {
+			return rgGrep(root, args)
+		}
+		var matches []map[string]any
+		var scanned int
+		_ = walkProject(root, func(path, rel string, info os.FileInfo) error {
+			data, err := os.ReadFile(path)
+			if err != nil {
+				return nil
+			}
+			if bytes.IndexByte(data, 0) >= 0 {
+				return nil // binary
+			}
+			scanned++
+			lines := strings.Split(string(data), "\n")
+			for i, line := range lines {
+				if !re.MatchString(line) {
+					continue
+				}
+				ctxLines := []map[string]any{{"text": line}}
+				for k := 1; k <= before && i-k >= 0; k++ {
+					ctxLines = append([]map[string]any{{"text": lines[i-k], "context": true}}, ctxLines...)
+				}
+				for k := 1; k <= after && i+k < len(lines); k++ {
+					ctxLines = append(ctxLines, map[string]any{"text": lines[i+k], "context": true})
+				}
+				matches = append(matches, map[string]any{
+					"file": rel, "line": i + 1, "column": colOf(re, line), "lines": ctxLines,
+				})
+				if len(matches) >= maxMatches {
+					return errStopWalk
+				}
+			}
+			return nil
+		})
+		return map[string]any{"matches": matches, "count": len(matches), "files_scanned": scanned}, nil
+	}))
+
+	// glob_files
+	add(functiontool.New[globFilesArgs, map[string]any](functiontool.Config{
+		Name:        "glob_files",
+		Description: "List workspace files matching a glob pattern (supports **). Respects ignore rules and skips hidden/build dirs.",
+	}, func(ac agent.Context, args globFilesArgs) (map[string]any, error) {
+		root := ctx.Workspace
+		if args.Path != "" {
+			root = args.Path
+		}
+		pattern := args.Pattern
+		if pattern == "" {
+			pattern = "**/*"
+		}
+		if rgAvailable() {
+			return rgGlob(root, pattern)
+		}
+		re := globRegex(pattern)
+		var out []string
+		maxFiles := 500
+		_ = walkProject(root, func(path, rel string, info os.FileInfo) error {
+			if re.MatchString(rel) {
+				out = append(out, rel)
+				if len(out) >= maxFiles {
+					return errStopWalk
+				}
+			}
+			return nil
+		})
+		return map[string]any{"files": out, "count": len(out)}, nil
+	}))
+
+	// repo_map
+	add(functiontool.New[repoMapArgs, map[string]any](functiontool.Config{
+		Name:        "repo_map",
+		Description: "Build a concise map of source files and their key symbols (Aider-style). Use once at the start to orient in an unfamiliar codebase before grepping/reading.",
+	}, func(ac agent.Context, args repoMapArgs) (map[string]any, error) {
+		root := ctx.Workspace
+		if args.Path != "" {
+			root = args.Path
+		}
+		return buildRepoMap(root, args.MaxChars), nil
+	}))
+
+	// search_index: FTS5 full-text search over the workspace with incremental
+	// indexing. Faster than grep for locating a symbol across many files; falls
+	// back to a plain scan when FTS5 is unavailable.
+	if ctx.Store != nil {
+		add(functiontool.New[searchIndexArgs, map[string]any](functiontool.Config{
+			Name:        "search_index",
+			Description: "Full-text search the workspace via an incremental index; returns file:line matches. Prefer over grep for locating symbols across many files; use grep for exact regex.",
+		}, func(ac agent.Context, args searchIndexArgs) (map[string]any, error) {
+			root := ctx.Workspace
+			if root == "" {
+				return nil, fmt.Errorf("no workspace")
+			}
+			indexed, removed, _ := ctx.Store.IndexWorkspace(root)
+			hits, usedIndex, err := ctx.Store.SearchWorkspace(root, args.Query, args.Limit)
+			if err != nil {
+				return nil, err
+			}
+			out := make([]map[string]any, 0, len(hits))
+			for _, h := range hits {
+				out = append(out, map[string]any{"file": h.Path, "line": h.Line, "text": h.Text})
+			}
+			return map[string]any{
+				"matches":    out,
+				"count":      len(out),
+				"used_index": usedIndex,
+				"indexed":    indexed,
+				"removed":    removed,
+			}, nil
+		}))
+	}
+
+	// delete_task
+	add(functiontool.New[deleteTaskArgs, map[string]any](functiontool.Config{
+		Name:        "delete_task",
+		Description: "Delete a task card from the Kanban board.",
+	}, func(ac agent.Context, args deleteTaskArgs) (map[string]any, error) {
+		if ctx.Store == nil {
+			return nil, fmt.Errorf("store unavailable")
+		}
+		if args.TaskID == "" {
+			args.TaskID = ctx.TaskID
+		}
+		if err := ctx.Store.DeleteTask(args.TaskID); err != nil {
+			return nil, err
+		}
+		_ = ctx.Store.RecordActivity(ctx.RoomID, ctx.AgentName, "task.deleted", fmt.Sprintf("Deleted task %s", args.TaskID), nil)
+		_ = ctx.Store.AppendRoomNotice(ctx.RoomID, ctx.AgentName, "task.deleted",
+			fmt.Sprintf("🗑️ @%s deleted a task card", ctx.AgentName))
+		return map[string]any{"status": "deleted", "task_id": args.TaskID}, nil
+	}))
+
+	// delete_plan
+	add(functiontool.New[deletePlanArgs, map[string]any](functiontool.Config{
+		Name:        "delete_plan",
+		Description: "Delete a room's plan.",
+	}, func(ac agent.Context, args deletePlanArgs) (map[string]any, error) {
+		if ctx.Store == nil {
+			return nil, fmt.Errorf("store unavailable")
+		}
+		roomID := args.RoomID
+		if roomID == "" {
+			roomID = ctx.RoomID
+		}
+		if err := ctx.Store.DeletePlan(roomID); err != nil {
+			return nil, err
+		}
+		return map[string]any{"status": "deleted"}, nil
+	}))
+
+	// delete_artifact
+	add(functiontool.New[deleteArtifactArgs, map[string]any](functiontool.Config{
+		Name:        "delete_artifact",
+		Description: "Delete an artifact.",
+	}, func(ac agent.Context, args deleteArtifactArgs) (map[string]any, error) {
+		if ctx.Store == nil {
+			return nil, fmt.Errorf("store unavailable")
+		}
+		if err := ctx.Store.DeleteArtifact(args.ArtifactID); err != nil {
+			return nil, err
+		}
+		return map[string]any{"status": "deleted"}, nil
+	}))
+
+	// file editor tools
+	feTools := []tool.Tool{}
+	if t, err := makeViewFileTool(ctx); err == nil {
+		if tt, ok := t.(tool.Tool); ok {
+			feTools = append(feTools, tt)
+		}
+	}
+	if t, err := makeCreateFileTool(ctx); err == nil {
+		if tt, ok := t.(tool.Tool); ok {
+			feTools = append(feTools, tt)
+		}
+	}
+	if t, err := makeReplaceStringTool(ctx); err == nil {
+		if tt, ok := t.(tool.Tool); ok {
+			feTools = append(feTools, tt)
+		}
+	}
+	if t, err := makeInsertLinesTool(ctx); err == nil {
+		if tt, ok := t.(tool.Tool); ok {
+			feTools = append(feTools, tt)
+		}
+	}
+	tools = append(tools, feTools...)
+
+	return tools
+}
+
+func mustMarshal(v any) string {
+	b, _ := json.Marshal(v)
+	return string(b)
+}

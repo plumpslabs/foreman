@@ -109,6 +109,147 @@ func classifyChatMessage(content string) chatKind {
 	return chatLight
 }
 
+// resolveChatMentions scans content for leading/inline @agent and #team mentions across all invited teams.
+func resolveChatMentions(content string, teams []*Team) (team *Team, agentName string, prompt string) {
+	if len(teams) == 0 {
+		return nil, "", content
+	}
+
+	trimmed := strings.TrimSpace(content)
+	var matchedTeams []*Team
+	var matchedAgents []string
+
+	// Greedily consume leading mentions (@agent or #team)
+	for {
+		trimmed = strings.TrimSpace(trimmed)
+		if strings.HasPrefix(trimmed, "#") {
+			target := strings.TrimPrefix(trimmed, "#")
+			var bestTeam *Team
+			bestLen := 0
+			for _, tm := range teams {
+				name := strings.TrimSpace(tm.Name)
+				if name != "" {
+					if target == name || strings.HasPrefix(target, name+" ") {
+						if len(name) > bestLen {
+							bestTeam = tm
+							bestLen = len(name)
+						}
+					}
+				}
+				id := strings.TrimSpace(tm.ID)
+				if id != "" {
+					if target == id || strings.HasPrefix(target, id+" ") {
+						if len(id) > bestLen {
+							bestTeam = tm
+							bestLen = len(id)
+						}
+					}
+				}
+			}
+			if bestTeam != nil {
+				matchedTeams = append(matchedTeams, bestTeam)
+				trimmed = strings.TrimSpace(target[bestLen:])
+				continue
+			}
+		}
+
+		if strings.HasPrefix(trimmed, "@") {
+			target := strings.TrimPrefix(trimmed, "@")
+			bestAgent := ""
+			var bestTeam *Team
+			bestLen := 0
+			for _, tm := range teams {
+				for _, a := range tm.Agents {
+					name := strings.TrimSpace(a.Name)
+					if name == "" {
+						continue
+					}
+					if target == name || strings.HasPrefix(target, name+" ") {
+						if len(name) > bestLen {
+							bestAgent = name
+							bestTeam = tm
+							bestLen = len(name)
+						}
+					}
+				}
+			}
+			if bestAgent != "" {
+				matchedAgents = append(matchedAgents, bestAgent)
+				if bestTeam != nil {
+					matchedTeams = append(matchedTeams, bestTeam)
+				}
+				trimmed = strings.TrimSpace(target[bestLen:])
+				continue
+			}
+		}
+
+		break
+	}
+
+	cleanPrompt := strings.TrimSpace(trimmed)
+	if cleanPrompt == "" {
+		cleanPrompt = strings.TrimSpace(content)
+	}
+
+	// 1. Pick target team
+	if len(matchedTeams) > 0 {
+		team = matchedTeams[0]
+	} else {
+		team = teams[0]
+	}
+
+	// 2. Pick target agent
+	if len(matchedAgents) == 1 {
+		// Single agent mentioned directly
+		agentName = matchedAgents[0]
+		for _, tm := range teams {
+			for _, a := range tm.Agents {
+				if a.Name == agentName {
+					team = tm
+					break
+				}
+			}
+		}
+		prompt = cleanPrompt
+		return team, agentName, prompt
+	}
+
+	if len(matchedAgents) > 1 {
+		// Multi-agent mention: check if any is a MainAgent / Coordinator
+		for _, ag := range matchedAgents {
+			for _, tm := range teams {
+				if tm.MainAgent == ag {
+					agentName = ag
+					team = tm
+					break
+				}
+			}
+			if agentName != "" {
+				break
+			}
+		}
+		// If neither is MainAgent, let the team coordinator handle orchestration
+		if agentName == "" {
+			agentName = team.MainAgent
+		}
+
+		tagList := make([]string, len(matchedAgents))
+		for i, a := range matchedAgents {
+			tagList[i] = "@" + a
+		}
+
+		guidance := fmt.Sprintf("[Multi-Agent Orchestration: User tagged %s. As team coordinator (%s), decompose this request, assign tasks to the tagged specialist agents, and orchestrate execution.]\n\n%s",
+			strings.Join(tagList, ", "), agentName, cleanPrompt)
+
+		return team, agentName, guidance
+	}
+
+	// No agents mentioned specifically; if a #team was mentioned, use its MainAgent
+	agentName = team.MainAgent
+	prompt = cleanPrompt
+	return team, agentName, prompt
+}
+
 // RoomMainAgentName returns the main agent of the room's first invited team.
 func (s *Store) RoomMainAgentName(roomID string) string {
 	s.mu.RLock()
@@ -149,46 +290,30 @@ func (s *Store) GetOrCreateChatThread(roomID, content string) (Task, error) {
 		return Task{}, errors.New("invite a team to this room before chatting with an agent")
 	}
 
-	// Resolve the mention across every invited team; fall back to the first
-	// team's main agent.
-	var team *Team
-	var agentName, prompt string
+	// Resolve mentions (@agent and #team) across all invited teams;
+	// fall back to the first team's main agent.
+	var invitedTeams []*Team
 	for _, teamID := range room.TeamIDs {
 		for i := range s.state.Teams {
-			if s.state.Teams[i].ID != teamID {
-				continue
-			}
-			tm := &s.state.Teams[i]
-			if team == nil {
-				team = tm
-			}
-			if name, rest := parseChatMention(content, tm); name != "" {
-				team = tm
-				agentName = name
-				prompt = rest
+			if s.state.Teams[i].ID == teamID {
+				invitedTeams = append(invitedTeams, &s.state.Teams[i])
 				break
 			}
 		}
-		if agentName != "" {
-			break
-		}
 	}
-	if team == nil {
+	if len(invitedTeams) == 0 {
 		return Task{}, errors.New("the invited team no longer exists")
 	}
-	if agentName == "" {
-		agentName = team.MainAgent
-	}
-	prompt = strings.TrimSpace(prompt)
-	if prompt == "" {
-		prompt = strings.TrimSpace(content)
-	}
 
-	// Reuse the existing non-running hidden thread for THIS agent so history is
-	// preserved per agent (one conversation per agent in a room).
+	team, agentName, prompt := resolveChatMentions(content, invitedTeams)
+
+	// Reuse the existing hidden thread for THIS agent only when it is idle in
+	// "todo" (after a finished/cancelled run the hidden thread resets to todo).
+	// Other states create a fresh thread so a weird state can never block a new
+	// prompt or clobber a running conversation.
 	for i := range s.state.Tasks {
 		t := &s.state.Tasks[i]
-		if t.RoomID == roomID && t.Hidden && t.AgentName == agentName && t.Status != "running" {
+		if t.RoomID == roomID && t.Hidden && t.AgentName == agentName && t.Status == "todo" {
 			previous := s.state.Tasks[i].Description
 			t.Description = prompt
 			t.UpdatedAt = time.Now().UTC()
@@ -228,6 +353,37 @@ func (s *Store) GetOrCreateChatThread(roomID, content string) (Task, error) {
 	return task, nil
 }
 
+// AppendRoomNotice records a lightweight system/agent action notice in the
+// room chat so users see progress (task created, delegation, errors) without
+// watching the Kanban or activity log. Notices render as compact chips.
+func (s *Store) AppendRoomNotice(roomID, agentName, activityType, content string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	content = strings.TrimSpace(content)
+	if content == "" {
+		return nil
+	}
+	for i := range s.state.Rooms {
+		if s.state.Rooms[i].ID != roomID {
+			continue
+		}
+		if len(content) > 2000 {
+			content = content[:2000]
+		}
+		message := NewChatMessage("system", content)
+		message.AgentName = agentName
+		message.ActivityType = activityType
+		previous := s.state.Rooms[i].Messages
+		s.state.Rooms[i].Messages = append(previous, message)
+		if err := s.save(); err != nil {
+			s.state.Rooms[i].Messages = previous
+			return err
+		}
+		return nil
+	}
+	return fmt.Errorf("unknown room id %q", roomID)
+}
+
 // AppendAgentReply records an agent's answer in the room chat.
 func (s *Store) AppendAgentReply(roomID, agentName, content string) error {
 	s.mu.Lock()
@@ -265,7 +421,7 @@ func (rt *Runtime) StartChatRun(parent context.Context, roomID, content string) 
 		return AgentRun{}, err
 	}
 	if rt.store.HasRunningRunForTask(task.ID) {
-		return AgentRun{}, errors.New("agent masih sibuk dengan pesan sebelumnya — tunggu sampai selesai, atau pause dulu")
+		return AgentRun{}, errors.New("agent is still busy with the previous message — wait for it to finish, or stop the run first")
 	}
 	return rt.StartTask(parent, task.ID)
 }

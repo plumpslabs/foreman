@@ -55,6 +55,14 @@ const ICONS = {
     </>
   ),
   'chevron-right': <path d="m9 18 6-6-6-6" />,
+  'network': (
+    <>
+      <circle cx="5" cy="6" r="2" />
+      <circle cx="19" cy="6" r="2" />
+      <circle cx="12" cy="18" r="2" />
+      <path d="M7 6h10M5 8l4 8M19 8l-4 8" />
+    </>
+  ),
   'chevron-down': <path d="m6 9 6 6 6-6" />,
   search: (
     <>

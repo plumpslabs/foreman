@@ -8,11 +8,13 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/url"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -23,6 +25,9 @@ type Server struct {
 	store   *Store
 	root    string
 	runtime *Runtime
+
+	sseMu   sync.Mutex
+	sseSubs map[chan struct{}]struct{}
 }
 
 func NewServer(st *Store, projectPath string) (*Server, error) {
@@ -30,15 +35,19 @@ func NewServer(st *Store, projectPath string) (*Server, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Server{store: st, root: root, runtime: NewRuntime(st)}, nil
+	srv := &Server{store: st, root: root, runtime: NewRuntime(st), sseSubs: map[chan struct{}]struct{}{}}
+	st.SetOnChange(srv.broadcastSSE)
+	return srv, nil
 }
 
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/health", s.health)
+	mux.HandleFunc("GET /api/events", s.events)
 	mux.HandleFunc("GET /api/workspace", s.workspace)
 	mux.HandleFunc("POST /api/teams/import", s.importTeam)
 	mux.HandleFunc("PUT /api/teams/{teamID}", s.updateTeam)
+	mux.HandleFunc("DELETE /api/teams/{teamID}", s.deleteTeam)
 	mux.HandleFunc("POST /api/agents", s.saveAgent)
 	mux.HandleFunc("PUT /api/agents/{agentID}", s.updateAgent)
 	mux.HandleFunc("DELETE /api/agents/{agentID}", s.deleteAgent)
@@ -62,12 +71,105 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("PUT /api/settings", s.updateSettings)
 	mux.HandleFunc("POST /api/skills", s.saveSkill)
 	mux.HandleFunc("DELETE /api/skills/{skillID}", s.deleteSkill)
+	mux.HandleFunc("GET /api/rooms/{roomID}/plan", s.getRoomPlan)
+	mux.HandleFunc("PUT /api/rooms/{roomID}/plan", s.saveRoomPlan)
+	mux.HandleFunc("GET /api/rooms/{roomID}/artifacts", s.listRoomArtifacts)
+	mux.HandleFunc("POST /api/rooms/{roomID}/artifacts", s.saveRoomArtifact)
+	mux.HandleFunc("GET /api/rooms/{roomID}/approvals", s.listRoomApprovals)
+	mux.HandleFunc("GET /api/approvals", s.listAllApprovals)
+	mux.HandleFunc("POST /api/approvals/{approvalID}/resolve", s.resolveApproval)
+	mux.HandleFunc("GET /api/rooms/{roomID}/panels", s.listRoomPanels)
+	mux.HandleFunc("POST /api/rooms/{roomID}/panels", s.registerRoomPanel)
+	mux.HandleFunc("GET /api/rooms/{roomID}/memory", s.getRoomMemory)
+	mux.HandleFunc("POST /api/rooms/{roomID}/memory", s.setRoomMemory)
+	mux.HandleFunc("GET /api/mcp", s.listMCP)
+	mux.HandleFunc("POST /api/mcp", s.saveMCP)
+	mux.HandleFunc("PUT /api/mcp/{serverID}", s.updateMCP)
+	mux.HandleFunc("DELETE /api/mcp/{serverID}", s.deleteMCP)
+	mux.HandleFunc("POST /api/mcp/{serverID}/test", s.testMCP)
+	mux.HandleFunc("PUT /api/rooms/{roomID}/mcp", s.setRoomMCP)
 	static, err := fs.Sub(webFiles, "web/dist")
 	if err != nil {
 		panic("foreman: embedded dashboard is missing; run `make web` before building: " + err.Error())
 	}
 	mux.Handle("GET /", http.FileServer(http.FS(static)))
-	return s.localOnly(mux)
+	return s.localOnly(s.recoverMiddleware(mux))
+}
+
+// recoverMiddleware prevents a panic in any handler from tearing down the
+// whole server and logs it as a structured error.
+func (s *Server) recoverMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer func() {
+			if rec := recover(); rec != nil {
+				slog.Error("panic recovered", "err", fmt.Sprint(rec), "path", r.URL.Path, "method", r.Method)
+				writeError(w, http.StatusInternalServerError, "internal server error")
+			}
+		}()
+		next.ServeHTTP(w, r)
+	})
+}
+
+func (s *Server) broadcastSSE() {
+	s.sseMu.Lock()
+	defer s.sseMu.Unlock()
+	for ch := range s.sseSubs {
+		select {
+		case ch <- struct{}{}:
+		default:
+		}
+	}
+}
+
+func (s *Server) subscribeSSE() chan struct{} {
+	ch := make(chan struct{}, 1)
+	s.sseMu.Lock()
+	s.sseSubs[ch] = struct{}{}
+	s.sseMu.Unlock()
+	return ch
+}
+
+func (s *Server) unsubscribeSSE(ch chan struct{}) {
+	s.sseMu.Lock()
+	delete(s.sseSubs, ch)
+	s.sseMu.Unlock()
+}
+
+func (s *Server) events(w http.ResponseWriter, r *http.Request) {
+	if err := s.verifyProject(r.URL.Query().Get("project")); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		writeError(w, http.StatusInternalServerError, "streaming not supported")
+		return
+	}
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.Header().Set("X-Accel-Buffering", "no")
+
+	ch := s.subscribeSSE()
+	defer s.unsubscribeSSE(ch)
+
+	fmt.Fprintf(w, "event: update\ndata: {}\n\n")
+	flusher.Flush()
+
+	ticker := time.NewTicker(20 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ch:
+			fmt.Fprintf(w, "event: update\ndata: {}\n\n")
+			flusher.Flush()
+		case <-ticker.C:
+			fmt.Fprintf(w, ": ping\n\n")
+			flusher.Flush()
+		case <-r.Context().Done():
+			return
+		}
+	}
 }
 
 func (s *Server) health(w http.ResponseWriter, _ *http.Request) {
@@ -122,6 +224,18 @@ func (s *Server) updateTeam(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, updated)
+}
+
+func (s *Server) deleteTeam(w http.ResponseWriter, r *http.Request) {
+	if err := s.verifyProject(r.URL.Query().Get("project")); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if err := s.store.DeleteTeam(r.PathValue("teamID")); err != nil {
+		writeError(w, http.StatusUnprocessableEntity, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
 }
 
 func (s *Server) saveAgent(w http.ResponseWriter, r *http.Request) {
@@ -261,7 +375,7 @@ func (s *Server) engineInstall(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		reason, hint = classifyInstallError(err, out, diag.PythonVersion)
 		if reason == "" {
-			reason = "Installasi gagal — lihat log di bawah."
+			reason = "Installation failed — see the log below."
 		}
 	}
 	if len(out) > 6000 {
@@ -337,14 +451,17 @@ func (s *Server) appendRoomMessage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// User chat messages trigger an agent run (routed to the mentioned agent or
-	// the team's main agent). If the room is not runnable, the message is still
-	// stored and a human-readable warning is returned to the sender.
+	// the team's main agent). The run is started in the background so the HTTP
+	// response (and the persisted user message) returns immediately; the
+	// dashboard picks up the running state via its polling loop.
 	var run *AgentRun
 	var warning string
 	if req.Role == "user" {
 		started, runErr := s.runtime.StartChatRun(context.WithoutCancel(r.Context()), r.PathValue("roomID"), req.Content)
 		if runErr != nil {
 			warning = runErr.Error()
+			_ = s.store.AppendRoomNotice(r.PathValue("roomID"), "", "chat.error",
+				fmt.Sprintf("⚠️ Message could not be run: %v", runErr))
 		} else {
 			run = &started
 		}
@@ -709,4 +826,288 @@ func NewHTTPServer(addr string, handler http.Handler) *http.Server {
 		IdleTimeout:       60 * time.Second,
 		MaxHeaderBytes:    1 << 20,
 	}
+}
+
+func (s *Server) getRoomPlan(w http.ResponseWriter, r *http.Request) {
+	roomID := r.PathValue("roomID")
+	plan, err := s.store.GetPlan(roomID)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "plan not found")
+		return
+	}
+	writeJSON(w, http.StatusOK, plan)
+}
+
+func (s *Server) saveRoomPlan(w http.ResponseWriter, r *http.Request) {
+	roomID := r.PathValue("roomID")
+	var plan PlanRecord
+	if err := decodeJSON(w, r, &plan); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	plan.RoomID = roomID
+	if err := s.store.SavePlan(plan); err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, plan)
+}
+
+func (s *Server) listRoomArtifacts(w http.ResponseWriter, r *http.Request) {
+	roomID := r.PathValue("roomID")
+	artifacts, err := s.store.ListArtifacts(roomID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, artifacts)
+}
+
+func (s *Server) saveRoomArtifact(w http.ResponseWriter, r *http.Request) {
+	roomID := r.PathValue("roomID")
+	var art ArtifactRecord
+	if err := decodeJSON(w, r, &art); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	art.RoomID = roomID
+	if err := s.store.SaveArtifact(art); err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusCreated, art)
+}
+
+func (s *Server) listRoomApprovals(w http.ResponseWriter, r *http.Request) {
+	roomID := r.PathValue("roomID")
+	approvals, err := s.store.ListApprovals(roomID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, approvals)
+}
+
+func (s *Server) listAllApprovals(w http.ResponseWriter, r *http.Request) {
+	approvals, err := s.store.ListApprovals("")
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, approvals)
+}
+
+func (s *Server) resolveApproval(w http.ResponseWriter, r *http.Request) {
+	approvalID := r.PathValue("approvalID")
+	var req struct {
+		Status string `json:"status"`
+	}
+	if err := decodeJSON(w, r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if err := s.store.ResolveApproval(approvalID, req.Status); err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if req.Status == "approved" {
+		s.applyApprovedApproval(approvalID)
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": req.Status})
+}
+
+// applyApprovedApproval performs side effects for approved approvals, such as
+// actually spawning a teammate when a request_spawn approval is approved.
+func (s *Server) applyApprovedApproval(approvalID string) {
+	app, ok := s.store.GetApproval(approvalID)
+	if !ok || app.Type != "request_spawn" {
+		return
+	}
+	var pl struct {
+		Action    string `json:"action"`
+		AgentName string `json:"agent_name"`
+		Title     string `json:"title"`
+		Desc      string `json:"desc"`
+	}
+	if err := json.Unmarshal([]byte(app.PayloadJSON), &pl); err != nil || pl.Action != "request_spawn" || pl.AgentName == "" {
+		return
+	}
+	teamID := s.store.TeamIDForRoomAgent(app.RoomID, pl.AgentName)
+	if teamID == "" {
+		return
+	}
+	title := pl.Title
+	if title == "" {
+		title = "Delegated task for " + pl.AgentName
+	}
+	task := Task{
+		RoomID: app.RoomID, AgentName: pl.AgentName, TeamID: teamID,
+		Title: title, Description: pl.Desc, Status: "todo",
+		Priority: "normal", Effort: "medium", Dependencies: []string{},
+	}
+	created, err := s.store.CreateTask(task)
+	if err != nil {
+		return
+	}
+	s.store.EnqueueAutoStart(created.ID)
+	_ = s.store.AppendRoomNotice(app.RoomID, pl.AgentName, "agent.spawned",
+		fmt.Sprintf("🆘 spawn request approved — @%s spawned: %s", pl.AgentName, title))
+}
+
+func (s *Server) listRoomPanels(w http.ResponseWriter, r *http.Request) {
+	roomID := r.PathValue("roomID")
+	includePending := r.URL.Query().Get("all") == "true"
+	panels, err := s.store.ListPanels(roomID, includePending)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, panels)
+}
+
+func (s *Server) registerRoomPanel(w http.ResponseWriter, r *http.Request) {
+	roomID := r.PathValue("roomID")
+	var p PanelRecord
+	if err := decodeJSON(w, r, &p); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	p.RoomID = roomID
+	id, err := s.store.RegisterPanel(p)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	p.ID = id
+	writeJSON(w, http.StatusCreated, p)
+}
+
+func (s *Server) getRoomMemory(w http.ResponseWriter, r *http.Request) {
+	roomID := r.PathValue("roomID")
+	key := r.URL.Query().Get("key")
+	if key == "" {
+		writeError(w, http.StatusBadRequest, "key is required")
+		return
+	}
+	val, err := s.store.DB().GetMemory(roomID, key)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "key not found")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"key": key, "value": val})
+}
+
+func (s *Server) setRoomMemory(w http.ResponseWriter, r *http.Request) {
+	roomID := r.PathValue("roomID")
+	var req struct {
+		Key       string `json:"key"`
+		Value     string `json:"value"`
+		UpdatedBy string `json:"updatedBy"`
+	}
+	if err := decodeJSON(w, r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if err := s.store.DB().SetMemory(roomID, req.Key, req.Value, req.UpdatedBy); err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+/* ---------- MCP Servers (global) ---------- */
+
+func (s *Server) listMCP(w http.ResponseWriter, r *http.Request) {
+	if err := s.verifyProject(r.URL.Query().Get("project")); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, s.store.ListMCPServers())
+}
+
+func (s *Server) saveMCP(w http.ResponseWriter, r *http.Request) {
+	if err := s.verifyProject(r.URL.Query().Get("project")); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	var srv MCPServer
+	if err := decodeJSON(w, r, &srv); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	saved, err := s.store.SaveMCPServer(srv)
+	if err != nil {
+		writeError(w, http.StatusUnprocessableEntity, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusCreated, saved)
+}
+
+func (s *Server) updateMCP(w http.ResponseWriter, r *http.Request) {
+	if err := s.verifyProject(r.URL.Query().Get("project")); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	var srv MCPServer
+	if err := decodeJSON(w, r, &srv); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	srv.ID = r.PathValue("serverID")
+	saved, err := s.store.SaveMCPServer(srv)
+	if err != nil {
+		writeError(w, http.StatusUnprocessableEntity, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, saved)
+}
+
+func (s *Server) deleteMCP(w http.ResponseWriter, r *http.Request) {
+	if err := s.verifyProject(r.URL.Query().Get("project")); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if err := s.store.DeleteMCPServer(r.PathValue("serverID")); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+func (s *Server) testMCP(w http.ResponseWriter, r *http.Request) {
+	if err := s.verifyProject(r.URL.Query().Get("project")); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	srv, ok := s.store.GetMCPServer(r.PathValue("serverID"))
+	if !ok {
+		writeError(w, http.StatusBadRequest, "unknown mcp server")
+		return
+	}
+	n, err := testMCPConnection(srv)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "MCP connection failed: "+err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "tools": n})
+}
+
+func (s *Server) setRoomMCP(w http.ResponseWriter, r *http.Request) {
+	if err := s.verifyProject(r.URL.Query().Get("project")); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	var body struct {
+		ServerIDs []string `json:"serverIds"`
+	}
+	if err := decodeJSON(w, r, &body); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	room, err := s.store.SetRoomMCP(r.PathValue("roomID"), body.ServerIDs)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, room)
 }

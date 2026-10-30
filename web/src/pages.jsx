@@ -2,7 +2,8 @@ import { useEffect, useRef, useState } from 'preact/hooks';
 import { api } from './api.js';
 import { Icon } from './icons.jsx';
 import { Markdown } from './markdown.jsx';
-import { DiffView, parseDiff } from './diff.jsx';
+import { ChangesView, parseDiff, mergeFiles } from './diff.jsx';
+import { PlanGraph } from './plan.jsx';
 
 const esc = (s) => String(s ?? '');
 const fmtTokens = (n) => (Number(n) > 0 ? Number(n).toLocaleString() : '—');
@@ -58,12 +59,13 @@ function roomRuntimeStatus(room, runs) {
   return 'idle';
 }
 
-function RoomRow({ room, onOpen, runs, onDelete }) {
+function RoomRow({ room, onOpen, runs, onDelete, mcpServers }) {
   const statusTag = {
     planning: 'muted', running: 'blue', review: 'orange', cancelled: 'red', completed: 'green',
   }[room.status] || 'muted';
   const teamCount = (room.teamIds || []).length;
   const runtime = roomRuntimeStatus(room, runs);
+  const mcpNames = (mcpServers || []).filter((s) => (room.mcpServerIds || []).includes(s.id)).map((s) => s.name);
   return (
     <article
       class="room-row clickable"
@@ -84,6 +86,7 @@ function RoomRow({ room, onOpen, runs, onDelete }) {
           </span>
           <span class={`tag ${statusTag}`}>{esc(room.status)}</span>
           <span class="meta-text">{teamCount} team{teamCount === 1 ? '' : 's'} · {timeAgo(room.createdAt)}</span>
+          {mcpNames.map((n) => <span class="tag blue" key={n}>MCP · {esc(n)}</span>)}
         </div>
       </div>
       {onDelete && (
@@ -113,15 +116,21 @@ function TemplateCard({ template, onUse }) {
         Main agent: <b>{esc(template.mainAgent)}</b>
       </div>
       <div class="chip-row" style="margin-bottom:14px">
-        {(template.agents || []).map((a) => <span class="chip">{esc(a.name)}</span>)}
+        {(template.agents || []).map((a) => <span class="chip" key={a.name}>{esc(a.name)}</span>)}
       </div>
       <button class="btn" style="width:100%;margin-top:auto" disabled={busy}
         onClick={async () => {
+          if (!onUse) {
+            setErr('Handler import belum terpasang.');
+            return;
+          }
           setBusy(true);
           setErr('');
           try {
             const ok = await onUse(template);
-            if (!ok) setErr('Import gagal — lihat notifikasi.');
+            if (!ok) setErr('Import failed — see the notification.');
+          } catch (error) {
+            setErr(error.message || 'Import failed.');
           } finally {
             setBusy(false);
           }
@@ -129,7 +138,7 @@ function TemplateCard({ template, onUse }) {
         {busy ? <span class="btn-spin"><Icon name="refresh" size={14} /></span> : <Icon name="plus" size={14} />}
         {busy ? 'Mengimpor…' : 'Use this template'}
       </button>
-      {err ? <div class="template-err">{esc(err)}</div> : null}
+      {err ? <div class="template-err" style="color:var(--red);font-size:11px;margin-top:6px">{esc(err)}</div> : null}
     </article>
   );
 }
@@ -148,9 +157,11 @@ function ActivityItem({ icon, text, time }) {
 
 /* ---------- Pages ---------- */
 
-export function HomePage({ state, openRoom, setModal, onTeamCreate, onUseTemplate, navigate }) {
+export function HomePage({ state, openRoom, setModal, onTeamCreate, onUseTemplate, openTeamCreate, importTeamTemplate, navigate }) {
   const { rooms, templates, tasks, skills } = state;
   const completedTasks = tasks.filter((t) => t.status === 'done').length;
+  const useTemplate = onUseTemplate || importTeamTemplate;
+  const createTeam = onTeamCreate || openTeamCreate;
   return (
     <>
       <div class="page-head">
@@ -190,7 +201,7 @@ export function HomePage({ state, openRoom, setModal, onTeamCreate, onUseTemplat
         </div>
       </div>
       <div class="template-grid">
-        {templates.map((t) => <TemplateCard key={t.id} template={t} onUse={onUseTemplate} />)}
+        {templates.map((t) => <TemplateCard key={t.id} template={t} onUse={useTemplate} />)}
       </div>
     </>
   );
@@ -210,7 +221,7 @@ export function RoomsPage({ state, openRoom, setModal, deleteRoom }) {
       </div>
       <div class="list">
         {rooms.length
-          ? rooms.map((r) => <RoomRow key={r.id} room={r} onOpen={openRoom} runs={state.runs} onDelete={deleteRoom} />)
+          ? rooms.map((r) => <RoomRow key={r.id} room={r} onOpen={openRoom} runs={state.runs} onDelete={deleteRoom} mcpServers={state.mcpServers || []} />)
           : <div class="empty">No rooms yet. Create one to define a goal and invite teams.</div>}
       </div>
       <div class="panel" style="margin-top:24px">
@@ -223,21 +234,51 @@ export function RoomsPage({ state, openRoom, setModal, deleteRoom }) {
   );
 }
 
-export function RoomDetailHost({ room, state, notify, setModal, runTask, refresh, onBack, cancelRun, pauseRun }) {
+export function RoomDetailHost({ room, state, notify, setModal, runTask, refresh, onBack, cancelRun }) {
   const [tab, setTab] = useState('chat');
+  // Right rail visibility — persisted so a collapsed workspace stays collapsed.
+  const [railOpen, setRailOpen] = useState(() => {
+    try { return window.localStorage.getItem('foreman.roomRail') !== '0'; } catch { return true; }
+  });
+  const toggleRail = () => setRailOpen((v) => {
+    const next = !v;
+    try { window.localStorage.setItem('foreman.roomRail', next ? '1' : '0'); } catch { /* ignore */ }
+    return next;
+  });
   const [draft, setDraft] = useState('');
   const [sending, setSending] = useState(false);
   const [inviteOpen, setInviteOpen] = useState(false);
+  const [mcpOpen, setMcpOpen] = useState(false);
   const [invited, setInvited] = useState(room.teamIds || []);
   const [answerDraft, setAnswerDraft] = useState({});
   const sendQueueRef = useRef([]);
   const sendingRef = useRef(false);
   const refreshRef = useRef(refresh);
   useEffect(() => { refreshRef.current = refresh; });
-  const [mentionAgent, setMentionAgent] = useState('');
+  const [mentions, setMentions] = useState([]);
+  const [mentionTrigger, setMentionTrigger] = useState('@');
   const [mentionOpen, setMentionOpen] = useState(false);
   const [mentionQuery, setMentionQuery] = useState('');
   const [mentionIdx, setMentionIdx] = useState(0);
+
+  const addMention = (item) => {
+    setMentions((prev) => {
+      if (prev.some((m) => m.type === item.type && m.name.toLowerCase() === item.name.toLowerCase())) return prev;
+      return [...prev, item];
+    });
+  };
+  const removeMention = (name, type) => {
+    setMentions((prev) => prev.filter((m) => !(m.name.toLowerCase() === name.toLowerCase() && (!type || m.type === type))));
+  };
+  const clearMentions = () => setMentions([]);
+  const setMentionAgent = (name) => {
+    if (!name) {
+      setMentions((prev) => prev.filter((m) => m.type !== 'agent'));
+    } else {
+      addMention({ type: 'agent', name });
+    }
+  };
+  const mentionAgent = mentions.find((m) => m.type === 'agent')?.name || '';
   const [sdkHintDismissed, setSdkHintDismissed] = useState(false);
   const [engineBusy, setEngineBusy] = useState(false);
   const [engineReason, setEngineReason] = useState('');
@@ -259,28 +300,39 @@ export function RoomDetailHost({ room, state, notify, setModal, runTask, refresh
   useEffect(() => { setInvited(room.teamIds || []); }, [room.id, room.teamIds.join(',')]);
 
   const { teams: allTeams, tasks, skills, runs, settings, agents: allAgents = [] } = state;
-  const teams = allTeams.filter((t) => room.teamIds.includes(t.id));
+  const teams = (room.teamIds || [])
+    .map((id) => allTeams.find((t) => t.id === id))
+    .filter(Boolean);
 
   const roomAgentsList = [];
   const seenAgentNames = new Set();
+  const leadTeamId = teams[0]?.id;
   for (const t of teams) {
+    const isLeadTeam = t.id === leadTeamId;
     if (t.mainAgent && !seenAgentNames.has(t.mainAgent)) {
       seenAgentNames.add(t.mainAgent);
       roomAgentsList.push({
         name: t.mainAgent,
         teamName: t.name,
+        isLead: isLeadTeam,
         isMain: true,
-        role: 'Main agent',
+        role: isLeadTeam ? 'Room lead' : `${t.name} lead`,
       });
     }
     for (const a of t.agents || []) {
       if (!seenAgentNames.has(a.name)) {
         seenAgentNames.add(a.name);
+        const isAgentMain = a.name === t.mainAgent;
         roomAgentsList.push({
           name: a.name,
           teamName: t.name,
-          isMain: a.name === t.mainAgent,
-          role: a.role || (a.name === t.mainAgent ? 'Main agent' : 'Specialist'),
+          isLead: isLeadTeam && isAgentMain,
+          isMain: isAgentMain,
+          role: isLeadTeam && isAgentMain
+            ? 'Room lead'
+            : isAgentMain
+              ? `${t.name} lead`
+              : (a.role || 'Specialist'),
         });
       }
     }
@@ -327,27 +379,44 @@ export function RoomDetailHost({ room, state, notify, setModal, runTask, refresh
     if (tab === 'chat' && chatScrollRef.current) {
       chatScrollRef.current.scrollTop = chatScrollRef.current.scrollHeight;
     }
-  }, [tab, room.id, (room.messages || []).length, (room.questions || []).length, runningRuns.length]);
+  }, [tab, room.id, (room.messages || []).length, (room.questions || []).length, runningRuns.length, runningRuns.map((r) => (r.events || []).length).join(',')]);
 
   // Realtime: while any chat run is active, poll so replies land in the chat
   // without manual refreshes.
   const runningCount = roomRuns.filter((r) => r.status === 'running').length;
   useEffect(() => {
     if (!runningCount) return undefined;
-    const id = setInterval(() => refreshRef.current(), 3000);
+    const id = setInterval(() => refreshRef.current(), 1200);
     return () => clearInterval(id);
   }, [room.id, runningCount]);
 
-  const mentionCandidates = composeAgents.filter(([name]) => name.toLowerCase().includes(mentionQuery.toLowerCase()));
+  const mentionCandidates = (() => {
+    const q = mentionQuery.toLowerCase();
+    if (mentionTrigger === '#') {
+      return teams
+        .filter((t) => t.name.toLowerCase().includes(q) || t.id.toLowerCase().includes(q))
+        .map((t) => ({ type: 'team', name: t.name, sub: `Team lead: ${t.mainAgent}` }));
+    }
+    const agentCands = composeAgents
+      .filter(([name]) => name.toLowerCase().includes(q))
+      .map(([name, teamName]) => ({ type: 'agent', name, sub: teamName }));
+    const teamCands = teams
+      .filter((t) => t.name.toLowerCase().includes(q))
+      .map((t) => ({ type: 'team', name: t.name, sub: `Team lead: ${t.mainAgent}` }));
+    return [...agentCands, ...teamCands];
+  })();
 
-  const pickMention = ([name]) => {
-    setDraft((d) => d.replace(/(?:^|\s)@[^\s]*\s*$/, ''));
-    setMentionAgent(name);
+  const pickMention = (cand) => {
+    if (!cand) return;
+    const name = Array.isArray(cand) ? cand[0] : cand.name;
+    const type = Array.isArray(cand) ? 'agent' : (cand.type || 'agent');
+    setDraft((d) => d.replace(/(?:^|\s)[@#][^\s]*\s*$/, ''));
+    addMention({ type, name });
     setMentionOpen(false);
     setMentionQuery('');
   };
 
-  const clearMention = () => setMentionAgent('');
+  const clearMention = () => clearMentions();
 
   const installEngine = async () => {
     setEngineBusy(true);
@@ -362,7 +431,7 @@ export function RoomDetailHost({ room, state, notify, setModal, runTask, refresh
         setSdkHintDismissed(true);
         await refresh();
       } else {
-        setEngineReason((data && data.error) || 'Installasi gagal — lihat log di bawah.');
+        setEngineReason((data && data.error) || 'Installation failed — see the log below.');
         setEngineHint((data && data.hint) || '');
         setEngineLog((data && data.output) || '');
         notify('Engine install tidak berhasil');
@@ -402,9 +471,14 @@ export function RoomDetailHost({ room, state, notify, setModal, runTask, refresh
   const send = (e) => {
     if (e) e.preventDefault();
     const content = draft.trim();
-    if (!content || sendingRef.current) return;
-    const finalContent = mentionAgent && !draft.startsWith('@') ? `@${mentionAgent} ${content}` : content;
+    if ((!content && !mentions.length) || sendingRef.current) return;
+    const mentionPrefix = mentions
+      .map((m) => (m.type === 'team' ? `#${m.name}` : `@${m.name}`))
+      .filter((tag) => !content.includes(tag))
+      .join(' ');
+    const finalContent = mentionPrefix ? `${mentionPrefix} ${content}`.trim() : content;
     setDraft('');
+    setMentions([]);
     setMentionOpen(false);
     sendQueueRef.current.push(finalContent);
     flushSendQueue();
@@ -413,9 +487,10 @@ export function RoomDetailHost({ room, state, notify, setModal, runTask, refresh
   const onComposeInput = (e) => {
     const value = e.currentTarget.value;
     setDraft(value);
-    const m = value.match(/(?:^|\s)@([^\s]*)\s*$/);
+    const m = value.match(/(?:^|\s)([@#])([^\s]*)\s*$/);
     if (m) {
-      setMentionQuery(m[1]);
+      setMentionTrigger(m[1]);
+      setMentionQuery(m[2]);
       setMentionIdx(0);
       setMentionOpen(true);
     } else {
@@ -445,6 +520,10 @@ export function RoomDetailHost({ room, state, notify, setModal, runTask, refresh
         setMentionOpen(false);
         return;
       }
+    }
+    if (e.key === 'Backspace' && !draft && mentions.length) {
+      setMentions((prev) => prev.slice(0, -1));
+      return;
     }
     // Enter sends; Shift+Enter inserts a newline.
     if (e.key === 'Enter' && !e.shiftKey) {
@@ -502,37 +581,46 @@ export function RoomDetailHost({ room, state, notify, setModal, runTask, refresh
   const total = roomTasks.length;
   const pct = total ? Math.round((done / total) * 100) : 0;
   const diffText = roomRuns
-    .map((run) => `${run.result || ''}\n${(run.events || []).map((e) => e.message).join('\n')}`)
+    .map((run) => (run.events || []).filter((e) => e.type === 'diff').map((e) => e.message).join('\n'))
+    .filter(Boolean)
     .join('\n');
-  const diffFiles = parseDiff(diffText);
+  const diffFiles = mergeFiles(parseDiff(diffText));
+
+  const roomPlan = (state.plans || []).find((p) => p.roomId === room.id);
+  const roomArtifacts = (state.artifacts || []).filter((a) => a.roomId === room.id);
+  const approvedPanels = (state.panels || []).filter((p) => p.roomId === room.id && p.status === 'approved');
 
   const toggleInvite = (id) => setInvited((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
+  const roomMcpNames = (state.mcpServers || []).filter((s) => (room.mcpServerIds || []).includes(s.id)).map((s) => s.name);
 
   return (
     <>
-      <div class="workspace">
+      <div class={`workspace ${railOpen ? '' : 'rail-collapsed'}`}>
         <div class="workspace-main">
           <div class="room-toolbar">
             <button class="icon-btn" onClick={onBack} aria-label="Back to rooms"><Icon name="arrow-left" /></button>
             <div style="min-width:0;flex:1">
               <div class="room-title-large">{esc(room.name)}</div>
               <div class="room-desc-small">{esc(room.goal || 'No goal provided.')}</div>
+              {roomMcpNames.length ? (
+                <div style="display:flex;gap:5px;flex-wrap:wrap;margin-top:6px">
+                  {roomMcpNames.map((n) => <span class="tag blue" key={n}>MCP · {esc(n)}</span>)}
+                </div>
+              ) : null}
             </div>
             <div class={`runtime-pill ${runtime}`}>
               <span class={`runtime-dot ${runtime}`} />
               {runtime === 'running' ? 'Running' : runtime === 'paused' ? 'Paused' : 'Idle'}
             </div>
-            {activeRun ? (
-              <button class="btn" onClick={() => pauseRun(activeRun.id)}>
-                <Icon name="pause" size={14} />Pause run
-              </button>
-            ) : lastRun && ['paused', 'failed', 'timed_out', 'cancelled'].includes(lastRun.status) ? (
-              <button class="btn primary" onClick={() => runTask(lastRun.taskId)}>
-                <Icon name="activity" size={14} />Continue
-              </button>
-            ) : null}
+            {null}
+            <button class="btn subtle" onClick={toggleRail} title={railOpen ? 'Hide side panel' : 'Show side panel'} aria-label="Toggle side panel">
+              <Icon name="layers" size={14} /><span class="hide-sm">{railOpen ? 'Hide panel' : 'Panel'}</span>
+            </button>
             <button class="btn subtle" onClick={() => setInviteOpen(true)}>
               <Icon name="user-plus" size={14} /><span class="hide-sm">Invite</span>
+            </button>
+            <button class="btn subtle" onClick={() => setMcpOpen(true)}>
+              <Icon name="settings-2" size={14} /><span class="hide-sm">MCP</span>
             </button>
           </div>
 
@@ -541,14 +629,22 @@ export function RoomDetailHost({ room, state, notify, setModal, runTask, refresh
               <Icon name="message-square" />Chat
             </button>
             <button class={`room-tab ${tab === 'board' ? 'active' : ''}`} onClick={() => setTab('board')}>
-              <Icon name="kanban" />Kanban{total ? <span class="tag" style="margin-left:2px">{total}</span> : null}
+              <Icon name="kanban" />Kanban{roomTasks.length ? <span class="tag" style="margin-left:4px">{roomTasks.length}</span> : null}
             </button>
             <button class={`room-tab ${tab === 'plan' ? 'active' : ''}`} onClick={() => setTab('plan')}>
               <Icon name="git-branch" />Plan
             </button>
             <button class={`room-tab ${tab === 'changes' ? 'active' : ''}`} onClick={() => setTab('changes')}>
-              <Icon name="git-diff" />Changes{diffFiles.length ? <span class="tag" style="margin-left:2px">{diffFiles.length}</span> : null}
+              <Icon name="git-diff" />Changes{diffFiles.length ? <span class="tag" style="margin-left:4px">{diffFiles.length}</span> : null}
             </button>
+            <button class={`room-tab ${tab === 'artifacts' ? 'active' : ''}`} onClick={() => setTab('artifacts')}>
+              <Icon name="file" />Artifacts{roomArtifacts.length ? <span class="tag" style="margin-left:4px">{roomArtifacts.length}</span> : null}
+            </button>
+            {approvedPanels.map((p) => (
+              <button key={p.id} class={`room-tab ${tab === 'panel-' + p.id ? 'active' : ''}`} onClick={() => setTab('panel-' + p.id)}>
+                <Icon name={p.icon || 'layout'} />{esc(p.title)}
+              </button>
+            ))}
           </div>
 
           {tab === 'chat' && (
@@ -570,11 +666,26 @@ export function RoomDetailHost({ room, state, notify, setModal, runTask, refresh
                     </div>
                   </div>
                 ) : null}
-                {(room.messages || []).length
-                  ? room.messages.map((m) => {
-                    const name = m.role === 'user' ? 'You' : (m.agentName || room.mainAgent || 'Main agent');
+                {(room.messages || []).map((m) => {
+                  if (m.role === 'system' || m.role === 'activity') {
+                    const who = m.agentName || '';
+                    const at = m.activityType || '';
+                    const body = String(m.content || '');
+                    const sevClass = body.includes('🛑')
+                      ? 'sev-blocker'
+                      : (/escalat|blocked|rework|failed/.test(at) ? 'sev-warning' : '');
                     return (
-                    <div class={`msg ${m.role === 'user' ? 'user' : ''}`}>
+                      <div class="notice-row" key={m.id}>
+                        <span class={`notice-chip ${sevClass}`}>
+                          {who ? <b>{esc(who)}</b> : null}{' '}
+                          {esc(m.content)}
+                        </span>
+                      </div>
+                    );
+                  }
+                  const name = m.role === 'user' ? 'You' : (m.agentName || room.mainAgent || 'Main agent');
+                  return (
+                    <div class={`msg ${m.role === 'user' ? 'user' : ''}`} key={m.id}>
                       <div class={`msg-avatar ${m.role === 'user' ? 'user' : 'main-agent'}`}>
                         {m.role === 'user' ? 'ME' : avatarInitials(name)}
                       </div>
@@ -588,28 +699,86 @@ export function RoomDetailHost({ room, state, notify, setModal, runTask, refresh
                         </div>
                       </div>
                     </div>
-                    );
-                  })
-                  : (
-                    <div class="empty chat-welcome">
-                      <div class="chat-welcome-title">No messages yet. Describe the goal below to start this room's conversation.</div>
-                      <div class="chat-welcome-actions">
-                        {['Draft a plan for this room\'s goal', 'Summarize open work', 'What changed so far?'].map((s) => (
-                          <button type="button" class="chip chip-add" key={s} onClick={() => setDraft(s)}>
-                            <Icon name="plus" size={11} />{esc(s)}
-                          </button>
-                        ))}
+                  );
+                })}
+                {!(room.messages || []).length ? (
+                  <div class="empty chat-welcome">
+                    <div class="chat-welcome-title">No messages yet. Describe the goal below to start this room's conversation.</div>
+                    <div class="chat-welcome-actions">
+                      {['Draft a plan for this room\'s goal', 'Summarize open work', 'What changed so far?'].map((s) => (
+                        <button type="button" class="chip chip-add" key={s} onClick={() => setDraft(s)}>
+                          <Icon name="plus" size={11} />{esc(s)}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                ) : null}
+
+                {runningRuns.map((run) => {
+                  const aname = agentNameForRun(run);
+                  const events = run.events || [];
+                  const statusEvents = events.filter((e) => e.type !== 'diff');
+                  const compactSteps = [];
+                  for (const e of statusEvents) {
+                    const text = e.message || '';
+                    const last = compactSteps[compactSteps.length - 1];
+                    if (last && last.text === text) last.n = (last.n || 1) + 1;
+                    else compactSteps.push({ text, n: 1 });
+                  }
+                  const lastStep = compactSteps[compactSteps.length - 1];
+                  const earlierSteps = compactSteps.slice(-4, compactSteps.length - 1);
+                  const lastMsg = statusEvents[statusEvents.length - 1]?.message || '';
+                  const label = lastMsg.includes(' → ') ? 'Running tools…' : lastMsg.includes('engine:') ? 'Reasoning' : 'Working';
+                  return (
+                    <div class="msg live-agent-turn" key={`live-turn-${run.id}`}>
+                      <div class="msg-avatar main-agent live-pulsing-avatar">
+                        {avatarInitials(aname)}
+                      </div>
+                      <div class="msg-content">
+                        <div class="msg-meta">
+                          <strong>{esc(aname)}</strong>
+                          <span class="live-tag"><span class="live-dot pulsing" /> {label}</span>
+                        </div>
+                        <div class="bubble live-bubble">
+                          <div class="live-bubble-status">
+                            <span class="live-spinner" />
+                            <span class="live-current-text">
+                              {esc(lastStep ? (lastStep.n > 1 ? `${lastStep.text} (×${lastStep.n})` : lastStep.text) : `${aname} sedang bekerja…`)}
+                            </span>
+                          </div>
+                          {earlierSteps.length ? (
+                            <div class="live-steps-trace">
+                              {earlierSteps.map((ev, idx) => (
+                                <div class="live-step-item" key={idx}>
+                                  <span class="live-step-dot" />
+                                  <span class="live-step-msg">{esc(ev.n > 1 ? `${ev.text} (×${ev.n})` : ev.text)}</span>
+                                </div>
+                              ))}
+                            </div>
+                          ) : null}
+                          <div class="live-actions-strip">
+                            {cancelRun ? (
+                              <button type="button" class="btn small subtle" style="color:var(--orange)" onClick={() => cancelRun(run.id)}>
+                                <Icon name="x" size={11} />Stop
+                              </button>
+                            ) : null}
+                          </div>
+                        </div>
                       </div>
                     </div>
-                  )}
+                  );
+                })}
 
                 {pendingQuestions.map((question) => (
                   <div class="question-card">
-                    <div class="question-head">
+                    <div class="question-head" style="color:var(--orange)">
                       <Icon name="sparkles" size={15} />
                       Agent needs a decision
                     </div>
-                    <div class="question-prompt">{esc(question.prompt)}</div>
+                    <div style="font-size:12px;color:var(--orange);margin-top:4px">
+                      ⚠️ Ambiguity confirmation: Agent paused execution to avoid assumption bias.
+                    </div>
+                    <div class="question-prompt" style="margin-top:8px">{esc(question.prompt)}</div>
                     {question.options.length ? (
                       <div class="question-options">
                         {question.options.map((option) => (
@@ -658,7 +827,7 @@ export function RoomDetailHost({ room, state, notify, setModal, runTask, refresh
                   <div class="sdk-hint-actions">
                     <button type="button" class="btn small primary" disabled={engineBusy} onClick={installEngine}>
                       {engineBusy ? <span class="btn-spin"><Icon name="refresh" size={13} /></span> : <Icon name="refresh" size={13} />}
-                      {engineBusy ? 'Installing…' : engineReason ? 'Coba lagi' : 'Install engine'}
+                      {engineBusy ? 'Installing…' : engineReason ? 'Retry' : 'Install engine'}
                     </button>
                     <button type="button" class="btn small" onClick={() => setSdkHintDismissed(true)}>Hide</button>
                   </div>
@@ -687,37 +856,51 @@ export function RoomDetailHost({ room, state, notify, setModal, runTask, refresh
 
               <form class="chat-compose" onSubmit={send}>
                 <div class="compose-shell">
-                  {mentionAgent ? (
-                    <div class="compose-mention">
-                      <span class="mention-badge"><Icon name="bot" size={12} />@{esc(mentionAgent)}</span>
-                      <button type="button" class="icon-btn" title="Clear mention (defaults to main agent)" onClick={clearMention}>
-                        <Icon name="x" size={12} />
-                      </button>
-                    </div>
-                  ) : null}
+                  <div class="compose-input-row">
+                    {mentions.length > 0 && (
+                      <div class="compose-mention">
+                        {mentions.map((m) => (
+                          <span class={`mention-badge ${m.type === 'team' ? 'team' : 'agent'}`} key={`${m.type}-${m.name}`}>
+                            <Icon name={m.type === 'team' ? 'users' : 'bot'} size={11} />
+                            <span>{m.type === 'team' ? `#${esc(m.name)}` : `@${esc(m.name)}`}</span>
+                            <button
+                              type="button"
+                              class="icon-btn mention-remove"
+                              title={`Hapus mention ${esc(m.name)}`}
+                              onClick={() => removeMention(m.name, m.type)}
+                            >
+                              <Icon name="x" size={10} />
+                            </button>
+                          </span>
+                        ))}
+                      </div>
+                    )}
+                    <textarea
+                      rows="2"
+                      placeholder={mentions.length ? "Tulis prompt atau instruksi..." : teams.length > 1 ? "Ask an agent or team… (ketik @ untuk agent, # untuk team)" : "Ask an agent… (type @ for suggestions)"}
+                      value={draft}
+                      onInput={onComposeInput}
+                      onKeyDown={onComposeKeyDown}
+                    />
+                  </div>
+
                   {mentionOpen && mentionCandidates.length ? (
                     <div class="mention-suggest">
-                      {mentionCandidates.map(([name, teamName], i) => (
+                      {mentionCandidates.map((cand, i) => (
                         <button type="button" class={`mention-option ${i === mentionIdx ? 'on' : ''}`}
-                          key={name}
+                          key={`${cand.type}-${cand.name}`}
                           onMouseDown={(e) => e.preventDefault()}
-                          onClick={() => pickMention([name, teamName])}>
-                          <span class="agent-avatar green" style="border-radius:5px;width:20px;height:20px;font-size:9px">
-                            {esc(name).slice(0, 2).toUpperCase()}
+                          onClick={() => pickMention(cand)}>
+                          <span class={`agent-avatar ${cand.type === 'team' ? 'blue' : 'green'}`} style="border-radius:5px;width:20px;height:20px;font-size:9px">
+                            {cand.type === 'team' ? <Icon name="users" size={11} /> : esc(cand.name).slice(0, 2).toUpperCase()}
                           </span>
-                          <span class="mention-name">{esc(name)}</span>
-                          <span class="mention-team">{esc(teamName)}</span>
+                          <span class="mention-name">{cand.type === 'team' ? `#${esc(cand.name)}` : esc(cand.name)}</span>
+                          <span class="mention-team">{esc(cand.sub || '')}</span>
                         </button>
                       ))}
                     </div>
                   ) : null}
-                  <textarea
-                    rows="2"
-                    placeholder="Ask an agent… (type @ for suggestions)"
-                    value={draft}
-                    onInput={onComposeInput}
-                    onKeyDown={onComposeKeyDown}
-                  />
+
                   <div class="compose-toolbar">
                     <div class="compose-selects">
                       <button class="mini-select" type="button" onClick={() => setModal({ kind: 'attach' })}>
@@ -728,7 +911,10 @@ export function RoomDetailHost({ room, state, notify, setModal, runTask, refresh
                       </button>
                     </div>
                     <span class="compose-route" title="Messages run the room's main agent unless you pick an agent above or type @name">
-                      <Icon name="bot" size={12} />Default: main agent · @ untuk saran
+                      <Icon name="bot" size={12} />
+                      {mentions.length
+                        ? `Target: ${mentions.map((m) => (m.type === 'team' ? `#${m.name}` : `@${m.name}`)).join(', ')}`
+                        : 'Default: main agent · @ agent · # team'}
                     </span>
                     <button class="send-btn" type="submit" disabled={sending} aria-label="Send message">
                       <Icon name="arrow-up" />
@@ -742,41 +928,42 @@ export function RoomDetailHost({ room, state, notify, setModal, runTask, refresh
 
           {tab === 'board' && (
             <div class="room-view active">
-              <Board roomId={room.id} tasks={roomTasks} runTask={runTask} setModal={setModal} />
+              <Board roomId={room.id} tasks={roomTasks} runTask={runTask} setModal={setModal} refresh={refresh} />
             </div>
           )}
 
           {tab === 'plan' && (
             <div class="room-view active">
               <div class="tab-scroll">
-                <div class="section-title">Task graph</div>
-                <div class="section-note" style="margin-top:5px">
-                  Dependencies determine when workers can be spawned. Parallel work is scheduled only when safe.
+                <div style="display:flex;justify-content:space-between;align-items:center">
+                  <div>
+                    <div class="section-title">{roomPlan ? esc(roomPlan.title || 'Plan') : 'Task graph'}</div>
+                    <div class="section-note" style="margin-top:5px">
+                      Dependencies determine when workers can be spawned. Parallel work is scheduled only when safe.
+                    </div>
+                  </div>
+                  {roomPlan && roomPlan.tier && (
+                    <span class="tag blue" style="text-transform:uppercase">{esc(roomPlan.tier)} tier</span>
+                  )}
                 </div>
-                <div class="panel" style="margin-top:18px;padding:0;overflow:hidden">
+
+                {roomPlan && roomPlan.markdown && (
+                  <div class="panel" style="margin-top:16px;padding:16px">
+                    <Markdown text={roomPlan.markdown} />
+                  </div>
+                )}
+
+                <div class="panel plan-graph-panel">
                   {roomTasks.length
-                    ? roomTasks.map((t, i) => (
-                      <div class="plan-list-task">
-                        <div class={`task-number ${t.status === 'done' ? 'done' : ''}`}>
-                          {t.status === 'done' ? <Icon name="check" size={13} /> : i + 1}
-                        </div>
-                        <div class="room-main">
-                          <div class="room-title">{esc(t.title)}</div>
-                          <div class="room-sub">{esc(t.description || 'No description.')}</div>
-                          <div class="room-foot">
-                            <span class="tag">{esc(t.priority)}</span>
-                            <span class="meta-text">{esc(t.status)} · effort {esc(t.effort)}</span>
-                          </div>
-                        </div>
-                      </div>
-                    ))
+                    ? <PlanGraph tasks={roomTasks} onOpenTask={(t) => setModal({ kind: 'task-detail', roomId: room.id, task: t })} />
                     : <div class="empty" style="border:0;margin:14px">No tasks yet. Add tasks from the Kanban tab.</div>}
                 </div>
                 <div class="panel" style="margin-top:14px">
                   <div class="section-title">Scheduling rationale</div>
                   <p class="section-note" style="line-height:1.8;margin-top:8px">
                     The main agent handles coordination and final synthesis. Independent read-only analysis can run in
-                    parallel. Code changes wait for findings to reduce conflicts and unnecessary work.
+                    parallel. Code changes wait for findings to reduce conflicts and unnecessary work. An arrow means
+                    the target card waits for the source card to be done.
                   </p>
                 </div>
               </div>
@@ -785,16 +972,16 @@ export function RoomDetailHost({ room, state, notify, setModal, runTask, refresh
 
           {tab === 'changes' && (
             <div class="room-view active">
-              <div class="tab-scroll">
+              <div class="tab-scroll wide-changes">
                 <div class="section-title">Code changes</div>
                 <div class="section-note" style="margin-top:5px">
-                  Unified diffs from this room's runs. Expanded by default; collapse a file to focus.
+                  Unified diffs from this room's runs, grouped like a pull request review. Click a file in the tree to see its diff.
                 </div>
                 {diffFiles.length
-                  ? <div style="margin-top:16px"><DiffView text={diffText} /></div>
+                  ? <ChangesView text={diffText} />
                   : (
                     <div class="empty" style="margin-top:16px">
-                      No diff yet. When an agent returns a unified diff, it appears here with red/green lines.
+                      No diff yet. When an agent edits files, the changes appear here grouped by folder.
                     </div>
                   )}
                 <div class="changes-meta">
@@ -803,6 +990,70 @@ export function RoomDetailHost({ room, state, notify, setModal, runTask, refresh
               </div>
             </div>
           )}
+
+          {tab === 'artifacts' && (
+            <div class="room-view active">
+              <div class="tab-scroll">
+                <div class="section-title">Artifacts & Outputs</div>
+                <div class="section-note" style="margin-top:5px">
+                  Reports, result summaries, verification evidence, and generated files produced by agents.
+                </div>
+                <div style="display:flex;flex-direction:column;gap:14px;margin-top:16px">
+                  {roomArtifacts.map((art) => (
+                    <article key={art.id} class="panel" style="padding:16px">
+                      <div style="display:flex;justify-content:space-between;align-items:center">
+                        <div style="display:flex;align-items:center;gap:8px">
+                          <Icon name="file" size={16} />
+                          <h4 style="margin:0;font-size:15px">{esc(art.title)}</h4>
+                        </div>
+                        <span class="tag blue">{esc(art.type)}</span>
+                      </div>
+                      {art.summary && (
+                        <div style="margin-top:10px;font-size:13px;line-height:1.6">
+                          <b>Summary:</b> {esc(art.summary)}
+                        </div>
+                      )}
+                      {art.content && (
+                        <div style="margin-top:10px">
+                          <Markdown text={art.content} />
+                        </div>
+                      )}
+                      {art.path && art.path !== '[]' && (
+                        <div class="meta-text" style="margin-top:10px">
+                          Files: <code>{esc(art.path)}</code>
+                        </div>
+                      )}
+                    </article>
+                  ))}
+                </div>
+              </div>
+            </div>
+          )}
+
+          {tab.startsWith('panel-') && (() => {
+            const p = approvedPanels.find((x) => 'panel-' + x.id === tab);
+            if (!p) return null;
+            return (
+              <div class="room-view active">
+                <div class="tab-scroll">
+                  <div class="section-title">{esc(p.title)}</div>
+                  <div class="section-note" style="margin-top:5px">Custom Agent Panel ({esc(p.renderer)})</div>
+                  <div class="panel" style="margin-top:16px;padding:16px">
+                    {p.renderer === 'markdown' && <Markdown text={p.manifestJson || p.dataSource || 'No content.'} />}
+                    {p.renderer === 'table' && (
+                      <pre style="overflow:auto;font-size:12px">{esc(p.manifestJson || p.dataSource)}</pre>
+                    )}
+                    {p.renderer !== 'markdown' && p.renderer !== 'table' && (
+                      <div>
+                        <div class="tag blue">{esc(p.renderer)} view</div>
+                        <pre style="margin-top:10px;overflow:auto">{esc(p.manifestJson || p.dataSource)}</pre>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              </div>
+            );
+          })()}
         </div>
 
         <aside class="right-rail">
@@ -812,14 +1063,29 @@ export function RoomDetailHost({ room, state, notify, setModal, runTask, refresh
               <button class="dots" onClick={() => setInviteOpen(true)} aria-label="Invite team"><Icon name="plus" size={14} /></button>
             </div>
             {teams.length
-              ? teams.map((t) => (
+              ? teams.map((t, idx) => (
                 <div class="team-rail" key={t.id}>
                   <div class="agent-line">
                     <div class="agent-avatar green" style="border-radius:6px">{avatarInitials(t.mainAgent)}</div>
-                    <div class="agent-info">
-                      <div class="agent-name">{esc(t.name)}</div>
+                    <div class="agent-info" style="cursor:pointer" onClick={() => addMention({ type: 'team', name: t.name })} title="Click to mention this team (#team)">
+                      <div class="agent-name-row">
+                        <span class="agent-name">{esc(t.name)}</span>
+                        {idx === 0 ? (
+                          <span class="member-badge main mini-tag" title="Lead Team · Default responder for unmentioned chat">Lead</span>
+                        ) : (
+                          <span class="member-badge secondary-lead mini-tag" title="Specialist Team">Specialist</span>
+                        )}
+                      </div>
                       <div class="agent-role">Main: {esc(t.mainAgent)}</div>
                     </div>
+                    {teams.length > 1 && idx !== 0 && (
+                      <button class="icon-btn" title="Set as Lead Team" onClick={() => {
+                        const newIds = [t.id, ...room.teamIds.filter((id) => id !== t.id)];
+                        saveTeams(newIds);
+                      }}>
+                        <Icon name="arrow-up" size={13} />
+                      </button>
+                    )}
                     <button class="icon-btn" title="Remove team" onClick={() => kickTeam(t.id)}>
                       <Icon name="x" size={13} />
                     </button>
@@ -834,42 +1100,55 @@ export function RoomDetailHost({ room, state, notify, setModal, runTask, refresh
 
           <div class="rail-section">
             <div class="rail-title">
-              <Icon name="bot" size={14} />
+              <Icon name="bot" size={13} />
               <span>Live agents</span>
-              <span class="rail-counter">{activeAgentsCount ? `${activeAgentsCount} active` : `${roomAgentsList.length} ready`}</span>
+              {activeAgentsCount ? (
+                <span class="rail-counter active"><span class="live-dot pulsing" style="width:6px;height:6px" />{activeAgentsCount} active</span>
+              ) : (
+                <span class="rail-counter">{roomAgentsList.length}</span>
+              )}
             </div>
-            <div class="rail-agents-list">
+            <div class="rail-agents-list compact">
               {roomAgentsList.map((agent) => {
                 const run = activeRunForAgent(agent.name);
                 const isRunning = Boolean(run);
                 const lastEv = run ? (run.events || []).slice(-1)[0] : null;
                 const action = isRunning
                   ? (lastEv?.type === 'tool' ? 'acting' : (lastEv?.message || '').includes('engine:') ? 'reasoning' : 'working')
-                  : 'ready';
+                  : '';
                 return (
                   <div
-                    class={`rail-agent-row ${isRunning ? 'active' : ''}`}
+                    class={`rail-agent-row compact ${isRunning ? 'active' : ''}`}
                     key={agent.name}
                     onClick={() => {
-                      setMentionAgent(agent.name);
-                      setDraft((prev) => (prev ? prev : `@${agent.name} `));
+                      addMention({ type: 'agent', name: agent.name });
                     }}
-                    title={`Click to mention @${esc(agent.name)}`}
+                    title={isRunning ? `@${esc(agent.name)} is ${action}` : `Click to mention @${esc(agent.name)}`}
                   >
-                    <div class={`agent-avatar ${agent.isMain ? 'green' : 'blue'}`} style="border-radius:6px;width:26px;height:26px;font-size:10px">
+                    <div class={`agent-avatar ${agent.isMain ? 'green' : 'blue'}`} style="border-radius:5px;width:22px;height:22px;font-size:9.5px">
                       {avatarInitials(agent.name)}
                     </div>
                     <div class="agent-info">
                       <div class="agent-name-row">
                         <span class="agent-name">{esc(agent.name)}</span>
-                        {agent.isMain && <span class="tag green" style="font-size:9px;padding:1px 5px">main</span>}
+                        {agent.isLead ? (
+                          <span class="member-badge main mini-tag" title="Room Lead · Primary coordinator">main</span>
+                        ) : agent.isMain ? (
+                          <span class="member-badge secondary-lead mini-tag" title={`${esc(agent.teamName)} Team Lead`}>lead</span>
+                        ) : null}
                       </div>
-                      <div class="agent-role">{esc(agent.role || agent.teamName)}</div>
+                      <div class="agent-role">{esc(agent.role ? `${agent.role} · ${agent.teamName}` : agent.teamName)}</div>
                     </div>
-                    <span class={`member-badge ${agent.isMain ? 'main' : ''} ${isRunning ? 'live-on active-badge' : 'idle-badge'}`}>
-                      <span class={`live-dot ${isRunning ? 'pulsing' : 'idle'}`} />
-                      <span class="badge-status-text">{action}</span>
-                    </span>
+                    <div class="agent-status-indicator">
+                      {isRunning ? (
+                        <span class="active-indicator-pill">
+                          <span class="live-dot pulsing" style="width:5px;height:5px" />
+                          <span class="indicator-action">{action}</span>
+                        </span>
+                      ) : (
+                        <span class="idle-dot-indicator" title="Standby" />
+                      )}
+                    </div>
                   </div>
                 );
               })}
@@ -888,15 +1167,7 @@ export function RoomDetailHost({ room, state, notify, setModal, runTask, refresh
                   : runtime === 'paused' ? 'Paused after a failure'
                     : 'No active run'}</span>
             </div>
-            {activeRun ? (
-              <button class="btn" style="width:100%;margin-top:8px" onClick={() => pauseRun(activeRun.id)}>
-                <Icon name="pause" size={13} />Pause run
-              </button>
-            ) : lastRun && ['paused', 'failed', 'timed_out', 'cancelled'].includes(lastRun.status) ? (
-              <button class="btn primary" style="width:100%;margin-top:8px" onClick={() => runTask(lastRun.taskId)}>
-                <Icon name="activity" size={13} />Continue where it stopped
-              </button>
-            ) : null}
+            {null}
             {lastRun && (
               <div class="section-note" style="margin-top:8px">
                 Last: {esc(lastRun.status)} · {fmtTokens(lastRun.tokens)} tokens
@@ -935,6 +1206,9 @@ export function RoomDetailHost({ room, state, notify, setModal, runTask, refresh
         </aside>
       </div>
 
+      {mcpOpen && (
+        <RoomMCPModal room={room} servers={state.mcpServers || []} onClose={() => setMcpOpen(false)} notify={notify} refresh={refresh} />
+      )}
       {inviteOpen && (
         <div class="modal-backdrop open" onClick={(e) => { if (e.target === e.currentTarget) setInviteOpen(false); }}>
           <div class="modal">
@@ -976,22 +1250,18 @@ export function RoomDetailHost({ room, state, notify, setModal, runTask, refresh
         <div class="modal-backdrop open" onClick={(e) => { if (e.target === e.currentTarget) setKickBlock(null); }}>
           <div class="modal">
             <div class="modal-head">
-              <h3>Tim masih bekerja</h3>
+              <h3>Team still working</h3>
               <button class="icon-btn" onClick={() => setKickBlock(null)} aria-label="Close"><Icon name="x" /></button>
             </div>
             <div class="modal-body">
               <p style="font-size:13px;color:var(--text);line-height:1.6;margin:0">
-                Team <b>{esc(kickBlock.teamName)}</b> masih punya pekerjaan berjalan di room ini
-                (<b>{esc(agentNameForRun(kickBlock.run))}</b>). Pause dulu sebelum melepas tim.
+                Team <b>{esc(kickBlock.teamName)}</b> still has work running in this room
+                (<b>{esc(agentNameForRun(kickBlock.run))}</b>). Stop the run first before removing the team.
               </p>
             </div>
             <div class="modal-foot">
-              <button class="btn" onClick={() => setKickBlock(null)}>Batal</button>
-              <button class="btn primary" onClick={() => {
-                const run = kickBlock.run;
-                setKickBlock(null);
-                pauseRun(run.id);
-              }}><Icon name="pause" size={13} />Pause run</button>
+              <button class="btn" onClick={() => setKickBlock(null)}>Cancel</button>
+              <button class="btn primary" onClick={() => setKickBlock(null)}>Close</button>
             </div>
           </div>
         </div>
@@ -1001,40 +1271,44 @@ export function RoomDetailHost({ room, state, notify, setModal, runTask, refresh
 }
 
 const BOARD_COLUMNS = [
-  ['todo', 'To do'],
-  ['blocked', 'Blocked'],
+  ['todo', 'Backlog'],
   ['in_progress', 'In progress'],
   ['review', 'Review'],
+  ['blocked', 'Blocked'],
   ['done', 'Done'],
 ];
 
-function Board({ roomId, tasks, runTask, setModal }) {
+function Board({ roomId, tasks, runTask, setModal, refresh }) {
   return (
     <div class="board">
       {BOARD_COLUMNS.map(([key, title]) => {
-        const columnTasks = tasks.filter((t) => t.status === key);
+        const columnTasks = tasks.filter((t) => (key === 'todo' ? (t.status === 'todo' || t.status === 'backlog') : t.status === key));
         return (
           <div class="board-col">
             <div class="board-col-head">{title}<span>{columnTasks.length}</span></div>
             <div class="board-tasks">
               {columnTasks.length
                 ? columnTasks.map((t) => (
-                  <article class="board-task">
-                    <div class="board-task-title">{esc(t.title)}</div>
+                  <article class={`board-task sev-${esc(t.severity || 'none')}`} onClick={() => setModal({ kind: 'task-detail', roomId, task: t })} title="Click for details">
+                    <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:6px">
+                      <div class="board-task-title">{esc(t.title)}</div>
+                      {t.agentName && <span class="tag blue small">@{esc(t.agentName)}</span>}
+                    </div>
                     <div class="board-task-desc">{esc(t.description || 'No description.')}</div>
-                    <div class="board-task-foot">
+                    <div class="board-task-foot" style="margin-top:8px;flex-wrap:wrap">
+                      {t.severity === 'blocker' && <span class="tag sev-badge sev-blocker">Blocker</span>}
+                      {t.severity === 'warning' && <span class="tag sev-badge sev-warning">Warning</span>}
                       <span class={`tag ${['high', 'urgent'].includes(t.priority) ? 'orange' : ''}`}>{esc(t.priority)}</span>
-                      <span class="meta-text">effort {esc(t.effort)}</span>
+                      <span class="tag">effort {esc(t.effort)}</span>
+                      {t.status === 'review' && <span class="tag blue">Review</span>}
+                      {t.status === 'blocked' && <span class="tag orange">Blocked</span>}
+                      {t.dependencies && t.dependencies.length > 0 && <span class="tag">deps {t.dependencies.length}</span>}
+                      {t.retryCount > 0 && <span class="tag orange">rework ×{t.retryCount}</span>}
                     </div>
-                    <div style="display:flex;gap:5px;margin-top:9px">
-                      <button class="btn small" style="flex:1" onClick={() => setModal({ kind: 'task', roomId, task: t })}>Edit</button>
-                      {t.status === 'todo' && (
-                        <button class="btn primary small" style="flex:1" onClick={(e) => runTask(t.id, e.currentTarget)}>Run</button>
-                      )}
-                      {t.status === 'review' && (
-                        <span class="tag blue" style="flex:1;justify-content:center">Awaiting review</span>
-                      )}
-                    </div>
+                    {(t.status === 'todo' || t.status === 'backlog') && (
+                      <button class="btn primary small" style="margin-top:9px"
+                        onClick={(e) => { e.stopPropagation(); runTask(t.id, e.currentTarget); }}>Run</button>
+                    )}
                   </article>
                 ))
                 : <div class="muted" style="font-size:11px;padding:4px">No tasks</div>}
@@ -1047,8 +1321,10 @@ function Board({ roomId, tasks, runTask, setModal }) {
   );
 }
 
-export function TeamsPage({ state, openTeam, onTeamCreate, onUseTemplate }) {
+export function TeamsPage({ state, openTeam, onTeamCreate, onUseTemplate, openTeamCreate, importTeamTemplate }) {
   const { teams, templates } = state;
+  const useTemplate = onUseTemplate || importTeamTemplate;
+  const createTeam = onTeamCreate || openTeamCreate;
   return (
     <>
       <div class="page-head">
@@ -1057,7 +1333,7 @@ export function TeamsPage({ state, openTeam, onTeamCreate, onUseTemplate }) {
           <h1 class="page-title">Teams</h1>
           <div class="page-sub">Build a team once, invite it into any room. Open a team to edit its title, instructions, agents, and main agent.</div>
         </div>
-        <button class="btn primary" onClick={onTeamCreate}><Icon name="plus" />Create team</button>
+        <button class="btn primary" onClick={createTeam}><Icon name="plus" />Create team</button>
       </div>
 
       <div class="section-head" style="margin-top:0">
@@ -1084,7 +1360,7 @@ export function TeamsPage({ state, openTeam, onTeamCreate, onUseTemplate }) {
                   <span class="meta-text">Main: {esc(t.mainAgent)} · {(t.agents || []).length} agents</span>
                 </div>
                 <div class="chip-row">
-                  {(t.agents || []).map((a) => <span class="chip">{esc(a.name)}</span>)}
+                  {(t.agents || []).map((a) => <span class="chip" key={a.name}>{esc(a.name)}</span>)}
                 </div>
               </div>
               <span class="row-action"><Icon name="chevron-right" size={14} />Open</span>
@@ -1100,7 +1376,7 @@ export function TeamsPage({ state, openTeam, onTeamCreate, onUseTemplate }) {
         </div>
       </div>
       <div class="grid" style="grid-template-columns:repeat(auto-fill,minmax(280px,1fr));">
-        {templates.map((t) => <TemplateCard key={t.id} template={t} onUse={onUseTemplate} />)}
+        {templates.map((t) => <TemplateCard key={t.id} template={t} onUse={useTemplate} />)}
       </div>
     </>
   );
@@ -1206,7 +1482,7 @@ export function SkillsPage({ state, setModal, openSkill }) {
 }
 
 
-export function RunsPage({ state, cancelRun, pauseRun }) {
+export function RunsPage({ state, cancelRun }) {
   const { runs, tasks } = state;
   return (
     <>
@@ -1234,10 +1510,7 @@ export function RunsPage({ state, cancelRun, pauseRun }) {
                   </div>
                 </div>
                 {run.status === 'running' && (
-                  <>
-                    <button class="btn small" onClick={() => pauseRun(run.id)}>Pause</button>
-                    <button class="btn small" style="margin-left:6px" onClick={() => cancelRun(run.id)}>Cancel</button>
-                  </>
+                  <button class="btn small" onClick={() => cancelRun(run.id)}>Stop</button>
                 )}
               </article>
             );
@@ -1284,6 +1557,12 @@ const PROVIDER_PRESETS = [
     baseUrl: 'https://api.anthropic.com',
     models: ['claude-sonnet-5', 'claude-opus-5', 'claude-haiku-4-5'],
     note: 'Claude Messages API.',
+  },
+  {
+    id: 'mercury', name: 'Mercury (Inception)', protocol: 'openai-compatible',
+    baseUrl: 'https://api.inceptionlabs.ai/v1',
+    models: ['mercury-3', 'mercury-2.5', 'mercury-2'],
+    note: 'Diffusion LLM, 1M context, tool calling. Env: INCEPTION_API_KEY.',
   },
   {
     id: 'openai', name: 'OpenAI (GPT)', protocol: 'openai-compatible',
@@ -1593,7 +1872,7 @@ function EngineCard({ notify }) {  const [status, setStatus] = useState(null);
       if (d.ok && d.installed) {
         notify('OpenHands engine installed — send a message again');
       } else {
-        setReason(d.error || 'Installasi gagal — lihat log di bawah.');
+        setReason(d.error || 'Installation failed — see the log below.');
         setLog(d.output || '');
       }
     } catch (error) {
@@ -1622,7 +1901,7 @@ function EngineCard({ notify }) {  const [status, setStatus] = useState(null);
         <div style="margin-top:10px">
           <button class="btn primary small" disabled={busy} onClick={install}>
             {busy ? <span class="btn-spin"><Icon name="refresh" size={13} /></span> : <Icon name="refresh" size={13} />}
-            {busy ? 'Installing…' : reason ? 'Coba lagi' : 'Install OpenHands SDK'}
+            {busy ? 'Installing…' : reason ? 'Retry' : 'Install runtime'}
           </button>
           {reason ? <div class="md-hint" style="color:#ffce9e;margin-top:8px">{esc(reason)}</div> : null}
           {log ? (
@@ -1662,7 +1941,7 @@ function GlobalCleanCard({ notify, refresh }) {
       <div class="settings-card-head">
         <div>
           <h3>Bersihkan library global</h3>
-          <p>Agents &amp; teams tersimpan global dan dipakai semua project.</p>
+          <p>Agents &amp; teams are stored globally and shared across all projects.</p>
         </div>
       </div>
       <div style="display:flex;gap:8px">
@@ -1677,6 +1956,275 @@ function GlobalCleanCard({ notify, refresh }) {
         Templates, provider, dan settings tidak terpengaruh. Team yang sudah ada menyimpan salinan agentnya sendiri.
       </div>
     </div>
+  );
+}
+
+function RoomMCPModal({ room, servers, onClose, notify, refresh }) {
+  const [ids, setIds] = useState(room.mcpServerIds || []);
+  const [busy, setBusy] = useState(false);
+  const [status, setStatus] = useState({});
+  useEffect(() => {
+    const run = async () => {
+      const next = {};
+      for (const srv of servers) {
+        if (!srv.enabled) continue;
+        next[srv.id] = { state: 'testing' };
+        setStatus({ ...next });
+        try {
+          const r = await api(`/api/mcp/${encodeURIComponent(srv.id)}/test`, { method: 'POST' });
+          next[srv.id] = { state: 'ok', tools: r.tools };
+        } catch {
+          next[srv.id] = { state: 'error' };
+        }
+        setStatus({ ...next });
+      }
+    };
+    run();
+  }, [servers]);
+  const toggle = (id) => setIds((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
+  const save = async () => {
+    setBusy(true);
+    try {
+      await api(`/api/rooms/${encodeURIComponent(room.id)}/mcp`, { method: 'PUT', body: JSON.stringify({ serverIds: ids }) });
+      notify('MCP tools updated');
+      await refresh();
+      onClose();
+    } catch (e) { notify(e.message); } finally { setBusy(false); }
+  };
+  const show = servers.filter((s2) => s2.enabled || ids.includes(s2.id));
+  return (
+    <div class="modal-backdrop open" onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}>
+      <div class="modal">
+        <header class="modal-head">
+          <h3>MCP tools for this room</h3>
+          <button type="button" class="icon-btn" aria-label="Close" onClick={onClose}><Icon name="x" /></button>
+        </header>
+        <div class="modal-body">
+          <p class="section-note">Enabled servers inject their tools into agents in this room.</p>
+          {show.length ? show.map((srv) => {
+            const st = status[srv.id];
+            return (
+            <label class="team-pick" style="display:flex;align-items:center;gap:10px;margin-bottom:8px">
+              <input type="checkbox" checked={ids.includes(srv.id)} onChange={() => toggle(srv.id)} />
+              <span class="team-pick-body">
+                <span class="team-pick-name">
+                  {esc(srv.name)}
+                  {!srv.enabled ? <span class="tag muted" style="margin-left:6px">Disabled</span>
+                    : st && st.state === 'ok' ? <span class="tag green" style="margin-left:6px">Connected · {st.tools} tools</span>
+                    : st && st.state === 'error' ? <span class="tag orange" style="margin-left:6px">Failed</span>
+                    : <span class="tag" style="margin-left:6px">Checking…</span>}
+                </span>
+                <span class="team-pick-desc">{esc(srv.type)} · {esc(srv.type === 'http' ? srv.url : srv.command)}</span>
+              </span>
+            </label>
+            );
+          }) : <div class="empty">No MCP servers configured. Add them in Settings → MCP Servers.</div>}
+        </div>
+        <footer class="modal-foot">
+          <button type="button" class="btn" onClick={onClose}>Cancel</button>
+          <button type="button" class="btn primary" disabled={busy} onClick={save}>Save</button>
+        </footer>
+      </div>
+    </div>
+  );
+}
+
+function MCPCard({ state, notify, refresh }) {
+  const servers = state.mcpServers || [];
+  const [form, setForm] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const [busyId, setBusyId] = useState(null);
+  const [status, setStatus] = useState({});
+  useEffect(() => {
+    const run = async () => {
+      const next = {};
+      for (const srv of servers) {
+        if (!srv.enabled) continue;
+        next[srv.id] = { state: 'testing' };
+        setStatus({ ...next });
+        try {
+          const r = await api(`/api/mcp/${encodeURIComponent(srv.id)}/test`, { method: 'POST' });
+          next[srv.id] = { state: 'ok', tools: r.tools };
+        } catch {
+          next[srv.id] = { state: 'error' };
+        }
+        setStatus({ ...next });
+      }
+    };
+    run();
+  }, [servers]);
+
+  const parseKV = (text) => Object.fromEntries(
+    String(text || '').split('\n').map((l) => l.split(/[=:]/)).filter((a) => a.length === 2).map(([k, v]) => [k.trim(), v.trim()])
+  );
+  const fmtKV = (obj) => Object.entries(obj || {}).map(([k, v]) => k + '=' + v).join('\n');
+  const set = (f, v) => setForm((prev) => ({ ...prev, [f]: v }));
+
+  const submit = async (e) => {
+    e.preventDefault();
+    setBusy(true);
+    try {
+      const body = { ...form };
+      if (body.type === 'stdio') {
+        body.args = (body.argsText || '').split('\n').map((x) => x.trim()).filter(Boolean);
+        body.env = parseKV(body.envText);
+        delete body.argsText; delete body.envText;
+      } else {
+        body.headers = parseKV(body.headersText);
+        delete body.headersText;
+      }
+      const method = body.id ? 'PUT' : 'POST';
+      const url = body.id ? `/api/mcp/${encodeURIComponent(body.id)}` : '/api/mcp';
+      await api(url, { method, body: JSON.stringify(body) });
+      notify('MCP server saved');
+      await refresh();
+      setForm(null);
+    } catch (err) { notify(err.message); } finally { setBusy(false); }
+  };
+
+  const test = async (srv) => {
+    setBusyId(srv.id);
+    setStatus((prev) => ({ ...prev, [srv.id]: { state: 'testing' } }));
+    try {
+      const r = await api(`/api/mcp/${encodeURIComponent(srv.id)}/test`, { method: 'POST' });
+      setStatus((prev) => ({ ...prev, [srv.id]: { state: 'ok', tools: r.tools } }));
+      notify(`Connection OK — ${r.tools} tool(s) exposed`);
+    } catch (e) {
+      setStatus((prev) => ({ ...prev, [srv.id]: { state: 'error' } }));
+      notify('Test failed: ' + e.message);
+    } finally { setBusyId(null); }
+  };
+
+  const remove = async (srv) => {
+    if (!confirm(`Delete MCP server "${srv.name}"?`)) return;
+    try {
+      await api(`/api/mcp/${encodeURIComponent(srv.id)}`, { method: 'DELETE' });
+      notify('Deleted');
+      await refresh();
+    } catch (e) { notify(e.message); }
+  };
+
+  return (
+    <div class="settings-card">
+      <div class="settings-card-head">
+        <div>
+          <h3>MCP Servers</h3>
+          <p>Global server definitions. Rooms opt in to individual servers.</p>
+        </div>
+        <span class="tag">{(servers).length}</span>
+        <button class="btn small" onClick={() => setForm({ type: 'stdio', enabled: true })}>
+          <Icon name="plus" size={13} />Add server
+        </button>
+      </div>
+      <div style="margin-top:12px;display:flex;flex-direction:column;gap:10px">
+        {servers.length ? servers.map((srv) => (
+          <article class="provider-row">
+            <span class="preset-mark">MCP</span>
+            <div class="provider-main">
+              <div class="provider-name">
+                {esc(srv.name)}
+                <span class="tag">{esc(srv.type)}</span>
+                {!srv.enabled ? <span class="tag muted">Disabled</span>
+                  : status[srv.id] && status[srv.id].state === 'ok' ? <span class="tag green">Connected · {status[srv.id].tools} tools</span>
+                  : status[srv.id] && status[srv.id].state === 'error' ? <span class="tag orange">Failed</span>
+                  : <span class="tag">Checking…</span>}
+              </div>
+              <div class="provider-url">{esc(srv.type === 'http' ? srv.url : srv.command + (srv.args && srv.args.length ? ' ' + srv.args.join(' ') : ''))}</div>
+            </div>
+            <div class="provider-actions">
+              <button class="btn small" disabled={busyId === srv.id} onClick={() => test(srv)}>
+                {busyId === srv.id ? 'Testing…' : 'Test'}
+              </button>
+              <button class="btn small" onClick={() => setForm({ ...srv, argsText: (srv.args || []).join('\n'), envText: fmtKV(srv.env), headersText: fmtKV(srv.headers) })}>
+                <Icon name="pencil" size={13} />Edit
+              </button>
+              <button class="icon-btn" aria-label="Delete" onClick={() => remove(srv)}><Icon name="trash" size={14} /></button>
+            </div>
+          </article>
+        )) : <div class="empty">No MCP servers yet. Add one above.</div>}
+      </div>
+
+      {form && (
+        <div class="modal-backdrop open" onClick={(e) => { if (e.target === e.currentTarget) setForm(null); }}>
+          <form class="modal modal-lg" onSubmit={submit}>
+            <header class="modal-head">
+              <h3>{form.id ? 'Edit MCP server' : 'Add MCP server'}</h3>
+              <button type="button" class="icon-btn" aria-label="Close" onClick={() => setForm(null)}><Icon name="x" /></button>
+            </header>
+            <div class="modal-body">
+              <div class="field">
+                <label>Name</label>
+                <input required maxlength="120" value={form.name || ''} onInput={(e) => set('name', e.currentTarget.value)} placeholder="e.g. GitHub MCP" />
+              </div>
+              <div class="field">
+                <label>Type</label>
+                <select value={form.type} onChange={(e) => set('type', e.currentTarget.value)}>
+                  <option value="stdio">Local command (stdio)</option>
+                  <option value="http">Remote URL (Streamable HTTP)</option>
+                </select>
+              </div>
+              {form.type === 'stdio' ? (
+                <>
+                  <div class="field">
+                    <label>Command</label>
+                    <input required value={form.command || ''} onInput={(e) => set('command', e.currentTarget.value)} placeholder="e.g. npx" />
+                  </div>
+                  <div class="field">
+                    <label>Arguments (one per line)</label>
+                    <textarea rows="3" value={form.argsText || ''} onInput={(e) => set('argsText', e.currentTarget.value)} placeholder="e.g. @modelcontextprotocol/server-github" />
+                  </div>
+                  <div class="field">
+                    <label>Working directory</label>
+                    <input value={form.cwd || ''} onInput={(e) => set('cwd', e.currentTarget.value)} />
+                  </div>
+                  <div class="field">
+                    <label>Environment (KEY=VALUE per line)</label>
+                    <textarea rows="3" value={form.envText || ''} onInput={(e) => set('envText', e.currentTarget.value)} placeholder="GITHUB_TOKEN=…" />
+                  </div>
+                </>
+              ) : (
+                <>
+                  <div class="field">
+                    <label>URL</label>
+                    <input required type="url" value={form.url || ''} onInput={(e) => set('url', e.currentTarget.value)} placeholder="https://…/mcp" />
+                  </div>
+                  <div class="field">
+                    <label>Bearer token (optional)</label>
+                    <input type="password" value={form.token || ''} onInput={(e) => set('token', e.currentTarget.value)} />
+                  </div>
+                  <div class="field">
+                    <label>Extra headers (KEY: VALUE per line)</label>
+                    <textarea rows="3" value={form.headersText || ''} onInput={(e) => set('headersText', e.currentTarget.value)} />
+                  </div>
+                </>
+              )}
+              <label class="choice" style="margin-top:8px">
+                <input type="checkbox" checked={!!form.enabled} onChange={(e) => set('enabled', e.currentTarget.checked)} />
+                <span>Enabled (visible to rooms)</span>
+              </label>
+            </div>
+            <footer class="modal-foot">
+              <button type="button" class="btn" onClick={() => setForm(null)}>Cancel</button>
+              <button type="submit" class="btn primary" disabled={busy}>Save</button>
+            </footer>
+          </form>
+        </div>
+      )}
+    </div>
+  );
+}
+
+export function MCPServersPage({ state, notify, refresh }) {
+  return (
+    <>
+      <div class="page-head">
+        <div>
+          <h1 class="page-title">MCP Servers</h1>
+          <div class="page-sub">Global server definitions. Rooms opt in to individual servers.</div>
+        </div>
+      </div>
+      <MCPCard state={state} notify={notify} refresh={refresh} />
+    </>
   );
 }
 

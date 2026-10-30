@@ -19,6 +19,11 @@ type Store struct {
 	path       string
 	globalPath string
 	state      WorkspaceState
+	db         *DB
+	onChange   func()
+	// autoStart is an in-memory FIFO of task IDs whose agents should wake up
+	// to work as soon as run capacity is available (spawned/delegated tasks).
+	autoStart []string
 }
 
 // GlobalProfile holds user-level collections shared across all projects. They
@@ -26,12 +31,13 @@ type Store struct {
 // agent library, teams, skills, providers (with credentials beside it), and
 // workspace settings. Only rooms (and their tasks/runs) are per-project.
 type GlobalProfile struct {
-	Templates []TeamTemplate   `json:"templates"`
-	Agents    []Agent          `json:"agents"`
-	Teams     []Team           `json:"teams"`
-	Skills    []Skill          `json:"skills"`
-	Providers []ProviderConfig `json:"providers"`
-	Settings  Settings         `json:"settings"`
+	Templates  []TeamTemplate   `json:"templates"`
+	Agents     []Agent          `json:"agents"`
+	Teams      []Team           `json:"teams"`
+	Skills     []Skill          `json:"skills"`
+	Providers  []ProviderConfig `json:"providers"`
+	MCPServers []MCPServer      `json:"mcpServers,omitempty"`
+	Settings   Settings         `json:"settings"`
 }
 
 func OpenStore(projectPath string) (*Store, error) {
@@ -96,6 +102,41 @@ func OpenStore(projectPath string) (*Store, error) {
 	if err := s.loadGlobal(); err != nil {
 		return nil, err
 	}
+
+	// Initialize SQLite database for autonomous orchestration persistence and crash recovery.
+	if db, err := OpenDB(abs); err == nil {
+		s.db = db
+		requeued, blocked, _ := s.db.RecoverInterruptedTasks()
+		if len(requeued) > 0 || len(blocked) > 0 {
+			for i := range s.state.Tasks {
+				for _, id := range requeued {
+					if s.state.Tasks[i].ID == id {
+						s.state.Tasks[i].Status = "todo"
+						s.state.Tasks[i].RetryCount++
+					}
+				}
+				for _, id := range blocked {
+					if s.state.Tasks[i].ID == id {
+						s.state.Tasks[i].Status = "blocked"
+					}
+				}
+			}
+		}
+	}
+
+	// Auto-derive room goal for any room where goal is unset or placeholder
+	for i := range s.state.Rooms {
+		g := strings.TrimSpace(s.state.Rooms[i].Goal)
+		if g == "" || strings.EqualFold(g, "no goal provided") || strings.EqualFold(g, "no goal provided.") {
+			for _, m := range s.state.Rooms[i].Messages {
+				if m.Role == "user" && strings.TrimSpace(m.Content) != "" {
+					s.state.Rooms[i].Goal = DeriveRoomGoal(m.Content)
+					break
+				}
+			}
+		}
+	}
+
 	// Persist the overlaid state (project + global) so it is durable.
 	if err := s.save(); err != nil {
 		return nil, err
@@ -116,23 +157,27 @@ func (s *Store) resolveGlobalPath(absProject string) string {
 
 func (s *Store) profile() GlobalProfile {
 	return GlobalProfile{
-		Templates: s.state.Templates,
-		Agents:    s.state.Agents,
-		Teams:     s.state.Teams,
-		Skills:    s.state.Skills,
-		Providers: s.state.Providers,
-		Settings:  s.state.Settings,
+		Templates:  s.state.Templates,
+		Agents:     s.state.Agents,
+		Teams:      s.state.Teams,
+		Skills:     s.state.Skills,
+		Providers:  s.state.Providers,
+		MCPServers: s.state.MCPServers,
+		Settings:   s.state.Settings,
 	}
 }
 
 func (s *Store) applyProfile(p GlobalProfile) {
-	if len(p.Templates) > 0 || len(p.Agents) > 0 || len(p.Teams) > 0 || len(p.Skills) > 0 || len(p.Providers) > 0 {
+	if len(p.Templates) > 0 || len(p.Agents) > 0 || len(p.Teams) > 0 || len(p.Skills) > 0 || len(p.Providers) > 0 || len(p.MCPServers) > 0 {
 		s.state.Templates = p.Templates
 		s.state.Agents = p.Agents
 		s.state.Teams = p.Teams
 		s.state.Skills = p.Skills
 		s.state.Providers = p.Providers
+		s.state.MCPServers = p.MCPServers
 	}
+	s.syncAgentsFromTeamsLocked()
+	s.syncSkillsFromDefaultLocked()
 	if p.Settings.Theme != "" || p.Settings.EffortMode != "" || p.Settings.MaxConcurrentRuns != 0 {
 		s.state.Settings = normalizeSettings(p.Settings)
 	}
@@ -241,26 +286,91 @@ func (s *Store) migrate() (bool, error) {
 	if s.state.Templates == nil {
 		s.state.Templates = DefaultTemplates()
 	}
+	s.syncAgentsFromTeamsLocked()
+	s.syncSkillsFromDefaultLocked()
 	s.state.Settings = normalizeSettings(s.state.Settings)
+	// Reconcile orphans left by a previous process: any task still
+	// "in_progress" cannot have an active run (runs die with the process),
+	// so it must not block new prompts or run starts. Reset it to "todo".
+	// Stale "running" runs are marked cancelled for the same reason.
+	for i := range s.state.Tasks {
+		if s.state.Tasks[i].Status == "in_progress" || s.state.Tasks[i].Status == "paused" && !s.state.Tasks[i].Hidden {
+			s.state.Tasks[i].Status = "todo"
+			migrated = true
+		}
+	}
+	for i := range s.state.Runs {
+		if s.state.Runs[i].Status == "running" {
+			s.state.Runs[i].Status = "cancelled"
+			s.state.Runs[i].Error = "interrupted by restart"
+			migrated = true
+		}
+	}
 	return migrated, nil
 }
 
-func seedAgents() []Agent {
-	agents := DefaultAgents()
-	for i := range agents {
-		if agents[i].ID == "" {
-			agents[i].ID = uuid.NewString()
+func (s *Store) syncSkillsFromDefaultLocked() {
+	existing := map[string]int{} // key -> index in s.state.Skills
+	for i, sk := range s.state.Skills {
+		key := strings.ToLower(strings.TrimSpace(sk.Name))
+		if key != "" {
+			existing[key] = i
 		}
 	}
-	return agents
+	for _, def := range DefaultSkills() {
+		key := strings.ToLower(strings.TrimSpace(def.Name))
+		if key == "" {
+			continue
+		}
+		if idx, ok := existing[key]; ok {
+			// Upgrade existing skill if the built-in version has richer content.
+			cur := &s.state.Skills[idx]
+			if len(def.Instructions) > len(cur.Instructions) {
+				cur.Instructions = def.Instructions
+				cur.Description = def.Description
+				cur.Files = def.Files
+			}
+		} else {
+			if def.ID == "" {
+				def.ID = uuid.NewString()
+			}
+			existing[key] = len(s.state.Skills)
+			s.state.Skills = append(s.state.Skills, def)
+		}
+	}
+}
+
+func (s *Store) syncAgentsFromTeamsLocked() {
+	seen := map[string]bool{}
+	for _, a := range s.state.Agents {
+		key := strings.ToLower(strings.TrimSpace(a.Name))
+		if key != "" {
+			seen[key] = true
+		}
+	}
+	for _, team := range s.state.Teams {
+		for _, agent := range team.Agents {
+			key := strings.ToLower(strings.TrimSpace(agent.Name))
+			if key == "" || seen[key] {
+				continue
+			}
+			seen[key] = true
+			copyAgent := agent
+			if copyAgent.ID == "" {
+				copyAgent.ID = uuid.NewString()
+			}
+			_ = s.normalizeSkillRefs(&copyAgent)
+			s.state.Agents = append(s.state.Agents, copyAgent)
+		}
+	}
+}
+
+func seedAgents() []Agent {
+	return []Agent{}
 }
 
 func seedSkills() []Skill {
-	skills := DefaultSkills()
-	for i := range skills {
-		skills[i].ID = uuid.NewString()
-	}
-	return skills
+	return []Skill{}
 }
 
 // normalizeSkillRefs resolves skill references that may be either skill IDs or
@@ -289,9 +399,19 @@ func (s *Store) normalizeSkillRefs(agent *Agent) error {
 			}
 		}
 		if id == "" {
-			return fmt.Errorf("unknown skill %q", ref)
+			for _, def := range DefaultSkills() {
+				if strings.EqualFold(def.Name, ref) {
+					newSkill := def
+					if newSkill.ID == "" {
+						newSkill.ID = uuid.NewString()
+					}
+					s.state.Skills = append(s.state.Skills, newSkill)
+					id = newSkill.ID
+					break
+				}
+			}
 		}
-		if !seen[id] {
+		if id != "" && !seen[id] {
 			seen[id] = true
 			out = append(out, id)
 		}
@@ -318,12 +438,154 @@ func agentsFromTeams(teams []Team) []Agent {
 	return agents
 }
 
+// TeamIDForRoomAgent returns the ID of a team invited to the room that
+// contains an agent with the given name, or "" when not found.
+func (s *Store) TeamIDForRoomAgent(roomID, agentName string) string {
+	if agentName == "" {
+		return ""
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.teamIDForRoomAgentLocked(roomID, agentName)
+}
+
+func (s *Store) teamIDForRoomAgentLocked(roomID, agentName string) string {
+	invited := map[string]bool{}
+	for _, room := range s.state.Rooms {
+		if room.ID != roomID {
+			continue
+		}
+		for _, id := range room.TeamIDs {
+			invited[id] = true
+		}
+	}
+	for _, team := range s.state.Teams {
+		if !invited[team.ID] {
+			continue
+		}
+		for _, a := range team.Agents {
+			if a.Name == agentName {
+				return team.ID
+			}
+		}
+	}
+	return ""
+}
+
+// RoomAgentNames lists the names of all agents belonging to teams invited to
+// the room. Used for friendly delegation errors.
+func (s *Store) RoomAgentNames(roomID string) []string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.roomAgentNamesLocked(roomID)
+}
+
+func (s *Store) roomAgentNamesLocked(roomID string) []string {
+	invited := map[string]bool{}
+	for _, room := range s.state.Rooms {
+		if room.ID != roomID {
+			continue
+		}
+		for _, id := range room.TeamIDs {
+			invited[id] = true
+		}
+	}
+	var names []string
+	for _, team := range s.state.Teams {
+		if !invited[team.ID] {
+			continue
+		}
+		for _, a := range team.Agents {
+			names = append(names, a.Name)
+		}
+	}
+	return names
+}
+
+// ReviewerForRoom returns a teammate who should review work in the room —
+// preferring an agent whose role/description mentions review — while skipping
+// the given agent name. Returns "" when no candidate exists.
+func (s *Store) ReviewerForRoom(roomID, exclude string) string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	invited := map[string]bool{}
+	for _, room := range s.state.Rooms {
+		if room.ID != roomID {
+			continue
+		}
+		for _, id := range room.TeamIDs {
+			invited[id] = true
+		}
+	}
+	type cand struct{ name, role, desc string }
+	var fallback []cand
+	for _, team := range s.state.Teams {
+		if !invited[team.ID] {
+			continue
+		}
+		for _, a := range team.Agents {
+			if a.Name == "" || a.Name == exclude {
+				continue
+			}
+			low := strings.ToLower(a.Role + " " + a.Description)
+			c := cand{a.Name, a.Role, a.Description}
+			if strings.Contains(low, "review") || strings.Contains(low, "verif") || strings.Contains(low, "quality") {
+				return c.name
+			}
+			fallback = append(fallback, c)
+		}
+	}
+	if len(fallback) > 0 {
+		return fallback[0].name
+	}
+	return ""
+}
+
+// EnqueueAutoStart marks a task for automatic start once run capacity frees.
+func (s *Store) EnqueueAutoStart(taskID string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, id := range s.autoStart {
+		if id == taskID {
+			return
+		}
+	}
+	s.autoStart = append(s.autoStart, taskID)
+}
+
+// PopAutoStart returns and removes the oldest pending auto-start task id.
+func (s *Store) PopAutoStart() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(s.autoStart) == 0 {
+		return ""
+	}
+	id := s.autoStart[0]
+	s.autoStart = s.autoStart[1:]
+	return id
+}
+
 func (s *Store) Snapshot() WorkspaceState {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	data, _ := json.Marshal(s.state)
 	var copy WorkspaceState
 	_ = json.Unmarshal(data, &copy)
+
+	if s.db != nil {
+		if plans, err := s.db.ListPlans(); err == nil {
+			copy.Plans = plans
+		}
+		if panels, err := s.db.ListPanels("", true); err == nil {
+			copy.Panels = panels
+		}
+		if approvals, err := s.db.ListApprovals(""); err == nil {
+			copy.Approvals = approvals
+		}
+		if artifacts, err := s.db.ListArtifacts(""); err == nil {
+			copy.Artifacts = artifacts
+		}
+	}
 	return copy
 }
 
@@ -518,9 +780,18 @@ func (s *Store) AppendRoomMessage(roomID, role, content string) (ChatMessage, er
 		if s.state.Rooms[i].ID != roomID {
 			continue
 		}
+		if role == "user" {
+			g := strings.TrimSpace(s.state.Rooms[i].Goal)
+			if g == "" || strings.EqualFold(g, "no goal provided") || strings.EqualFold(g, "no goal provided.") {
+				s.state.Rooms[i].Goal = DeriveRoomGoal(content)
+			}
+		}
 		message := NewChatMessage(role, content)
 		previous := s.state.Rooms[i].Messages
 		s.state.Rooms[i].Messages = append(previous, message)
+		if s.db != nil {
+			_ = s.db.RecordActivity(roomID, "", "chat", content, map[string]any{"role": role})
+		}
 		if err := s.save(); err != nil {
 			s.state.Rooms[i].Messages = previous
 			return ChatMessage{}, err
@@ -718,14 +989,52 @@ func (s *Store) ImportTeam(templateID, name string) (Team, error) {
 	}
 	for i := range t.Agents {
 		t.Agents[i].Tools = NormalizeToolIDs(t.Agents[i].Tools)
+		_ = s.normalizeSkillRefs(&t.Agents[i])
+		if t.Agents[i].ID == "" {
+			t.Agents[i].ID = uuid.NewString()
+		}
 	}
-	previous := s.state.Teams
-	s.state.Teams = append([]Team{t}, previous...)
+	previousTeams := s.state.Teams
+	previousAgents := s.state.Agents
+	s.state.Teams = append([]Team{t}, previousTeams...)
+	s.syncAgentsFromTeamsLocked()
+	s.syncSkillsFromDefaultLocked()
 	if err := s.save(); err != nil {
-		s.state.Teams = previous
+		s.state.Teams = previousTeams
+		s.state.Agents = previousAgents
 		return Team{}, err
 	}
 	return t, nil
+}
+
+// DeleteTeam removes a team by ID. Reusable agent profiles in the library remain
+// intact so users can continue using or assigning those agent profiles.
+func (s *Store) DeleteTeam(id string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return errors.New("team id is required")
+	}
+	found := false
+	next := s.state.Teams[:0]
+	for _, t := range s.state.Teams {
+		if t.ID == id {
+			found = true
+			continue
+		}
+		next = append(next, t)
+	}
+	if !found {
+		return fmt.Errorf("unknown team id %q", id)
+	}
+	previous := s.state.Teams
+	s.state.Teams = next
+	if err := s.save(); err != nil {
+		s.state.Teams = previous
+		return err
+	}
+	return nil
 }
 
 // ResetGlobalCollections clears user-level collections so users can start
@@ -865,6 +1174,153 @@ func (s *Store) UpdateTeam(team Team) (Team, error) {
 		return Team{}, err
 	}
 	return team, nil
+}
+
+// ListMCPServers returns the global MCP server definitions.
+func (s *Store) ListMCPServers() []MCPServer {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return append([]MCPServer(nil), s.state.MCPServers...)
+}
+
+// GetMCPServer returns one global MCP server definition.
+func (s *Store) GetMCPServer(id string) (MCPServer, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for _, srv := range s.state.MCPServers {
+		if srv.ID == id {
+			return srv, true
+		}
+	}
+	return MCPServer{}, false
+}
+
+// SaveMCPServer creates or updates a global MCP server definition.
+func (s *Store) SaveMCPServer(srv MCPServer) (MCPServer, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	srv.Name = strings.TrimSpace(srv.Name)
+	if srv.Name == "" {
+		return MCPServer{}, errors.New("mcp server name is required")
+	}
+	srv.Type = strings.ToLower(strings.TrimSpace(srv.Type))
+	if srv.Type != "stdio" && srv.Type != "http" {
+		return MCPServer{}, errors.New("mcp server type must be stdio or http")
+	}
+	if srv.Type == "http" && strings.TrimSpace(srv.URL) == "" {
+		return MCPServer{}, errors.New("mcp http server requires a URL")
+	}
+	if srv.Type == "stdio" && strings.TrimSpace(srv.Command) == "" {
+		return MCPServer{}, errors.New("mcp stdio server requires a command")
+	}
+	for i := range s.state.MCPServers {
+		if s.state.MCPServers[i].ID == srv.ID {
+			previous := s.state.MCPServers
+			srv.ID = s.state.MCPServers[i].ID
+			s.state.MCPServers[i] = srv
+			if err := s.save(); err != nil {
+				s.state.MCPServers = previous
+				return MCPServer{}, err
+			}
+			return srv, nil
+		}
+	}
+	if srv.ID == "" {
+		srv.ID = uuid.NewString()
+	}
+	previous := s.state.MCPServers
+	s.state.MCPServers = append(s.state.MCPServers, srv)
+	if err := s.save(); err != nil {
+		s.state.MCPServers = previous
+		return MCPServer{}, err
+	}
+	return srv, nil
+}
+
+// DeleteMCPServer removes a global MCP server and drops it from all rooms.
+func (s *Store) DeleteMCPServer(id string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	idx := -1
+	for i := range s.state.MCPServers {
+		if s.state.MCPServers[i].ID == id {
+			idx = i
+			break
+		}
+	}
+	if idx < 0 {
+		return fmt.Errorf("unknown mcp server id %q", id)
+	}
+	previousServers := s.state.MCPServers
+	s.state.MCPServers = append(s.state.MCPServers[:idx], s.state.MCPServers[idx+1:]...)
+	// detach from rooms
+	prevRooms := append([]Room(nil), s.state.Rooms...)
+	for i := range s.state.Rooms {
+		filtered := s.state.Rooms[i].MCPServerIDs[:0]
+		for _, sid := range s.state.Rooms[i].MCPServerIDs {
+			if sid != id {
+				filtered = append(filtered, sid)
+			}
+		}
+		s.state.Rooms[i].MCPServerIDs = filtered
+	}
+	if err := s.save(); err != nil {
+		s.state.MCPServers = previousServers
+		s.state.Rooms = prevRooms
+		return err
+	}
+	return nil
+}
+
+// MCPServersByIDs resolves enabled server definitions for the given ids.
+func (s *Store) MCPServersByIDs(ids []string) []MCPServer {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	want := map[string]bool{}
+	for _, id := range ids {
+		want[id] = true
+	}
+	var out []MCPServer
+	for _, srv := range s.state.MCPServers {
+		if want[srv.ID] && srv.Enabled {
+			out = append(out, srv)
+		}
+	}
+	return out
+}
+
+// SetRoomMCP replaces the room's enabled MCP server ids.
+func (s *Store) SetRoomMCP(roomID string, ids []string) (Room, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	valid := map[string]bool{}
+	for _, srv := range s.state.MCPServers {
+		valid[srv.ID] = true
+	}
+	seen := map[string]bool{}
+	var clean []string
+	for _, id := range ids {
+		if !valid[id] {
+			return Room{}, fmt.Errorf("unknown mcp server id %q", id)
+		}
+		if !seen[id] {
+			seen[id] = true
+			clean = append(clean, id)
+		}
+	}
+	for i := range s.state.Rooms {
+		if s.state.Rooms[i].ID != roomID {
+			continue
+		}
+		previous := s.state.Rooms[i]
+		s.state.Rooms[i].MCPServerIDs = clean
+		if err := s.save(); err != nil {
+			s.state.Rooms[i] = previous
+			return Room{}, err
+		}
+		return s.state.Rooms[i], nil
+	}
+	return Room{}, fmt.Errorf("unknown room id %q", roomID)
 }
 
 func (s *Store) SaveSkill(skill Skill) (Skill, error) {
@@ -1259,6 +1715,10 @@ func (s *Store) CreateTask(task Task) (Task, error) {
 	if task.Priority == "" {
 		task.Priority = "normal"
 	}
+	// tolerate the common "medium" alias used by agents
+	if task.Priority == "medium" {
+		task.Priority = "normal"
+	}
 	if task.Priority != "low" && task.Priority != "normal" && task.Priority != "high" && task.Priority != "urgent" {
 		return Task{}, errors.New("priority must be low, normal, high, or urgent")
 	}
@@ -1321,10 +1781,53 @@ func (s *Store) CreateTask(task Task) (Task, error) {
 	return task, nil
 }
 
+// maxReworkCycles bounds how many times a task may be sent back for rework
+// before escalating to a human.
+const maxReworkCycles = 3
+
+// ReopenForRework returns a task to in_progress (bumping its retry counter)
+// so its implementer can address reviewer feedback. It returns ok=false and
+// nil error when the rework budget is exhausted.
+func (s *Store) ReopenForRework(taskID string) (Task, bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	idx := -1
+	for i := range s.state.Tasks {
+		if s.state.Tasks[i].ID == taskID {
+			idx = i
+			break
+		}
+	}
+	if idx < 0 {
+		return Task{}, false, fmt.Errorf("unknown task id %q", taskID)
+	}
+	task := &s.state.Tasks[idx]
+	if task.RetryCount >= maxReworkCycles {
+		return *task, false, nil
+	}
+	// dependency guard (same as UpdateTaskStatus going in_progress)
+	for _, depID := range task.Dependencies {
+		for _, dep := range s.state.Tasks {
+			if dep.ID == depID && dep.Status != "done" {
+				return Task{}, false, fmt.Errorf("task is blocked by incomplete dependency %q", depID)
+			}
+		}
+	}
+	previous := append([]Task(nil), s.state.Tasks...)
+	task.Status = "in_progress"
+	task.RetryCount++
+	task.UpdatedAt = time.Now().UTC()
+	if err := s.save(); err != nil {
+		s.state.Tasks = previous
+		return Task{}, false, err
+	}
+	return *task, true, nil
+}
+
 func (s *Store) UpdateTaskStatus(taskID, status string, approved bool) (Task, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	validStatus := map[string]bool{"todo": true, "blocked": true, "in_progress": true, "review": true, "done": true, "cancelled": true}
+	validStatus := map[string]bool{"todo": true, "blocked": true, "in_progress": true, "review": true, "done": true, "cancelled": true, "paused": true}
 	if !validStatus[status] {
 		return Task{}, errors.New("invalid task status")
 	}
@@ -1364,6 +1867,31 @@ func (s *Store) UpdateTaskStatus(taskID, status string, approved bool) (Task, er
 	return *task, nil
 }
 
+// SetTaskSeverity updates a task's issue severity (info|warning|blocker).
+func (s *Store) SetTaskSeverity(taskID, severity string) (Task, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	idx := -1
+	for i := range s.state.Tasks {
+		if s.state.Tasks[i].ID == taskID {
+			idx = i
+			break
+		}
+	}
+	if idx < 0 {
+		return Task{}, fmt.Errorf("unknown task id %q", taskID)
+	}
+	previous := append([]Task(nil), s.state.Tasks...)
+	task := &s.state.Tasks[idx]
+	task.Severity = normalizeSeverity(severity)
+	task.UpdatedAt = time.Now().UTC()
+	if err := s.save(); err != nil {
+		s.state.Tasks = previous
+		return Task{}, err
+	}
+	return *task, nil
+}
+
 func (s *Store) PrepareTaskRun(taskID string) (Task, Room, *Team, ProviderConfig, string, Settings, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -1378,8 +1906,8 @@ func (s *Store) PrepareTaskRun(taskID string) (Task, Room, *Team, ProviderConfig
 	if task == nil {
 		return Task{}, Room{}, nil, ProviderConfig{}, "", Settings{}, fmt.Errorf("unknown task id %q", taskID)
 	}
-	if task.Status != "todo" && task.Status != "blocked" {
-		return Task{}, Room{}, nil, ProviderConfig{}, "", Settings{}, errors.New("only todo or dependency-ready tasks can be run")
+	if task.Status != "todo" && task.Status != "blocked" && task.Status != "paused" {
+		return Task{}, Room{}, nil, ProviderConfig{}, "", Settings{}, errors.New("only todo, paused, or dependency-ready tasks can be run")
 	}
 	if task.Status == "blocked" {
 		return Task{}, Room{}, nil, ProviderConfig{}, "", Settings{}, errors.New("task is blocked")
@@ -1495,7 +2023,13 @@ func (s *Store) MarkTaskRunning(taskID string) error {
 			continue
 		}
 		task := &s.state.Tasks[i]
-		if task.Status != "todo" {
+		startable := task.Status == "todo" || task.Status == "paused"
+		// Hidden chat threads may also resume from "review" (defensive: after a
+		// completed run they reset to todo, but never block a user prompt).
+		if task.Hidden && task.Status == "review" {
+			startable = true
+		}
+		if !startable {
 			return fmt.Errorf("task cannot start from status %q", task.Status)
 		}
 		for _, depID := range task.Dependencies {
@@ -1587,7 +2121,13 @@ func (s *Store) FinishRun(run AgentRun) error {
 			s.state.Tasks[taskIndex].UpdatedAt = run.EndedAt
 			switch run.Status {
 			case "completed":
-				s.state.Tasks[taskIndex].Status = "review"
+				// Visible Kanban work moves to Review gate; hidden chat threads
+				// must return to todo so the next prompt can reuse the thread.
+				if s.state.Tasks[taskIndex].Hidden {
+					s.state.Tasks[taskIndex].Status = "todo"
+				} else {
+					s.state.Tasks[taskIndex].Status = "review"
+				}
 			case "paused":
 				// A paused run keeps its progress; the task stays in_progress so
 				// Continue can resume the saved conversation.
@@ -1614,7 +2154,13 @@ func (s *Store) save() error {
 	if err := writeJSONAtomic(s.path, s.state); err != nil {
 		return err
 	}
-	return s.saveGlobal()
+	if err := s.saveGlobal(); err != nil {
+		return err
+	}
+	if fn := s.onChange; fn != nil {
+		go fn()
+	}
+	return nil
 }
 
 // writeJSONAtomic writes v to path via a temp file + rename, 0600.
@@ -1651,4 +2197,201 @@ func writeJSONAtomic(path string, v any) error {
 		return fmt.Errorf("persist data: %w", err)
 	}
 	return nil
+}
+
+// DB returns the underlying SQLite DB if open.
+func (s *Store) DB() *DB {
+	return s.db
+}
+
+// SavePlan saves a plan to SQLite and syncs the room triage tier.
+func (s *Store) SavePlan(p PlanRecord) error {
+	if s.db == nil {
+		return nil
+	}
+	if err := s.db.SavePlan(p); err != nil {
+		return err
+	}
+	s.mu.Lock()
+	for i := range s.state.Rooms {
+		if s.state.Rooms[i].ID == p.RoomID {
+			s.state.Rooms[i].TriageTier = p.Tier
+			_ = s.save()
+			break
+		}
+	}
+	s.mu.Unlock()
+	return nil
+}
+
+// GetPlan retrieves a room's plan.
+func (s *Store) GetPlan(roomID string) (*PlanRecord, error) {
+	if s.db == nil {
+		return nil, nil
+	}
+	return s.db.GetPlan(roomID)
+}
+
+// ListArtifacts retrieves artifacts for a room.
+func (s *Store) ListArtifacts(roomID string) ([]ArtifactRecord, error) {
+	if s.db == nil {
+		return []ArtifactRecord{}, nil
+	}
+	return s.db.ListArtifacts(roomID)
+}
+
+// SaveArtifact persists an artifact.
+func (s *Store) SaveArtifact(a ArtifactRecord) error {
+	if s.db == nil {
+		return nil
+	}
+	return s.db.SaveArtifact(a)
+}
+
+// ListApprovals returns pending approvals for a room.
+// GetApproval returns a single approval by id.
+func (s *Store) GetApproval(id string) (ApprovalRecord, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for _, a := range s.state.Approvals {
+		if a.ID == id {
+			return a, true
+		}
+	}
+	return ApprovalRecord{}, false
+}
+
+// ListApprovals returns approvals for a room.
+func (s *Store) ListApprovals(roomID string) ([]ApprovalRecord, error) {
+	if s.db == nil {
+		return []ApprovalRecord{}, nil
+	}
+	return s.db.ListApprovals(roomID)
+}
+
+// CreateApproval creates a new approval item.
+func (s *Store) CreateApproval(app ApprovalRecord) (string, error) {
+	if s.db == nil {
+		return "", nil
+	}
+	return s.db.CreateApproval(app)
+}
+
+// ResolveApproval approves or rejects an item.
+func (s *Store) ResolveApproval(id, status string) error {
+	if s.db == nil {
+		return nil
+	}
+	return s.db.ResolveApproval(id, status)
+}
+
+// ListPanels lists panels for a room.
+func (s *Store) ListPanels(roomID string, includePending bool) ([]PanelRecord, error) {
+	if s.db == nil {
+		return []PanelRecord{}, nil
+	}
+	return s.db.ListPanels(roomID, includePending)
+}
+
+// RegisterPanel registers a dynamic UI panel.
+func (s *Store) RegisterPanel(p PanelRecord) (string, error) {
+	if s.db == nil {
+		return "", nil
+	}
+	return s.db.RegisterPanel(p)
+}
+
+// RecordActivity logs a compact activity message in room chat.
+func (s *Store) RecordActivity(roomID, agentName, activityType, content string, metadata map[string]any) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for i := range s.state.Rooms {
+		if s.state.Rooms[i].ID == roomID {
+			// Activity is written to the SQLite audit log only; the chat surface
+			// uses AppendRoomNotice (single, curated line per action) to avoid
+			// double bubbles for the same event.
+			if s.db != nil {
+				_ = s.db.RecordActivity(roomID, agentName, activityType, content, metadata)
+			}
+			return nil
+		}
+	}
+	return fmt.Errorf("room not found: %s", roomID)
+}
+
+// SetOnChange registers a callback invoked after the store persists state.
+func (s *Store) SetOnChange(fn func()) { s.onChange = fn }
+
+// Close closes the underlying SQLite database.
+func (s *Store) Close() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.db != nil {
+		return s.db.Close()
+	}
+	return nil
+}
+
+// DeleteTask removes a task card from state and SQLite.
+func (s *Store) DeleteTask(id string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for i := range s.state.Tasks {
+		if s.state.Tasks[i].ID == id {
+			previous := s.state.Tasks
+			s.state.Tasks = append(s.state.Tasks[:i], s.state.Tasks[i+1:]...)
+			if err := s.save(); err != nil {
+				s.state.Tasks = previous
+				return err
+			}
+			if s.db != nil {
+				_ = s.db.DeleteTask(id)
+			}
+			return nil
+		}
+	}
+	return fmt.Errorf("unknown task id %q", id)
+}
+
+// DeletePlan removes a room's plan.
+func (s *Store) DeletePlan(roomID string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	previous := s.state.Plans
+	var filtered []PlanRecord
+	for _, p := range s.state.Plans {
+		if p.RoomID != roomID {
+			filtered = append(filtered, p)
+		}
+	}
+	s.state.Plans = filtered
+	if err := s.save(); err != nil {
+		s.state.Plans = previous
+		return err
+	}
+	if s.db != nil {
+		_ = s.db.DeletePlan(roomID)
+	}
+	return nil
+}
+
+// DeleteArtifact removes an artifact.
+func (s *Store) DeleteArtifact(id string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for i := range s.state.Artifacts {
+		if s.state.Artifacts[i].ID == id {
+			previous := s.state.Artifacts
+			s.state.Artifacts = append(s.state.Artifacts[:i], s.state.Artifacts[i+1:]...)
+			if err := s.save(); err != nil {
+				s.state.Artifacts = previous
+				return err
+			}
+			if s.db != nil {
+				_ = s.db.DeleteArtifact(id)
+			}
+			return nil
+		}
+	}
+	return fmt.Errorf("unknown artifact id %q", id)
 }

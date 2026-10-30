@@ -1,6 +1,9 @@
 package foreman
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestClassifyChatMessage(t *testing.T) {
 	cases := []struct {
@@ -117,5 +120,58 @@ func TestParseChatMentionLongestMatchWins(t *testing.T) {
 func TestParseChatMentionNilTeam(t *testing.T) {
 	if agent, rest := parseChatMention("@Atlas hi", nil); agent != "" || rest != "@Atlas hi" {
 		t.Fatalf("expected no mention for nil team, got (%q, %q)", agent, rest)
+	}
+}
+
+func TestResolveChatMentions(t *testing.T) {
+	team1 := &Team{
+		ID:        "everyday",
+		Name:      "Everyday Ops",
+		MainAgent: "Orion",
+		Agents: []Agent{
+			{Name: "Orion", Role: "Main agent"},
+			{Name: "Ferro", Role: "Code debugger"},
+			{Name: "Vera", Role: "Code reviewer"},
+		},
+	}
+	team2 := &Team{
+		ID:        "frontend",
+		Name:      "Frontend Team",
+		MainAgent: "Iris",
+		Agents: []Agent{
+			{Name: "Iris", Role: "UI lead"},
+			{Name: "Pixel", Role: "CSS specialist"},
+		},
+	}
+	teams := []*Team{team1, team2}
+
+	// 1. Single agent mention
+	tm, ag, prompt := resolveChatMentions("@Ferro tolong perbaiki test", teams)
+	if tm.ID != "everyday" || ag != "Ferro" || prompt != "tolong perbaiki test" {
+		t.Fatalf("unexpected single agent mention: tm=%v ag=%s prompt=%s", tm.ID, ag, prompt)
+	}
+
+	// 2. Team mention via #
+	tm, ag, prompt = resolveChatMentions("#Frontend Team buatkan navbar", teams)
+	if tm.ID != "frontend" || ag != "Iris" || prompt != "buatkan navbar" {
+		t.Fatalf("unexpected team mention: tm=%v ag=%s prompt=%s", tm.ID, ag, prompt)
+	}
+
+	// 3. Multi-agent mention with MainAgent
+	tm, ag, prompt = resolveChatMentions("@Orion @Ferro tolong investigasi bug", teams)
+	if tm.ID != "everyday" || ag != "Orion" || !strings.Contains(prompt, "tolong investigasi bug") {
+		t.Fatalf("unexpected multi-agent mention: tm=%v ag=%s prompt=%s", tm.ID, ag, prompt)
+	}
+
+	// 4. Multi-agent mention with only specialists
+	tm, ag, prompt = resolveChatMentions("@Ferro @Vera tolong fix dan review", teams)
+	if tm.ID != "everyday" || ag != "Orion" || !strings.Contains(prompt, "tolong fix dan review") {
+		t.Fatalf("unexpected specialists mention: tm=%v ag=%s prompt=%s", tm.ID, ag, prompt)
+	}
+
+	// 5. No mention (defaults to Lead Team's MainAgent)
+	tm, ag, prompt = resolveChatMentions("halo apa kabar", teams)
+	if tm.ID != "everyday" || ag != "Orion" || prompt != "halo apa kabar" {
+		t.Fatalf("unexpected no-mention: tm=%v ag=%s prompt=%s", tm.ID, ag, prompt)
 	}
 }

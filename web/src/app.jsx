@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'preact/hooks';
 import { api, loadWorkspace } from './api.js';
-import { HomePage, RoomsPage, RoomDetailHost, TeamsPage, AgentsPage, SkillsPage, RunsPage, SettingsPage } from './pages.jsx';
+import { HomePage, RoomsPage, RoomDetailHost, TeamsPage, AgentsPage, SkillsPage, RunsPage, SettingsPage, MCPServersPage } from './pages.jsx';
 import { AgentDetailPage, TeamDetailPage, TeamCreatePage, SkillDetailPage } from './detail.jsx';
 import { ModalHost } from './modals.jsx';
 import { Icon } from './icons.jsx';
@@ -13,7 +13,7 @@ const NAV_PRIMARY = [
   ['skills', 'Skills', 'puzzle'],
   ['runs', 'Runs & activity', 'activity'],
 ];
-const NAV_SECONDARY = [['settings', 'Settings', 'settings-2']];
+const NAV_SECONDARY = [['mcp', 'MCP Servers', 'network'], ['settings', 'Settings', 'settings-2']];
 
 const PARENT_PAGE = {
   'room-detail': 'rooms',
@@ -55,6 +55,7 @@ const hashToRoute = (hash) => {
       return id ? { page: 'skill-detail', id: decode(id) } : { page: 'skills', id: '' };
     case 'runs': return { page: 'runs', id: '' };
     case 'settings': return { page: 'settings', id: '' };
+    case 'mcp': return { page: 'mcp', id: '' };
     default: return { page: 'home', id: '' };
   }
 };
@@ -121,6 +122,22 @@ export function App() {
 
   const current = state || emptyState;
   const settings = current.settings || emptyState.settings;
+
+  // Real-time updates via SSE: refresh whenever the server reports a state change.
+  useEffect(() => {
+    if (!current || !current.projectPath) return undefined;
+    const url = `/api/events?project=${encodeURIComponent(current.projectPath)}`;
+    let es;
+    try {
+      es = new EventSource(url);
+      const handler = () => refresh();
+      es.addEventListener('update', handler);
+      es.onmessage = handler;
+    } catch (e) {
+      return undefined;
+    }
+    return () => { if (es) es.close(); };
+  }, [current && current.projectPath]);
   const themeClass = settings.theme === 'light' ? 'theme-light' : '';
 
   const go = (nextPage, id = '') => {
@@ -200,7 +217,7 @@ export function App() {
   const pauseRun = async (runId) => {
     try {
       await api(`/api/runs/${encodeURIComponent(runId)}/pause`, { method: 'POST', body: '{}' });
-      notify('Pause diminta — agent akan berhenti di titik aman');
+      notify('Stop requested — the agent will halt at a safe point');
       await refresh();
       setTimeout(() => refresh(), 1500);
     } catch (error) {
@@ -224,11 +241,24 @@ export function App() {
     }
   };
 
+  const deleteTeam = async (teamId) => {
+    try {
+      await api(`/api/teams/${encodeURIComponent(teamId)}`, { method: 'DELETE' });
+      await refresh();
+      notify('Team dihapus');
+      navigate('teams');
+    } catch (error) {
+      notify(error.message);
+    }
+  };
+
   const pageProps = {
     state: current, notify, refresh, setModal, navigate,
     openRoom, openAgent, openTeam, openSkill, openTeamCreate,
-    runTask, deleteSkill, cancelRun, pauseRun, deleteRoom,
-    importTeamTemplate, deleteAgent,
+    onTeamCreate: openTeamCreate,
+    onUseTemplate: importTeamTemplate,
+    runTask, deleteSkill, cancelRun, deleteRoom,
+    importTeamTemplate, deleteAgent, deleteTeam,
   };
 
   const pages = {
@@ -239,6 +269,7 @@ export function App() {
     skills: <SkillsPage {...pageProps} />,
     runs: <RunsPage {...pageProps} />,
     settings: <SettingsPage {...pageProps} />,
+    mcp: <MCPServersPage {...pageProps} />,
   };
 
   const activeRoom = current.rooms.find((room) => room.id === selectedId);
@@ -268,7 +299,7 @@ export function App() {
         return <AgentDetailPage key={`agent-${selectedId || 'new'}`} agentId={selectedId} {...pageProps} onBack={() => navigate('agents')} />;
       case 'team-detail':
         return activeTeam
-          ? <TeamDetailPage key={`team-${selectedId}`} teamId={selectedId} {...pageProps} onBack={() => navigate('teams')} />
+          ? <TeamDetailPage key={`team-${selectedId}`} teamId={selectedId} {...pageProps} onBack={() => navigate('teams')} onDelete={deleteTeam} />
           : <TeamsPage {...pageProps} />;
       case 'team-create':
         return (
@@ -278,6 +309,8 @@ export function App() {
             onCreated={(id) => openTeam(id)}
           />
         );
+      case 'mcp':
+        return <MCPServersPage {...pageProps} />;
       case 'skill-detail':
         return (
           <SkillDetailPage
@@ -341,6 +374,16 @@ export function App() {
             </div>
           </div>
           <div class="top-actions">
+            {(current.approvals || []).filter((a) => a.status === 'pending').length > 0 && (
+              <button
+                class={`btn small top-approval-btn ${(current.approvals || []).some((a) => a.status === 'pending' && a.severity === 'blocker') ? 'sev-blocker' : 'warning'}`}
+                style="display:flex;align-items:center;gap:6px;font-weight:600"
+                onClick={() => setModal({ kind: 'approvals' })}
+              >
+                <Icon name="alert-triangle" size={13} />
+                <span>Approvals ({(current.approvals || []).filter((a) => a.status === 'pending').length})</span>
+              </button>
+            )}
             <div class="status-pill"><span class="status-dot" />Runtime ready</div>
           </div>
         </header>
@@ -348,7 +391,7 @@ export function App() {
           {renderContent()}
         </div>
       </main>
-      <ModalHost modal={modal} setModal={setModal} state={current} notify={notify} refresh={refresh} deleteSkill={deleteSkill} />
+      <ModalHost modal={modal} setModal={setModal} state={current} notify={notify} refresh={refresh} deleteSkill={deleteSkill} runTask={runTask} />
       <div class={`toast ${toast ? 'show' : ''}`} role="status">{toast}</div>
     </div>
   );

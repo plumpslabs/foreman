@@ -10,6 +10,7 @@
     "preview": "vite preview"
   },
   "dependencies": {
+    "diff2html": "^3.4.56",
     "preact": "^10.25.4"
   },
   "devDependencies": {

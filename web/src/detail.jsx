@@ -104,13 +104,32 @@ function ProviderModelField({ providerId, providers, model, onChange, onProvider
     setQ('');
   };
 
+  const addFallback = (m) => {
+    const current = (model || '').trim();
+    if (!current || current === 'auto') {
+      onChange(m);
+    } else {
+      const parts = current.split(',').map((x) => x.trim()).filter(Boolean);
+      if (!parts.includes(m)) {
+        onChange([...parts, m].join(', '));
+      }
+    }
+    setOpen(false);
+    setQ('');
+  };
+
+  const isMulti = (model || '').includes(',');
+
   return (
-    <div class="field">
-      <label>Model</label>
+    <div class="field" style="grid-column:1/-1">
+      <label style="display:flex;justify-content:space-between">
+        <span>Model selection & fallback chain</span>
+        <span class="meta-text" style="font-size:10.5px">Multi-model / auto-rotation supported</span>
+      </label>
       <div class="model-picker">
         <button type="button" class="model-trigger" onClick={() => setOpen(!open)}>
           <span class="model-badge">{esc(model || 'auto')}</span>
-          <span class="model-source">{esc(sourceName)}</span>
+          <span class="model-source">{isMulti ? `${model.split(',').length} models in chain` : esc(sourceName)}</span>
           <span class={`model-caret ${open ? 'open' : ''}`}><Icon name="chevron-down" size={13} /></span>
         </button>
         {open && (
@@ -118,12 +137,24 @@ function ProviderModelField({ providerId, providers, model, onChange, onProvider
             <input class="model-search" placeholder="Search models or providers…" value={q}
               onInput={(e) => setQ(e.currentTarget.value)} />
             <div class="model-groups">
-              {filtered.length ? filtered.map(({ model: m, provider: p }) => (
-                <button type="button" class="model-option" key={m} onClick={() => pick(m, p)}>
-                  <span class="model-opt-name">{esc(m)}</span>
-                  <span class="model-opt-src">{esc(p.name)}</span>
-                </button>
-              )) : (
+              <button type="button" class="model-option" onClick={() => pick('', null)}>
+                <span class="model-opt-name"><strong>auto</strong> (workspace & provider rotation)</span>
+                <span class="model-opt-src">Auto fallback</span>
+              </button>
+              {filtered.map(({ model: m, provider: p }) => (
+                <div class="model-option" key={`${p.id}-${m}`} style="display:flex;justify-content:space-between;align-items:center">
+                  <div style="flex:1;cursor:pointer" onClick={() => pick(m, p)}>
+                    <span class="model-opt-name">{esc(m)}</span>
+                    <span class="model-opt-src">{esc(p.name)}</span>
+                  </div>
+                  {model && model !== 'auto' && !model.includes(m) ? (
+                    <button type="button" class="btn small subtle" title="Add as fallback model" onClick={(e) => { e.stopPropagation(); addFallback(m); }}>
+                      + fallback
+                    </button>
+                  ) : null}
+                </div>
+              ))}
+              {ql && !filtered.some((x) => x.model.toLowerCase() === ql) && (
                 <button type="button" class="model-option custom" onClick={() => pick(q.trim(), null)}>
                   <span class="model-opt-name">Use custom “{esc(q.trim())}”</span>
                 </button>
@@ -132,10 +163,19 @@ function ProviderModelField({ providerId, providers, model, onChange, onProvider
           </div>
         )}
       </div>
-      <div class="md-hint">
-        {model
-          ? <span class="chip chip-default">{esc(model)}</span>
-          : <span class="meta-text">This agent uses the provider's default model.</span>}
+      <div style="margin-top:6px">
+        <input
+          class="field-input"
+          style="font-size:12px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;width:100%"
+          placeholder="e.g. gpt-4o, claude-3-5-sonnet (comma-separated fallback chain)"
+          value={model}
+          onInput={(e) => onChange(e.currentTarget.value)}
+        />
+      </div>
+      <div class="md-hint" style="margin-top:4px">
+        {!model || model === 'auto'
+          ? <span class="meta-text">This agent uses the provider's default model. (Auto fallback chain: automatically rotates across provider models on failure)</span>
+          : <span class="meta-text"><strong>Fallback chain:</strong> Models will be tried in order ({esc(model)}). If primary fails, Foreman automatically rotates to the next model.</span>}
       </div>
     </div>
   );
@@ -222,7 +262,7 @@ export function AgentDetailPage({ agentId, state, notify, refresh, onBack }) {
     skills: (existing?.skills || [])
       .map((ref) => {
         const match = (state.skills || []).find((s) => s.id === ref || s.name === ref);
-        return match ? match.id : null;
+        return match ? match.id : ref;
       })
       .filter(Boolean),
     tools: normalizeTools(existing?.tools),
@@ -398,28 +438,32 @@ export function AgentDetailPage({ agentId, state, notify, refresh, onBack }) {
         <div class="detail-stack">
           <div class="detail-hint-row">
             <div>
-              <div class="detail-section-title">Attached skills</div>
-              <div class="section-note">Active skills are intended for context injection; passive skills stay as reference.</div>
+              <div class="detail-section-title">Attached skills ({form.skills.length} attached)</div>
+              <div class="section-note">Centang skill yang ingin dilampirkan ke agent ini. Active skills akan disuntikkan ke dalam context agent saat task dijalankan.</div>
             </div>
           </div>
           <div class="tool-list">
             {(state.skills || []).length
-              ? state.skills.map((skill) => (
-                <label class={`tool-row ${form.skills.includes(skill.id) ? 'on' : ''}`}>
-                  <input type="checkbox" checked={form.skills.includes(skill.id)}
-                    onChange={() => toggle('skills', skill.id)} />
-                  <span class="tool-info">
-                    <span class="tool-name">
-                      {esc(skill.name)}
-                      <span class={`tag ${skill.mode === 'active' ? 'green' : 'muted'}`}>
-                        {skill.mode === 'active' ? 'Active' : 'Passive'}
+              ? state.skills.map((skill) => {
+                const isAttached = form.skills.includes(skill.id) || form.skills.includes(skill.name);
+                return (
+                  <label class={`tool-row ${isAttached ? 'on' : ''}`} key={skill.id}>
+                    <input type="checkbox" checked={isAttached}
+                      onChange={() => toggle('skills', skill.id)} />
+                    <span class="tool-info">
+                      <span class="tool-name">
+                        {esc(skill.name)}
+                        <span class={`tag ${skill.mode === 'active' ? 'green' : 'muted'}`}>
+                          {skill.mode === 'active' ? 'Active' : 'Passive'}
+                        </span>
+                        <span class="tag">v{esc(skill.version)}</span>
+                        {isAttached ? <span class="tag green">Attached</span> : null}
                       </span>
-                      <span class="tag">v{esc(skill.version)}</span>
+                      <span class="tool-desc">{esc(skill.description || 'No description.')}</span>
                     </span>
-                    <span class="tool-desc">{esc(skill.description || 'No description.')}</span>
-                  </span>
-                </label>
-              ))
+                  </label>
+                );
+              })
               : <div class="empty">No skills yet. Create one on the Skills page.</div>}
           </div>
         </div>
@@ -430,7 +474,7 @@ export function AgentDetailPage({ agentId, state, notify, refresh, onBack }) {
 
 /* ---------- Team ---------- */
 
-export function TeamDetailPage({ teamId, state, notify, refresh, onBack, onOpenAgent }) {
+export function TeamDetailPage({ teamId, state, notify, refresh, onBack, onOpenAgent, onDelete }) {
   const existing = (state.teams || []).find((t) => t.id === teamId);
   if (!existing) return null;
   const [form, setForm] = useState({
@@ -445,6 +489,7 @@ export function TeamDetailPage({ teamId, state, notify, refresh, onBack, onOpenA
   });
   const [tab, setTab] = useState('overview');
   const [busy, setBusy] = useState(false);
+  const [confirmDelete, setConfirmDelete] = useState(false);
   const [pickOpen, setPickOpen] = useState(false);
   const set = (field, value) => setForm((prev) => ({ ...prev, [field]: value }));
   const skillName = (ref) => {
@@ -493,7 +538,23 @@ export function TeamDetailPage({ teamId, state, notify, refresh, onBack, onOpenA
       tab={tab}
       onTab={setTab}
       onBack={onBack}
-      actions={<button class="btn primary" disabled={busy} onClick={save}><Icon name="save" size={14} />Save team</button>}
+      actions={<>
+        {onDelete && !confirmDelete && (
+          <button class="btn danger-outline" disabled={busy} onClick={() => setConfirmDelete(true)}>
+            <Icon name="trash-2" size={14} />Delete team
+          </button>
+        )}
+        {onDelete && confirmDelete && (
+          <span style="display:flex;gap:6px;align-items:center">
+            <span style="font-size:12px;color:var(--text-muted)">Hapus team ini?</span>
+            <button class="btn danger" disabled={busy} onClick={async () => { setBusy(true); await onDelete(form.id); }}>
+              Ya, hapus
+            </button>
+            <button class="btn" onClick={() => setConfirmDelete(false)}>Cancel</button>
+          </span>
+        )}
+        <button class="btn primary" disabled={busy} onClick={save}><Icon name="save" size={14} />Save team</button>
+      </>}
     >
       {tab === 'overview' && (
         <div class="detail-grid">

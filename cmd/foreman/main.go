@@ -51,7 +51,7 @@ func usage() {
 	fmt.Println()
 	fmt.Println("Commands:")
 	fmt.Println("  foreman start [flags]   Start the dashboard (alias: fm start)")
-	fmt.Println("  foreman doctor [flags]   Check Python, pip, and the OpenHands SDK")
+	fmt.Println("  foreman doctor [flags]   Check engine health")
 	fmt.Println("  foreman version          Print version")
 	fmt.Println()
 	fmt.Println("start flags:")
@@ -75,6 +75,8 @@ func start(args []string) error {
 	noOpen := flags.Bool("no-open", false, "Do not open a browser")
 	installEngine := flags.Bool("install-engine", false, "Install the OpenHands SDK if missing")
 	autoYes := flags.Bool("yes", false, "Skip confirmation (with --install-engine)")
+	_ = installEngine
+	_ = autoYes
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
@@ -83,34 +85,6 @@ func start(args []string) error {
 	}
 	if *port < 0 || *port > 65535 {
 		return fmt.Errorf("port must be between 0 and 65535")
-	}
-
-	engine := foreman.NewEngine()
-	var installed bool
-	var probe string
-	pyVer := engine.PythonVersion()
-
-	if *installEngine {
-		installed, probe = engine.SDKInstalled()
-		if !installed {
-			ok, err := promptInstallEngine(*autoYes)
-			if err != nil {
-				return err
-			}
-			if ok {
-				fmt.Println("Installing the OpenHands SDK (this can take a few minutes)…")
-				log, err := installEngineCLI(engine)
-				if err != nil {
-					return fmt.Errorf("engine install failed — see log below\n%s", log)
-				}
-				installed, probe = engine.SDKInstalled()
-				if installed {
-					fmt.Println("✅ OpenHands SDK installed")
-				} else {
-					fmt.Printf("⚠️  SDK still not detected after install (probe: %s)\n", probe)
-				}
-			}
-		}
 	}
 
 	st, err := foreman.OpenStore(*projectPath)
@@ -122,11 +96,6 @@ func start(args []string) error {
 	if err != nil {
 		return fmt.Errorf("configure server: %w", err)
 	}
-	// Prewarm the SDK probe in the background so the dashboard's engine status
-	// is instant instead of paying the slow first-import cost on load.
-	go func() {
-		_, _ = server.RuntimeEngineInstalled()
-	}()
 	listener, actualPort, err := listenLocal(*port)
 	if err != nil {
 		return err
@@ -146,15 +115,7 @@ func start(args []string) error {
 	fmt.Printf("  Data      : %s\n", filepath.Join(state.ProjectPath, ".foreman"))
 	fmt.Printf("  Dashboard : %s\n", address)
 	fmt.Println("  Mode      : local-only · no agent run starts automatically")
-	if !*installEngine {
-		installed, probe = engine.SDKInstalled()
-	}
-	if installed {
-		fmt.Printf("  Engine    : ✓ OpenHands SDK (%s)\n", orDash(pyVer))
-	} else {
-		fmt.Printf("  Engine    : ✗ OpenHands SDK belum terpasang (%s)\n", orDash(pyVer))
-		fmt.Println("              → foreman doctor --install  atau  python3 -m pip install openhands-sdk openhands-tools")
-	}
+	fmt.Printf("  Engine    : ✓ Google ADK Go (native)\n")
 	if !*noOpen {
 		_ = openBrowser(address)
 	}
@@ -179,7 +140,6 @@ func start(args []string) error {
 func doctor(args []string) error {
 	flags := flag.NewFlagSet("doctor", flag.ContinueOnError)
 	projectPath := flags.String("project", ".", "Project directory to inspect (optional)")
-	install := flags.Bool("install", false, "Install the OpenHands SDK if missing")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
@@ -187,47 +147,17 @@ func doctor(args []string) error {
 		return fmt.Errorf("unexpected arguments: %v", flags.Args())
 	}
 
-	engine := foreman.NewEngine()
-	installed, probe := engine.SDKInstalled()
-	pyVer := engine.PythonVersion()
-
 	fmt.Println("Foreman doctor")
-	fmt.Printf("  Python        : %s\n", orDash(pyVer))
-	fmt.Printf("  pip           : %s\n", yesNo(engine.PipAvailable()))
-	fmt.Printf("  OpenHands SDK : %s\n", installedStatus(installed))
-	if !installed && probe != "" {
-		fmt.Printf("    probe       : %s\n", probe)
+	fmt.Println("  Engine        : Google ADK Go (native)")
+	if _, err := exec.LookPath("rg"); err == nil {
+		fmt.Println("  ripgrep      : available (fast search backend)")
+	} else {
+		fmt.Println("  ripgrep      : not found — searching falls back to Go backend")
 	}
-
-	if !installed && *install {
-		ok, err := promptInstallEngine(true)
-		if err != nil {
-			return err
-		}
-		if ok {
-			fmt.Println("Installing the OpenHands SDK (this can take a few minutes)…")
-			log, err := installEngineCLI(engine)
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "install failed — see log below\n%s\n", log)
-				return err
-			}
-			installed, probe = engine.SDKInstalled()
-			if installed {
-				fmt.Println("✅ OpenHands SDK installed")
-			} else {
-				fmt.Printf("⚠️  SDK still not detected (probe: %s)\n", probe)
-			}
-		}
-	}
-
 	if _, serr := foreman.OpenStore(*projectPath); serr == nil {
 		fmt.Printf("  Workspace     : %s (ok)\n", *projectPath)
 	} else {
 		fmt.Printf("  Workspace     : %s (not a Foreman workspace yet — create it with `foreman start`)\n", *projectPath)
-	}
-
-	if !installed {
-		return fmt.Errorf("OpenHands SDK is missing — run `foreman doctor --install` or `python3 -m pip install openhands-sdk openhands-tools`")
 	}
 	return nil
 }

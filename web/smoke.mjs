@@ -30,7 +30,9 @@ const workspace = {
   tasks: [{ id: 'k1', roomId: 'r1', title: 'Smoke Task', description: 'd', status: 'todo', priority: 'normal', effort: 'medium', dependencies: [], approved: false, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() }],
   runs: [{
     id: 'run1', roomId: 'r1', taskId: 'k1', provider: 'tokenharbor', model: 'deepseek-v4.1-flash:free',
-    status: 'running', startedAt: new Date().toISOString(), events: [], tokens: 120,
+    status: 'running', startedAt: new Date().toISOString(),
+    events: [{ type: 'diff', message: 'diff --git a/src/app.js b/src/app.js\n--- a/src/app.js\n+++ b/src/app.js\n@@ -1,2 +1,3 @@\n-old line\n+new line\n+extra line\n' }],
+    tokens: 120,
     result: 'diff --git a/src/app.js b/src/app.js\n--- a/src/app.js\n+++ b/src/app.js\n@@ -1,2 +1,3 @@\n-old line\n+new line\n+extra line\n',
   }],
   skills: [{ id: 's1', name: 'Docs', description: 'd', version: 1, instructions: '# Docs', mode: 'passive', enabled: false, files: [{ path: 'SKILL.md', content: '# Docs' }, { path: 'references/steps.md', content: 'step 1' }] }],
@@ -90,12 +92,8 @@ for (const label of ['Chat', 'Kanban', 'Plan', 'Changes', 'Task progress', 'Exec
   if (!view.includes(label)) failures.push(`room detail missing "${label}"`);
 }
 if (!view.includes('Running')) failures.push('room runtime status missing');
-if (!view.includes('Pause run')) failures.push('pause control missing');
-click(byText('button', 'Pause run'));
-await flush();
-if (!calls.some((c) => c.url.includes('/pause') && c.method === 'POST')) {
-  failures.push('pause action did not call the pause endpoint');
-}
+// Stop-only UX: a running agent is stopped, never paused from the room view.
+if (view.includes('Pause run')) failures.push('pause control should be removed (stop-only UX)');
 if (!view.includes('Agent needs a decision')) failures.push('agent question card missing');
 if (!view.includes('Proceed with the refactor?')) failures.push('question prompt missing');
 if (!view.includes('Teams invited to this room')) failures.push('team-invited card missing');
@@ -166,9 +164,10 @@ if (!routedMsg) failures.push('mention-routed message was not sent');
 click(byText('.room-tab', 'Changes'));
 await flush();
 view = window.document.body.innerHTML;
-if (!view.includes('diff-file')) failures.push('diff viewer missing');
+if (!window.document.querySelector('.changes-layout')) failures.push('diff viewer missing');
+if (!window.document.querySelector('.changes-tree')) failures.push('changed-files tree missing');
 if (!view.includes('src/app.js')) failures.push('diff file path missing');
-if (!view.includes('Collapse all') && !view.includes('Show all')) failures.push('diff collapse control missing');
+if (!view.includes('Split') || !view.includes('Unified')) failures.push('diff view-mode toggle missing');
 
 const back = window.document.querySelector('[aria-label="Back to rooms"]');
 if (!back) {

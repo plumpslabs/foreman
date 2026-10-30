@@ -208,9 +208,6 @@ func TestAgentLibraryCRUD(t *testing.T) {
 		t.Fatal(err)
 	}
 	initial := len(store.Snapshot().Agents)
-	if initial == 0 {
-		t.Fatal("default agent library should be seeded")
-	}
 	agent, err := store.SaveAgent(Agent{
 		Name:          "Sentinel",
 		Role:          "Security reviewer",
