@@ -2530,9 +2530,16 @@ func (s *Store) SaveArtifact(a ArtifactRecord) error {
 	return s.db.SaveArtifact(a)
 }
 
-// ListApprovals returns pending approvals for a room.
-// GetApproval returns a single approval by id.
+// GetApproval returns a single approval by id. Approvals are persisted in
+// SQLite, so the database is the source of truth; the workspace JSON copy is
+// only a fallback for stores opened without a database (and for records from
+// before approvals moved out of the JSON state).
 func (s *Store) GetApproval(id string) (ApprovalRecord, bool) {
+	if s.db != nil {
+		if a, ok := s.db.GetApproval(id); ok {
+			return a, true
+		}
+	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	for _, a := range s.state.Approvals {
@@ -2556,7 +2563,12 @@ func (s *Store) CreateApproval(app ApprovalRecord) (string, error) {
 	if s.db == nil {
 		return "", nil
 	}
-	return s.db.CreateApproval(app)
+	id, err := s.db.CreateApproval(app)
+	if err != nil {
+		return "", err
+	}
+	s.notifyChange()
+	return id, nil
 }
 
 // ResolveApproval approves or rejects an item.
@@ -2564,7 +2576,20 @@ func (s *Store) ResolveApproval(id, status string) error {
 	if s.db == nil {
 		return nil
 	}
-	return s.db.ResolveApproval(id, status)
+	if err := s.db.ResolveApproval(id, status); err != nil {
+		return err
+	}
+	s.notifyChange()
+	return nil
+}
+
+// notifyChange pushes fresh state to the dashboard. Approval writes never go
+// through save(), so without this the approvals badge only refreshed when some
+// unrelated write happened to save — a pending approval could sit unnoticed.
+func (s *Store) notifyChange() {
+	if fn := s.onChange; fn != nil {
+		go fn()
+	}
 }
 
 // ListPanels lists panels for a room.

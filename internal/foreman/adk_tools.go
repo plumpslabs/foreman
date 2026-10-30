@@ -417,6 +417,7 @@ func makeADKTools(ctx adkToolContext) []tool.Tool {
 			} else {
 				_, _ = ctx.Store.CreateApproval(ApprovalRecord{
 					RoomID:      ctx.RoomID,
+					AgentName:   ctx.AgentName,
 					Type:        "review",
 					Description: fmt.Sprintf("Rework limit reached for %q after %d cycles. Review the discussion and decide next steps.", orig.Title, orig.RetryCount),
 				})
@@ -573,27 +574,18 @@ func makeADKTools(ctx adkToolContext) []tool.Tool {
 	// git_ops
 	add(functiontool.New[gitOpsArgs, map[string]any](functiontool.Config{
 		Name:        "git_ops",
-		Description: "Inspect git diff/status or commit changes.",
-		RequireConfirmationProvider: func(args gitOpsArgs) bool {
-			return args.Operation == "commit"
-		},
+		Description: "Inspect git diff/status or propose a commit. A commit is a request: it is recorded for human approval and executes only after a human approves it in the Approvals Inbox.",
 	}, func(ac agent.Context, args gitOpsArgs) (map[string]any, error) {
 		op := args.Operation
+		if op == "commit" {
+			return requestCommitApproval(ctx, args)
+		}
 		var cmd *exec.Cmd
 		switch op {
 		case "status":
 			cmd = exec.Command("git", "status", "--short")
 		case "diff":
 			cmd = exec.Command("git", "diff")
-		case "commit":
-			msg := args.Message
-			if msg == "" {
-				msg = "foreman: update"
-			}
-			cmd = exec.Command("git", "add", "-A")
-			cmd.Dir = ctx.Workspace
-			_ = cmd.Run()
-			cmd = exec.Command("git", "commit", "-m", msg)
 		default:
 			cmd = exec.Command("git", "status")
 		}
@@ -637,13 +629,14 @@ func makeADKTools(ctx adkToolContext) []tool.Tool {
 	// ask_human
 	add(functiontool.New[askHumanArgs, map[string]any](functiontool.Config{
 		Name:        "ask_human",
-		Description: "Ask the human a question and wait for approval.",
+		Description: "Ask the human a question. It lands in the Approvals Inbox and as a chat notice; the human's decision is delivered to you as a follow-up message in this room, so do not block — summarize what you know and finish or continue with the safest assumption.",
 	}, func(ac agent.Context, args askHumanArgs) (map[string]any, error) {
 		if ctx.Store == nil {
 			return nil, fmt.Errorf("store unavailable")
 		}
 		id, err := ctx.Store.CreateApproval(ApprovalRecord{
 			RoomID:      ctx.RoomID,
+			AgentName:   ctx.AgentName,
 			Type:        "question",
 			Description: args.Question,
 			Severity:    normalizeSeverity(args.Severity),
@@ -651,6 +644,11 @@ func makeADKTools(ctx adkToolContext) []tool.Tool {
 		if err != nil {
 			return nil, err
 		}
+		// A question nobody can see is a question nobody answers: post a chip in
+		// the room as well, so the ask does not depend on the human happening to
+		// open the Approvals Inbox.
+		_ = ctx.Store.AppendRoomNotice(ctx.RoomID, ctx.AgentName, "approval.requested",
+			fmt.Sprintf("❓ @%s asks the human: %s", ctx.AgentName, strings.TrimSpace(args.Question)))
 		return map[string]any{"approval_id": id, "status": "pending"}, nil
 	}))
 
@@ -689,7 +687,7 @@ func makeADKTools(ctx adkToolContext) []tool.Tool {
 			"title": title, "desc": desc,
 		})
 		id, err := ctx.Store.CreateApproval(ApprovalRecord{
-			RoomID: ctx.RoomID, Type: "request_spawn",
+			RoomID: ctx.RoomID, AgentName: ctx.AgentName, Type: "request_spawn",
 			Description: fmt.Sprintf("🆘 @%s requests spawning @%s: %s — reason: %s", ctx.AgentName, args.AgentName, title, args.Reason),
 			PayloadJSON: string(payload),
 		})
@@ -843,6 +841,7 @@ func makeADKTools(ctx adkToolContext) []tool.Tool {
 		}
 		id, err := ctx.Store.CreateApproval(ApprovalRecord{
 			RoomID:      ctx.RoomID,
+			AgentName:   ctx.AgentName,
 			Type:        "escalation",
 			Description: args.Message,
 			Severity:    sev,
@@ -1078,4 +1077,55 @@ func makeADKTools(ctx adkToolContext) []tool.Tool {
 func mustMarshal(v any) string {
 	b, _ := json.Marshal(v)
 	return string(b)
+}
+
+// requestCommitApproval puts a git commit behind human sign-off.
+//
+// The previous implementation used ADK's RequireConfirmationProvider, which
+// emits an `adk_request_confirmation` event and ends the invocation. Nothing in
+// Foreman ever answered that event: the commit never ran, nobody was asked, and
+// the run still reported "completed" — a silent violation of the "commits are
+// human-approved" contract. Commits now go through Foreman's own approval,
+// which the dashboard can see, approve and reject.
+func requestCommitApproval(ctx adkToolContext, args gitOpsArgs) (map[string]any, error) {
+	if ctx.Store == nil {
+		return nil, fmt.Errorf("store unavailable")
+	}
+	message := strings.TrimSpace(args.Message)
+	if message == "" {
+		message = "foreman: update"
+	}
+	id, err := ctx.Store.CreateApproval(ApprovalRecord{
+		RoomID:      ctx.RoomID,
+		AgentName:   ctx.AgentName,
+		Type:        "command",
+		Description: "🔐 Commit requested: " + message,
+		PayloadJSON: mustMarshal(map[string]any{"action": "git_commit", "message": message, "workspace": ctx.Workspace}),
+	})
+	if err != nil {
+		return nil, err
+	}
+	_ = ctx.Store.AppendRoomNotice(ctx.RoomID, ctx.AgentName, "approval.requested",
+		fmt.Sprintf("🔐 @%s requested a git commit (human approval required): %q", ctx.AgentName, message))
+	return map[string]any{
+		"status":      "awaiting_human_approval",
+		"approval_id": id,
+		"committed":   false,
+		"output":      "Nothing was committed yet. A human must approve this in the Approvals Inbox; the commit runs there and its result is posted to the room.",
+	}, nil
+}
+
+// runGitCommit stages the workspace and commits. It is shared by the tool's
+// approval path so the commit a human approved is exactly the commit that runs.
+func runGitCommit(workspace, message string) (string, error) {
+	if strings.TrimSpace(message) == "" {
+		message = "foreman: update"
+	}
+	staged := exec.Command("git", "add", "-A")
+	staged.Dir = workspace
+	_ = staged.Run()
+	cmd := exec.Command("git", "commit", "-m", message)
+	cmd.Dir = workspace
+	out, err := cmd.CombinedOutput()
+	return strings.TrimSpace(string(out)), err
 }

@@ -84,12 +84,20 @@ function ApprovalsInbox({ approvals, onClose, notify, refresh }) {
   const resolve = async (id, status) => {
     setBusyId(id);
     try {
-      await api('/api/approvals/' + id + '/resolve', {
+      // The backend records the decision, posts it to the room and resumes the
+      // agent that asked. Surface its warning instead of claiming success.
+      const res = await api('/api/approvals/' + id + '/resolve', {
         method: 'POST',
         body: JSON.stringify({ status }),
       });
-      notify('Approval marked as ' + status, 'success');
       await refresh();
+      if (res && res.warning) {
+        notify('Decision saved, but the agent could not be resumed: ' + res.warning, 'error');
+      } else if (res && res.run) {
+        notify('Decision saved — the agent is picking it up', 'success');
+      } else {
+        notify('Approval marked as ' + status, 'success');
+      }
     } catch (err) {
       notify('Failed to resolve approval: ' + err.message, 'error');
     } finally {

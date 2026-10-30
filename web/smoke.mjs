@@ -29,6 +29,11 @@ const workspace = {
     createdAt: new Date().toISOString(),
     questions: [{ id: 'q1', prompt: 'Proceed with the refactor?', options: ['Yes', 'No'], answer: '', createdAt: new Date().toISOString() }],
   }],
+  approvals: [{
+    id: 'ap1', roomId: 'r1', type: 'question', agentName: 'M', severity: 'warning',
+    description: 'Proceed with the refactor?', payloadJson: '{}', status: 'pending',
+    createdAt: new Date().toISOString(),
+  }],
   teams: [{ id: 't1', templateId: 'quick-fix', name: 'Smoke Team', purpose: 'p', mainAgent: 'M', agents: [{ id: 'ta1', name: 'M', role: 'r', instructions: '# hi' }], instructions: 'i', createdAt: new Date().toISOString() }],
   templates: [{ id: 'quick-fix', version: 1, name: 'Quick Fix', purpose: 'p', mainAgent: 'M', agents: [{ name: 'M', role: 'r' }], instructions: 'i' }],
   providers: [{ id: 'tokenharbor', name: 'TokenHarbor', protocol: 'openai-compatible', baseUrl: 'https://tokenharbor.ai/v1', models: ['deepseek-v4.1-flash:free', 'claude-sonnet-5'], defaultModel: 'deepseek-v4.1-flash:free', hasApiKey: true, enabled: true }],
@@ -121,6 +126,36 @@ if (!optionBtn) {
     failures.push('answering a question did not PUT the answer');
   }
 }
+// A pending approval must be discoverable from anywhere (badge) and resolving
+// it must reach the server — the backend delivers the decision to the agent
+// that asked, so a click that only closed a modal would stall the room.
+const approvalBadge = window.document.querySelector('.top-approval-btn');
+if (!approvalBadge) {
+  failures.push('approvals badge missing for a pending approval');
+} else if (!approvalBadge.textContent.includes('Approvals (1)')) {
+  failures.push('approvals badge does not count the pending item');
+} else {
+  click(approvalBadge);
+  await flush();
+  if (!window.document.querySelector('.approval-item')) failures.push('approvals inbox did not list the pending item');
+  calls.length = 0;
+  const approveBtn = byText('.approval-item .btn', 'Approve');
+  if (!approveBtn) {
+    failures.push('approve button missing in the approvals inbox');
+  } else {
+    click(approveBtn);
+    await flush();
+    const resolved = calls.find((c) => c.method === 'POST' && c.url.includes('/api/approvals/ap1/resolve'));
+    if (!resolved) {
+      failures.push('approving did not POST the resolution');
+    } else if (!String(resolved.body).includes('approved')) {
+      failures.push('resolution did not carry the approved status');
+    }
+  }
+  const inboxClose = window.document.querySelector('.modal-backdrop .modal-head .icon-btn');
+  if (inboxClose) { click(inboxClose); await flush(); }
+}
+
 if (!view.includes('Teams invited to this room')) failures.push('team-invited card missing');
 if (!view.includes('Smoke Team')) failures.push('invited team name missing from card');
 if (!window.document.querySelector('.live-agents .live-agent.live-on')) failures.push('live agent indicator missing');

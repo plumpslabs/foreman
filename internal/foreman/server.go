@@ -987,23 +987,159 @@ func (s *Server) resolveApproval(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	if req.Status != "approved" && req.Status != "rejected" {
+		writeError(w, http.StatusBadRequest, "status must be approved or rejected")
+		return
+	}
 	if err := s.store.ResolveApproval(approvalID, req.Status); err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	if req.Status == "approved" {
-		s.applyApprovedApproval(approvalID)
-	}
-	writeJSON(w, http.StatusOK, map[string]string{"status": req.Status})
+	out := s.applyApprovalDecision(context.WithoutCancel(r.Context()), approvalID, req.Status)
+	writeJSON(w, http.StatusOK, map[string]any{
+		"status":  req.Status,
+		"run":     out.run,
+		"warning": out.warning,
+	})
 }
 
-// applyApprovedApproval performs side effects for approved approvals, such as
-// actually spawning a teammate when a request_spawn approval is approved.
-func (s *Server) applyApprovedApproval(approvalID string) {
+// approvalOutcome is what a human's decision produced: the run it resumed (if
+// any) and why it could not start, if that happened.
+type approvalOutcome struct {
+	run     *AgentRun
+	warning string
+}
+
+// applyApprovalDecision turns a human decision into something the team can see
+// and act on. Resolving used to write a status row and stop there: the agent
+// that asked never learned the answer, so approving an item looked exactly like
+// clicking a button that does nothing.
+func (s *Server) applyApprovalDecision(ctx context.Context, approvalID, status string) approvalOutcome {
+	var out approvalOutcome
 	app, ok := s.store.GetApproval(approvalID)
-	if !ok || app.Type != "request_spawn" {
-		return
+	if !ok {
+		out.warning = "the approval could not be reloaded; nothing was applied"
+		slog.Warn("approval decision could not be applied", "approval", approvalID, "status", status)
+		return out
 	}
+	switch app.Type {
+	case "request_spawn":
+		if status == "approved" {
+			s.spawnFromApproval(app)
+			return out
+		}
+		// A rejection still has to reach whoever asked for it.
+		return s.postAndResume(ctx, app, status)
+	case "command":
+		out.warning = s.applyCommandApproval(app, status)
+		return out
+	default:
+		// question / escalation / review (and anything new): record the decision
+		// in the transcript and wake the agent that asked with it.
+		return s.postAndResume(ctx, app, status)
+	}
+}
+
+// postAndResume writes the decision into the room transcript and starts a run
+// for the agent that asked, so the answer is both visible and delivered.
+func (s *Server) postAndResume(ctx context.Context, app ApprovalRecord, status string) approvalOutcome {
+	var out approvalOutcome
+	decision := approvalDecisionText(app, status)
+	if _, err := s.store.AppendRoomMessage(app.RoomID, "user", decision); err != nil {
+		out.warning = err.Error()
+		return out
+	}
+	out.run, out.warning = s.resumeAfterDecision(ctx, app, decision)
+	return out
+}
+
+// approvalDecisionText renders the human's decision the way it should read in
+// the room transcript.
+func approvalDecisionText(app ApprovalRecord, status string) string {
+	emoji, verb := "✅", "approved"
+	if status != "approved" {
+		emoji, verb = "❌", "rejected"
+	}
+	noun := "request"
+	switch app.Type {
+	case "question":
+		noun = "question"
+	case "escalation":
+		noun = "escalation"
+	case "review":
+		noun = "rework proposal"
+	case "command":
+		noun = "command"
+	}
+	desc := strings.TrimSpace(app.Description)
+	if r := []rune(desc); len(r) > 500 {
+		desc = string(r[:500]) + "..."
+	}
+	return fmt.Sprintf("%s You %s the %s: %s", emoji, verb, noun, desc)
+}
+
+// resumeAfterDecision starts a chat run for the agent that asked, addressed by
+// mention, so the decision actually reaches it. A failure is surfaced as a
+// notice instead of being swallowed.
+func (s *Server) resumeAfterDecision(ctx context.Context, app ApprovalRecord, decision string) (*AgentRun, string) {
+	prompt := decision
+	if app.AgentName != "" {
+		prompt = "@" + app.AgentName + " " + decision
+	}
+	started, err := s.runtime.StartChatRun(ctx, app.RoomID, prompt)
+	if err != nil {
+		_ = s.store.AppendRoomNotice(app.RoomID, app.AgentName, "chat.error",
+			fmt.Sprintf("⚠️ Decision could not be delivered to the agent: %v", err))
+		slog.Warn("approval decision did not start a run", "room", app.RoomID, "type", app.Type, "err", err)
+		return nil, err.Error()
+	}
+	return &started, ""
+}
+
+// applyCommandApproval executes (or refuses) a command the human decided on.
+// Commits are the only command today; the result is always posted to the room
+// so an approved action never disappears into the approvals table.
+func (s *Server) applyCommandApproval(app ApprovalRecord, status string) string {
+	var pl struct {
+		Action    string `json:"action"`
+		Message   string `json:"message"`
+		Workspace string `json:"workspace"`
+	}
+	if err := json.Unmarshal([]byte(app.PayloadJSON), &pl); err != nil || pl.Action != "git_commit" {
+		// Unknown payload: still leave a visible trace of the decision.
+		_ = s.store.AppendRoomNotice(app.RoomID, app.AgentName, "approval.resolved",
+			fmt.Sprintf("⚠️ Command approval resolved as %s, but its request payload is unknown: %s", status, oneLine(app.Description)))
+		return ""
+	}
+	if status != "approved" {
+		_ = s.store.AppendRoomNotice(app.RoomID, app.AgentName, "approval.resolved",
+			fmt.Sprintf("🚫 Commit rejected by the human: %q", pl.Message))
+		return ""
+	}
+	out, err := runGitCommit(pl.Workspace, pl.Message)
+	if err != nil {
+		_ = s.store.AppendRoomNotice(app.RoomID, app.AgentName, "approval.resolved",
+			fmt.Sprintf("⚠️ Commit approved but failed: %v — %s", err, oneLine(out)))
+		return "commit failed: " + err.Error()
+	}
+	_ = s.store.AppendRoomNotice(app.RoomID, app.AgentName, "approval.resolved",
+		fmt.Sprintf("✅ Commit approved and created: %q — %s", pl.Message, oneLine(out)))
+	return ""
+}
+
+// oneLine collapses command output so a notice stays a chip instead of a wall
+// of git output.
+func oneLine(s string) string {
+	out := strings.Join(strings.Fields(s), " ")
+	if r := []rune(out); len(r) > 300 {
+		out = string(r[:300]) + "..."
+	}
+	return out
+}
+
+// spawnFromApproval performs the side effect of an approved request_spawn:
+// actually creating the teammate's task and queueing it to start.
+func (s *Server) spawnFromApproval(app ApprovalRecord) {
 	var pl struct {
 		Action    string `json:"action"`
 		AgentName string `json:"agent_name"`
@@ -1011,10 +1147,14 @@ func (s *Server) applyApprovedApproval(approvalID string) {
 		Desc      string `json:"desc"`
 	}
 	if err := json.Unmarshal([]byte(app.PayloadJSON), &pl); err != nil || pl.Action != "request_spawn" || pl.AgentName == "" {
+		_ = s.store.AppendRoomNotice(app.RoomID, app.AgentName, "approval.resolved",
+			"⚠️ Spawn approval could not be applied: the request payload is missing or unreadable.")
 		return
 	}
 	teamID := s.store.TeamIDForRoomAgent(app.RoomID, pl.AgentName)
 	if teamID == "" {
+		_ = s.store.AppendRoomNotice(app.RoomID, app.AgentName, "approval.resolved",
+			fmt.Sprintf("⚠️ Spawn approval could not be applied: @%s is not in this room's teams.", pl.AgentName))
 		return
 	}
 	title := pl.Title
@@ -1028,11 +1168,13 @@ func (s *Server) applyApprovedApproval(approvalID string) {
 	}
 	created, err := s.store.CreateTask(task)
 	if err != nil {
+		_ = s.store.AppendRoomNotice(app.RoomID, app.AgentName, "approval.resolved",
+			fmt.Sprintf("⚠️ Spawn approval could not create the task: %v", err))
 		return
 	}
 	s.store.EnqueueAutoStart(created.ID)
 	_ = s.store.AppendRoomNotice(app.RoomID, pl.AgentName, "agent.spawned",
-		fmt.Sprintf("🆘 spawn request approved — @%s spawned: %s", pl.AgentName, title))
+		fmt.Sprintf("✅ spawn request approved — @%s spawned: %s", pl.AgentName, title))
 }
 
 func (s *Server) listRoomPanels(w http.ResponseWriter, r *http.Request) {

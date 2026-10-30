@@ -163,6 +163,7 @@ func (d *DB) migrate() error {
 		type TEXT NOT NULL,
 		description TEXT NOT NULL,
 		severity TEXT NOT NULL DEFAULT 'info',
+		agent_name TEXT NOT NULL DEFAULT '',
 		payload_json TEXT NOT NULL DEFAULT '{}',
 		status TEXT NOT NULL DEFAULT 'pending',
 		created_at DATETIME NOT NULL
@@ -195,6 +196,8 @@ func (d *DB) migrate() error {
 	// errors when the column already exists, which is expected and ignored.
 	for _, stmt := range []string{
 		`ALTER TABLE approvals ADD COLUMN severity TEXT NOT NULL DEFAULT 'info'`,
+		// Which agent asked: resolving an approval must be routed back to it.
+		`ALTER TABLE approvals ADD COLUMN agent_name TEXT NOT NULL DEFAULT ''`,
 	} {
 		_, _ = d.db.Exec(stmt)
 	}
@@ -250,9 +253,13 @@ type PanelRecord struct {
 
 // ApprovalRecord models human review gates for merge, risky commands, or custom panels.
 type ApprovalRecord struct {
-	ID          string    `json:"id"`
-	RoomID      string    `json:"roomId"`
-	Type        string    `json:"type"` // merge, command, panel, question, escalation, review, request_spawn
+	ID     string `json:"id"`
+	RoomID string `json:"roomId"`
+	Type   string `json:"type"` // merge, command, panel, question, escalation, review, request_spawn
+	// AgentName is the agent that asked. The decision has to be routed back to
+	// it (and into the room chat), otherwise approving an item changes nothing
+	// anyone can see.
+	AgentName   string    `json:"agentName,omitempty"`
 	Description string    `json:"description"`
 	Severity    string    `json:"severity,omitempty"` // info, warning, blocker
 	PayloadJSON string    `json:"payloadJson"`
@@ -494,10 +501,28 @@ func (d *DB) CreateApproval(app ApprovalRecord) (string, error) {
 	}
 	app.Severity = normalizeSeverity(app.Severity)
 	_, err := d.db.Exec(`
-		INSERT INTO approvals (id, room_id, type, description, severity, payload_json, status, created_at)
-		VALUES (?, ?, ?, ?, ?, ?, 'pending', ?)
-	`, app.ID, app.RoomID, app.Type, app.Description, app.Severity, app.PayloadJSON, app.CreatedAt)
+		INSERT INTO approvals (id, room_id, type, description, severity, agent_name, payload_json, status, created_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?)
+	`, app.ID, app.RoomID, app.Type, app.Description, app.Severity, app.AgentName, app.PayloadJSON, app.CreatedAt)
 	return app.ID, err
+}
+
+// GetApproval loads a single approval by id. Approvals live in SQLite (the
+// workspace JSON no longer carries them), so this reads the database — the old
+// in-memory lookup never saw an approval that CreateApproval had just written,
+// which silently disabled every approval side effect.
+func (d *DB) GetApproval(id string) (ApprovalRecord, bool) {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+	var a ApprovalRecord
+	err := d.db.QueryRow(
+		`SELECT id, room_id, type, description, severity, agent_name, payload_json, status, created_at
+		 FROM approvals WHERE id = ?`, id,
+	).Scan(&a.ID, &a.RoomID, &a.Type, &a.Description, &a.Severity, &a.AgentName, &a.PayloadJSON, &a.Status, &a.CreatedAt)
+	if err != nil {
+		return ApprovalRecord{}, false
+	}
+	return a, true
 }
 
 // normalizeSeverity coerces a severity string to one of info|warning|blocker,
@@ -531,10 +556,11 @@ func (d *DB) ListApprovals(roomID string) ([]ApprovalRecord, error) {
 	defer d.mu.RUnlock()
 	var rows *sql.Rows
 	var err error
+	const cols = `id, room_id, type, description, severity, agent_name, payload_json, status, created_at`
 	if roomID == "" {
-		rows, err = d.db.Query(`SELECT id, room_id, type, description, severity, payload_json, status, created_at FROM approvals ORDER BY created_at DESC`)
+		rows, err = d.db.Query(`SELECT ` + cols + ` FROM approvals ORDER BY created_at DESC`)
 	} else {
-		rows, err = d.db.Query(`SELECT id, room_id, type, description, severity, payload_json, status, created_at FROM approvals WHERE room_id = ? ORDER BY created_at DESC`, roomID)
+		rows, err = d.db.Query(`SELECT `+cols+` FROM approvals WHERE room_id = ? ORDER BY created_at DESC`, roomID)
 	}
 	if err != nil {
 		return nil, err
@@ -544,7 +570,7 @@ func (d *DB) ListApprovals(roomID string) ([]ApprovalRecord, error) {
 	var list []ApprovalRecord
 	for rows.Next() {
 		var a ApprovalRecord
-		if err := rows.Scan(&a.ID, &a.RoomID, &a.Type, &a.Description, &a.Severity, &a.PayloadJSON, &a.Status, &a.CreatedAt); err == nil {
+		if err := rows.Scan(&a.ID, &a.RoomID, &a.Type, &a.Description, &a.Severity, &a.AgentName, &a.PayloadJSON, &a.Status, &a.CreatedAt); err == nil {
 			list = append(list, a)
 		}
 	}
