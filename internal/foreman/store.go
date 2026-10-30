@@ -187,6 +187,7 @@ func (s *Store) applyProfile(p GlobalProfile) {
 		s.state.MCPServers = p.MCPServers
 	}
 	s.syncAgentsFromTeamsLocked()
+	s.reconcileAgentsFromLibraryLocked()
 	s.syncSkillsFromDefaultLocked()
 	if p.Settings.Theme != "" || p.Settings.EffortMode != "" || p.Settings.MaxConcurrentRuns != 0 {
 		s.state.Settings = normalizeSettings(p.Settings)
@@ -297,6 +298,7 @@ func (s *Store) migrate() (bool, error) {
 		s.state.Templates = DefaultTemplates()
 	}
 	s.syncAgentsFromTeamsLocked()
+	s.reconcileAgentsFromLibraryLocked()
 	s.syncSkillsFromDefaultLocked()
 	s.state.Settings = normalizeSettings(s.state.Settings)
 	// Normalize task priorities to the P0..P3 scale (legacy names like
@@ -380,6 +382,72 @@ func (s *Store) syncAgentsFromTeamsLocked() {
 			_ = s.normalizeSkillRefs(&copyAgent)
 			s.state.Agents = append(s.state.Agents, copyAgent)
 		}
+	}
+}
+
+// cloneTeamsWithAgents deep-copies teams including their rosters so roster
+// edits never mutate a saved snapshot (needed for rollback on save errors).
+func cloneTeamsWithAgents(teams []Team) []Team {
+	out := make([]Team, len(teams))
+	for i, team := range teams {
+		out[i] = team
+		out[i].Agents = append([]Agent(nil), team.Agents...)
+	}
+	return out
+}
+
+// applyLibraryProfileFields overwrites a team roster entry with the agent
+// library profile of the same name. The library is the source of truth — the
+// UI tells users "teams and rooms reference these profiles by name" — so every
+// profile field the user edits must reach the roster copies the run actually
+// reads, or runs keep executing the snapshot taken when the agent joined the
+// team.
+func applyLibraryProfileFields(dst *Agent, src Agent) {
+	dst.Role = src.Role
+	dst.Description = src.Description
+	dst.Instructions = src.Instructions
+	dst.ProviderID = src.ProviderID
+	dst.Model = src.Model
+	dst.Effort = src.Effort
+	dst.Skills = append([]string(nil), src.Skills...)
+	dst.Tools = append([]string(nil), src.Tools...)
+	dst.RequireReview = src.RequireReview
+	dst.RoleType = src.RoleType
+	dst.CanSpawn = src.CanSpawn
+	dst.MaxIterations = src.MaxIterations
+	dst.ReadOnlyBudget = src.ReadOnlyBudget
+	dst.AvatarSeed = src.AvatarSeed
+	dst.AvatarStyle = src.AvatarStyle
+}
+
+// reconcileRosterFromLibrary refreshes roster entries from the library by
+// name (case-insensitive). Entries without a library profile are untouched.
+func (s *Store) reconcileRosterFromLibraryLocked(agents []Agent) []Agent {
+	if len(s.state.Agents) == 0 || len(agents) == 0 {
+		return agents
+	}
+	byName := make(map[string]*Agent, len(s.state.Agents))
+	for i := range s.state.Agents {
+		key := strings.ToLower(strings.TrimSpace(s.state.Agents[i].Name))
+		if key != "" {
+			byName[key] = &s.state.Agents[i]
+		}
+	}
+	for i := range agents {
+		key := strings.ToLower(strings.TrimSpace(agents[i].Name))
+		if src, ok := byName[key]; ok {
+			applyLibraryProfileFields(&agents[i], *src)
+		}
+	}
+	return agents
+}
+
+// reconcileAgentsFromLibraryLocked pushes the library profiles into every
+// team roster. It runs at load time (fixing already-diverged data), on profile
+// saves, and on team saves.
+func (s *Store) reconcileAgentsFromLibraryLocked() {
+	for i := range s.state.Teams {
+		s.state.Teams[i].Agents = s.reconcileRosterFromLibraryLocked(s.state.Teams[i].Agents)
 	}
 }
 
@@ -523,6 +591,44 @@ func (s *Store) roomAgentNamesLocked(roomID string) []string {
 // ReviewerForRoom returns a teammate who should review work in the room —
 // preferring an agent whose role/description mentions review — while skipping
 // the given agent name. Returns "" when no candidate exists.
+// AgentRequiresReview reports whether the named agent's profile is flagged to
+// keep its own work out of "done": finish_task by such an agent routes the
+// card into the review gate instead. The library profile decides (source of
+// truth); the room's team roster is only a fallback for agents that predate
+// the library.
+func (s *Store) AgentRequiresReview(roomID, agentName string) bool {
+	if strings.TrimSpace(agentName) == "" {
+		return false
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for i := range s.state.Agents {
+		if strings.EqualFold(s.state.Agents[i].Name, agentName) {
+			return s.state.Agents[i].RequireReview
+		}
+	}
+	invited := map[string]bool{}
+	for _, room := range s.state.Rooms {
+		if room.ID != roomID {
+			continue
+		}
+		for _, id := range room.TeamIDs {
+			invited[id] = true
+		}
+	}
+	for _, team := range s.state.Teams {
+		if !invited[team.ID] {
+			continue
+		}
+		for _, agent := range team.Agents {
+			if strings.EqualFold(agent.Name, agentName) {
+				return agent.RequireReview
+			}
+		}
+	}
+	return false
+}
+
 func (s *Store) ReviewerForRoom(roomID, exclude string) string {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -1057,15 +1163,20 @@ func (s *Store) ImportTeam(templateID, name string) (Team, error) {
 	}
 	previousTeams := s.state.Teams
 	previousAgents := s.state.Agents
-	s.state.Teams = append([]Team{t}, previousTeams...)
+	// Deep-copy existing rosters: reconcile mutates Agents in place and the
+	// rollback below must restore the untouched snapshots.
+	s.state.Teams = append([]Team{t}, cloneTeamsWithAgents(previousTeams)...)
 	s.syncAgentsFromTeamsLocked()
 	s.syncSkillsFromDefaultLocked()
+	// Names that already exist in the library keep the library's profile, so
+	// the imported roster starts from the same source of truth as saved teams.
+	s.reconcileAgentsFromLibraryLocked()
 	if err := s.save(); err != nil {
 		s.state.Teams = previousTeams
 		s.state.Agents = previousAgents
 		return Team{}, err
 	}
-	return t, nil
+	return s.state.Teams[0], nil
 }
 
 // DeleteTeam removes a team by ID. Reusable agent profiles in the library remain
@@ -1217,6 +1328,10 @@ func (s *Store) UpdateTeam(team Team) (Team, error) {
 		return Team{}, fmt.Errorf("unknown team id %q", team.ID)
 	}
 	team.MainAgent = strings.TrimSpace(team.MainAgent)
+	// Refresh the incoming roster from the agent library first: teams reference
+	// profiles by name, so a team save must never persist a stale clone over
+	// the profile the user edited.
+	team.Agents = s.reconcileRosterFromLibraryLocked(team.Agents)
 	for i := range team.Agents {
 		if err := s.normalizeSkillRefs(&team.Agents[i]); err != nil {
 			return Team{}, err
@@ -1560,6 +1675,14 @@ func (s *Store) SaveAgent(agent Agent) (Agent, error) {
 	default:
 		return Agent{}, errors.New("role type must be coordinator, specialist, reviewer, or custom")
 	}
+	// Effort feeds the run prompt (and task creation), so reject anything the
+	// effort scale does not understand instead of silently shipping it.
+	agent.Effort = strings.ToLower(strings.TrimSpace(agent.Effort))
+	switch agent.Effort {
+	case "", "low", "medium", "high":
+	default:
+		return Agent{}, errors.New("effort must be low, medium, or high")
+	}
 	// A role title is required for display; when the user only picked a role
 	// from the dropdown, derive the title from it.
 	if agent.Role == "" {
@@ -1610,6 +1733,7 @@ func (s *Store) SaveAgent(agent Agent) (Agent, error) {
 		}
 	}
 	previous := s.state.Agents
+	previousTeams := s.state.Teams
 	s.state.Agents = append([]Agent(nil), previous...)
 	updated := false
 	for i := range s.state.Agents {
@@ -1622,8 +1746,13 @@ func (s *Store) SaveAgent(agent Agent) (Agent, error) {
 	if !updated {
 		s.state.Agents = append([]Agent{agent}, s.state.Agents...)
 	}
+	// Push the saved profile into every team roster by name: runs read the
+	// roster, so without this an edit here never reaches the model.
+	s.state.Teams = cloneTeamsWithAgents(previousTeams)
+	s.reconcileAgentsFromLibraryLocked()
 	if err := s.save(); err != nil {
 		s.state.Agents = previous
+		s.state.Teams = previousTeams
 		return Agent{}, err
 	}
 	return agent, nil
@@ -1804,6 +1933,39 @@ func (s *Store) SetProviderSecretFlag(providerID string, has bool) {
 	}
 }
 
+// effortForAgentLocked resolves the effort a new task inherits from its
+// assigned agent: the library profile first (source of truth), then the team
+// roster copy. Empty means "use the workspace default".
+func (s *Store) effortForAgentLocked(teamID, agentName string) string {
+	valid := func(e string) string {
+		e = strings.ToLower(strings.TrimSpace(e))
+		if e == "low" || e == "medium" || e == "high" {
+			return e
+		}
+		return ""
+	}
+	if agentName != "" {
+		for i := range s.state.Agents {
+			if strings.EqualFold(s.state.Agents[i].Name, agentName) {
+				return valid(s.state.Agents[i].Effort)
+			}
+		}
+		if teamID != "" {
+			for _, team := range s.state.Teams {
+				if team.ID != teamID {
+					continue
+				}
+				for _, agent := range team.Agents {
+					if strings.EqualFold(agent.Name, agentName) {
+						return valid(agent.Effort)
+					}
+				}
+			}
+		}
+	}
+	return ""
+}
+
 func (s *Store) CreateTask(task Task) (Task, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -1870,6 +2032,9 @@ func (s *Store) CreateTask(task Task) (Task, error) {
 		task.Priority = canon
 	} else {
 		return Task{}, errors.New("priority must be P0, P1, P2, or P3")
+	}
+	if task.Effort == "" {
+		task.Effort = s.effortForAgentLocked(task.TeamID, task.AgentName)
 	}
 	if task.Effort == "" {
 		task.Effort = s.state.Settings.DefaultEffort
@@ -2319,9 +2484,14 @@ func (s *Store) PrepareTaskRun(taskID string) (Task, Room, *Team, ProviderConfig
 	if config == nil {
 		return Task{}, Room{}, nil, ProviderConfig{}, "", Settings{}, errors.New("no enabled provider is configured")
 	}
-	// An agent may pin a model that differs from the provider default.
+	// An agent may pin a model that differs from the provider default. Only
+	// the primary model goes here: a comma-separated chain used as a single
+	// model name is rejected by every provider, and "auto" must stay a
+	// sentinel rather than a model name.
 	if agentModel != "" {
-		config.DefaultModel = agentModel
+		if first := strings.TrimSpace(strings.Split(agentModel, ",")[0]); first != "" && !strings.EqualFold(first, "auto") {
+			config.DefaultModel = first
+		}
 	}
 	secret, err := s.loadProviderCredential(s.state.ProjectPath, config.ID)
 	if err != nil {

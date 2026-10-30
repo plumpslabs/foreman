@@ -87,59 +87,89 @@ function normalizeTools(tools) {
   return out;
 }
 
-/* Model picker bound to the connected providers. The trigger shows the picked
-   model as a badge with its source provider; clicking opens a searchable list
-   of every configured provider's models. Picking a model from another provider
-   also switches the provider. */
-function ProviderModelField({ providerId, providers, model, onChange, onProviderChange }) {
+/* Attempt budget for the model chain: Max retries N gives one initial attempt
+   plus N retries, and settings below 1 fall back to 3 retries — this mirrors
+   the runtime loop exactly, so the chain can hold one model per attempt. */
+function attemptBudget(settings) {
+  const retries = Number(settings?.maxRetries ?? 0);
+  return (retries < 1 ? 3 : retries) + 1;
+}
+
+/* Model chain picker bound to the connected providers. Picked models render as
+   a numbered badge list — badge order is the retry order — and the popover
+   toggles models in and out until the attempt budget is full. The run calls a
+   single provider (base URL + key), so the primary badge decides which
+   provider serves the chain. */
+function ProviderModelField({ providerId, providers, model, onChange, onProviderChange, maxAttempts }) {
   const [open, setOpen] = useState(false);
   const [q, setQ] = useState('');
   const provider = providers.find((p) => p.id === providerId);
   const allModels = [];
+  const providerOf = new Map();
   for (const p of providers) {
     for (const m of p.models || []) {
+      if (!providerOf.has(m)) providerOf.set(m, p);
       if (!allModels.some((x) => x.model === m)) allModels.push({ model: m, provider: p });
     }
   }
+  const chain = (model || '').split(',').map((s) => s.trim()).filter(Boolean);
+  const cap = Math.max(1, maxAttempts || 1);
+  const full = chain.length >= cap;
   const ql = q.trim().toLowerCase();
   const filtered = ql
     ? allModels.filter((x) => x.model.toLowerCase().includes(ql) || (x.provider.name || '').toLowerCase().includes(ql))
     : allModels;
   const sourceName = provider ? provider.name : providerId || 'workspace default';
 
-  const pick = (m, p) => {
-    onChange(m);
+  // The primary badge decides which provider (base URL + key) serves every
+  // attempt, so keep providerId in sync with badge #1 as it changes.
+  const syncProvider = (next) => {
+    const p = next[0] ? providerOf.get(next[0]) : null;
     if (p && p.id !== providerId && onProviderChange) onProviderChange(p.id);
-    setOpen(false);
-    setQ('');
   };
 
-  const addFallback = (m) => {
-    const current = (model || '').trim();
-    if (!current || current === 'auto') {
-      onChange(m);
-    } else {
-      const parts = current.split(',').map((x) => x.trim()).filter(Boolean);
-      if (!parts.includes(m)) {
-        onChange([...parts, m].join(', '));
-      }
+  const toggle = (m) => {
+    if (chain.includes(m)) {
+      const next = chain.filter((x) => x !== m);
+      onChange(next.join(', '));
+      syncProvider(next);
+      return;
     }
+    if (full) return;
+    const next = [...chain, m];
+    onChange(next.join(', '));
+    syncProvider(next);
     setOpen(false);
     setQ('');
   };
 
-  const isMulti = (model || '').includes(',');
+  const remove = (m) => {
+    const next = chain.filter((x) => x !== m);
+    onChange(next.join(', '));
+    syncProvider(next);
+  };
 
   return (
     <div class="field" style="grid-column:1/-1">
       <label style="display:flex;justify-content:space-between">
         <span>Model selection & fallback chain</span>
-        <span class="meta-text" style="font-size:10.5px">Multi-model / auto-rotation supported</span>
+        <span class="meta-text" style="font-size:10.5px">{chain.length} / {cap} attempts</span>
       </label>
       <div class="model-picker">
         <button type="button" class="model-trigger" onClick={() => setOpen(!open)}>
-          <span class="model-badge">{plain(model || 'auto')}</span>
-          <span class="model-source">{isMulti ? `${model.split(',').length} models in chain` : plain(sourceName)}</span>
+          {chain.length === 0
+            ? <span class="model-badge">auto</span>
+            : chain.map((m, idx) => (
+              <span class="model-badge" key={m} title={providerOf.get(m) ? `Provider: ${providerOf.get(m).name}` : m}>
+                <span style="opacity:.55;font-weight:500">{idx + 1}.</span> {plain(m)}
+                <span
+                  onClick={(e) => { e.stopPropagation(); remove(m); }}
+                  role="button" tabIndex={-1} aria-label={`Remove ${m} from chain`}
+                  style="margin-left:6px;cursor:pointer;opacity:.7"
+                >×</span>
+              </span>
+            ))}
+          <span class="model-source">{chain.length ? `tried in order via ${plain(sourceName)}` : plain(sourceName)}</span>
           <span class={`model-caret ${open ? 'open' : ''}`}><Icon name="chevron-down" size={13} /></span>
         </button>
         {open && (
@@ -147,45 +177,38 @@ function ProviderModelField({ providerId, providers, model, onChange, onProvider
             <input class="model-search" placeholder="Search models or providers…" value={q}
               onInput={(e) => setQ(e.currentTarget.value)} />
             <div class="model-groups">
-              <button type="button" class="model-option" onClick={() => pick('', null)}>
+              <button type="button" class="model-option" onClick={() => { onChange(''); setOpen(false); setQ(''); }}>
                 <span class="model-opt-name"><strong>auto</strong> (workspace & provider rotation)</span>
-                <span class="model-opt-src">Auto fallback</span>
+                <span class="model-opt-src">{chain.length === 0 ? '✓ in chain' : 'pick to reset'}</span>
               </button>
-              {filtered.map(({ model: m, provider: p }) => (
-                <div class="model-option" key={`${p.id}-${m}`} style="display:flex;justify-content:space-between;align-items:center">
-                  <div style="flex:1;cursor:pointer" onClick={() => pick(m, p)}>
-                    <span class="model-opt-name">{plain(m)}</span>
-                    <span class="model-opt-src">{plain(p.name)}</span>
+              {filtered.map(({ model: m, provider: p }) => {
+                const on = chain.includes(m);
+                const blocked = !on && full;
+                return (
+                  <div class="model-option" key={`${p.id}-${m}`} style="display:flex;align-items:center;gap:8px">
+                    <div style="flex:1;cursor:pointer" onClick={() => toggle(m)}>
+                      <span class="model-opt-name">{on ? '✓ ' : ''}{plain(m)}</span>
+                      <span class="model-opt-src">{plain(p.name)}</span>
+                    </div>
+                    <span class="model-opt-src">{on ? 'in chain — click to remove' : blocked ? 'attempt budget full' : '+ add to chain'}</span>
                   </div>
-                  {model && model !== 'auto' && !model.includes(m) ? (
-                    <button type="button" class="btn small subtle" title="Add as fallback model" onClick={(e) => { e.stopPropagation(); addFallback(m); }}>
-                      + fallback
-                    </button>
-                  ) : null}
-                </div>
-              ))}
+                );
+              })}
               {ql && !filtered.some((x) => x.model.toLowerCase() === ql) && (
-                <button type="button" class="model-option custom" onClick={() => pick(q.trim(), null)}>
-                  <span class="model-opt-name">Use custom “{plain(q.trim())}”</span>
+                <button type="button" class="model-option custom" onClick={() => toggle(q.trim())}>
+                  <span class="model-opt-name">Add custom “{plain(q.trim())}”</span>
+                  <span class="model-opt-src">{full ? 'attempt budget full' : '+ add to chain'}</span>
                 </button>
               )}
             </div>
           </div>
         )}
       </div>
-      <div style="margin-top:6px">
-        <input
-          class="field-input"
-          style="font-size:12px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;width:100%"
-          placeholder="e.g. gpt-4o, claude-3-5-sonnet (comma-separated fallback chain)"
-          value={model}
-          onInput={(e) => onChange(e.currentTarget.value)}
-        />
-      </div>
-      <div class="md-hint" style="margin-top:4px">
-        {!model || model === 'auto'
-          ? <span class="meta-text">This agent uses the provider's default model. (Auto fallback chain: automatically rotates across provider models on failure)</span>
-          : <span class="meta-text"><strong>Fallback chain:</strong> Models will be tried in order ({plain(model)}). If primary fails, Foreman automatically rotates to the next model.</span>}
+      <div class="md-hint" style="margin-top:6px">
+        {chain.length === 0
+          ? <span class="meta-text">Auto — workspace/provider default model, with automatic rotation across the provider's models on failure.</span>
+          : <span class="meta-text"><strong>Fallback chain:</strong> {chain.map(plain).join(' → ')} — tried in order across {cap} attempt{cap === 1 ? '' : 's'} (Max retries: {cap - 1}).</span>}
+        {full ? <span class="meta-text"> Attempt budget full — remove a badge to swap models.</span> : null}
       </div>
     </div>
   );
@@ -410,7 +433,8 @@ export function AgentDetailPage({ agentId, state, notify, refresh, onBack }) {
           </div>
           <ProviderModelField providerId={form.providerId} providers={state.providers || []}
             model={form.model} onChange={(model) => set('model', model)}
-            onProviderChange={(id) => set('providerId', id)} />
+            onProviderChange={(id) => set('providerId', id)}
+            maxAttempts={attemptBudget(state.settings)} />
           <div class="field">
             <label>Default effort</label>
             <select value={form.effort} onChange={(e) => set('effort', e.currentTarget.value)}>

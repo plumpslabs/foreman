@@ -397,6 +397,17 @@ func makeADKTools(ctx adkToolContext) []tool.Tool {
 		if status == "" {
 			status = "done"
 		}
+		// A profile flagged "Require review" may not close its own card: the
+		// work enters the review gate instead, which hands a "Review: ..."
+		// card to a reviewer (or waits for human approval when none exists).
+		// Hidden chat threads and review cards themselves are exempt so chat
+		// turns never spawn reviews and approvals never loop.
+		if status == "done" && !task.Hidden && !strings.HasPrefix(task.Title, "Review: ") &&
+			ctx.Store.AgentRequiresReview(ctx.RoomID, ctx.AgentName) {
+			status = "review"
+			_ = ctx.Store.AppendRoomNotice(ctx.RoomID, ctx.AgentName, "review.required",
+				fmt.Sprintf("🔒 @%s requires review — task %q routed to review instead of done", ctx.AgentName, task.Title))
+		}
 		_, err = ctx.Store.UpdateTaskStatus(args.TaskID, status, true)
 		if err != nil {
 			return nil, err

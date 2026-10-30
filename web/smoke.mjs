@@ -321,7 +321,10 @@ if (!providerSelect) {
   await flush();
   view = window.document.body.innerHTML;
   if (!view.includes('auto')) failures.push('provider-bound model trigger missing');
-  if (!view.includes('This agent uses the provider\'s default model.')) failures.push('provider-bound model picker hint missing');
+  if (!view.includes('Auto — workspace/provider default model')) failures.push('provider-bound model picker hint missing');
+  // Chain capacity mirrors the runtime attempt budget (maxRetries 0 → 3
+  // retries → 4 attempts), shown next to the field label.
+  if (!view.includes('0 / 4 attempts')) failures.push('model chain attempt budget counter missing');
 }
 
 // Skill detail page with a directory tree.

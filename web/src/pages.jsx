@@ -2510,7 +2510,8 @@ export function SettingsPage({ state, notify, refresh }) {
                   onInput={(e) => setField('maxRetries', e.currentTarget.value, true)} />
                 <div class="md-hint">
                   0 uses the server default (3). A malformed model response is re-sampled on the same
-                  model first; rate limits rotate to the next fallback.
+                  model first; rate limits rotate to the next fallback. Attempts = retries + 1, and an
+                  agent profile can chain one model per attempt (N retries → N + 1 model badges).
                 </div>
                 {Number(policy.maxRetries) === 1 ? (
                   <div class="md-hint" style="color:#ffce9e">

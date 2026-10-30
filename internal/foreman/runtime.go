@@ -641,6 +641,9 @@ func buildRunPrompt(room Room, task Task, team *Team, skills string, allowedTool
 		fmt.Sprintf("Task: %s", task.Title),
 		fmt.Sprintf("Description: %s", task.Description),
 	}
+	if effort := strings.TrimSpace(task.Effort); effort != "" {
+		sections = append(sections, effortDirective(effort))
+	}
 	if team != nil {
 		activeAgent := task.AgentName
 		if activeAgent == "" {
@@ -1002,9 +1005,16 @@ func resolveModelChain(config ProviderConfig, team *Team, task Task) (string, []
 			}
 		}
 	}
+	// An explicit chain on the profile is authoritative: exactly the models
+	// the user picked, in order. Provider-wide rotation is only the fallback
+	// for agents that picked nothing — otherwise a deliberate 3-model chain
+	// would drown in every model the provider happens to offer.
 	if agentModel != "" {
 		for _, part := range strings.Split(agentModel, ",") {
 			add(part)
+		}
+		if len(candidates) > 0 {
+			return candidates[0], candidates[1:]
 		}
 	}
 	add(config.DefaultModel)
@@ -1021,6 +1031,20 @@ func resolveModelChain(config ProviderConfig, team *Team, task Task) (string, []
 		fallbacks = candidates[1:]
 	}
 	return primary, fallbacks
+}
+
+// effortDirective turns a task's effort (low/medium/high) into concrete
+// working instructions. Without this the profile's effort selector changed
+// nothing the model could see.
+func effortDirective(effort string) string {
+	switch strings.ToLower(strings.TrimSpace(effort)) {
+	case "low":
+		return "## Effort: low\nBe fast and decisive: give the most direct fix, skip optional hardening or refactors, and finish without exploring beyond what the task needs."
+	case "high":
+		return "## Effort: high\nWork thoroughly: verify assumptions with evidence, check edge cases and interactions, run the relevant tests, and only finish when you can show the change is correct."
+	default:
+		return "## Effort: medium\nBalance speed and care: implement the change, verify it with the most relevant check, and avoid gold-plating."
+	}
 }
 
 // conversationID scopes a run's conversation to the room + agent rather than a
