@@ -18,6 +18,7 @@ type Store struct {
 	mu         sync.RWMutex
 	path       string
 	globalPath string
+	avatarDir  string
 	state      WorkspaceState
 	db         *DB
 	onChange   func()
@@ -60,6 +61,7 @@ func OpenStore(projectPath string) (*Store, error) {
 	path := filepath.Join(abs, ".foreman", "workspace.json")
 	s := &Store{path: path}
 	s.globalPath = s.resolveGlobalPath(abs)
+	s.avatarDir = avatarDirFor(s.globalPath)
 	data, err := os.ReadFile(path)
 	if err == nil {
 		if err := json.Unmarshal(data, &s.state); err != nil {
@@ -106,6 +108,10 @@ func OpenStore(projectPath string) (*Store, error) {
 	if err := s.loadGlobal(); err != nil {
 		return nil, err
 	}
+
+	// Backfill avatar seeds/styles so agents created before avatars existed get
+	// one too. Persisted with the state below.
+	s.ensureAgentAvatars()
 
 	// Initialize SQLite database for autonomous orchestration persistence and crash recovery.
 	if db, err := OpenDB(abs); err == nil {
@@ -1504,6 +1510,22 @@ func instructionsFromFiles(files []SkillFile) string {
 	return ""
 }
 
+// roleTypeLabel maps a role type to a human-readable title, used when an agent
+// is saved with a role type but no explicit role title.
+func roleTypeLabel(roleType string) string {
+	switch roleType {
+	case "coordinator":
+		return "Coordinator"
+	case "specialist":
+		return "Specialist"
+	case "reviewer":
+		return "Reviewer"
+	case "custom":
+		return "Custom agent"
+	}
+	return ""
+}
+
 // SaveAgent creates or updates an agent library profile. Agent names are the
 // identity used by teams and tasks, so they must be unique.
 func (s *Store) SaveAgent(agent Agent) (Agent, error) {
@@ -1515,17 +1537,27 @@ func (s *Store) SaveAgent(agent Agent) (Agent, error) {
 	agent.Instructions = strings.TrimSpace(agent.Instructions)
 	agent.Model = strings.TrimSpace(agent.Model)
 	agent.Tools = NormalizeToolIDs(agent.Tools)
+	agent.AvatarSeed = strings.TrimSpace(agent.AvatarSeed)
+	agent.AvatarStyle = strings.TrimSpace(agent.AvatarStyle)
+	agent.RoleType = strings.ToLower(strings.TrimSpace(agent.RoleType))
+	switch agent.RoleType {
+	case "", "coordinator", "specialist", "reviewer", "custom":
+	default:
+		return Agent{}, errors.New("role type must be coordinator, specialist, reviewer, or custom")
+	}
+	// A role title is required for display; when the user only picked a role
+	// from the dropdown, derive the title from it.
+	if agent.Role == "" {
+		agent.Role = roleTypeLabel(agent.RoleType)
+	}
 	if agent.Name == "" || agent.Role == "" {
 		return Agent{}, errors.New("agent name and role are required")
 	}
 	if len(agent.Name) > 80 || len(agent.Role) > 160 || len(agent.Instructions) > 16000 {
 		return Agent{}, errors.New("agent name, role, or instructions exceed the allowed length")
 	}
-	agent.RoleType = strings.ToLower(strings.TrimSpace(agent.RoleType))
-	switch agent.RoleType {
-	case "", "coordinator", "specialist", "reviewer", "custom":
-	default:
-		return Agent{}, errors.New("role type must be coordinator, specialist, reviewer, or custom")
+	if len(agent.AvatarSeed) > 200 || len(agent.AvatarStyle) > 60 {
+		return Agent{}, errors.New("avatar seed or style exceed the allowed length")
 	}
 	if agent.CanSpawn != "" && agent.CanSpawn != "request" && agent.CanSpawn != "limited" {
 		return Agent{}, errors.New("spawn authority must be request or limited")
@@ -1539,6 +1571,9 @@ func (s *Store) SaveAgent(agent Agent) (Agent, error) {
 	if agent.ID == "" {
 		agent.ID = uuid.NewString()
 	}
+	// Give new agents (and agents saved without one) a random avatar. An
+	// existing seed/style is preserved so re-saving never re-rolls it.
+	assignAvatar(&agent)
 	if err := s.normalizeSkillRefs(&agent); err != nil {
 		return Agent{}, err
 	}

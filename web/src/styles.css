@@ -142,6 +142,10 @@ img { max-width: 100%; display: block; }
 .agent-avatar.blue { background: #141a28; border-color: #2d3a5c; color: #a9c4ff; }
 .agent-avatar.purple { background: #181524; border-color: #3b3052; color: #d7c22ff; }
 .agent-avatar.orange { background: #231e14; border-color: #4a3a20; color: #f0c98a; }
+.agent-avatar-img { width: 100%; height: 100%; object-fit: cover; border-radius: inherit; display: block; }
+.template-agents { display: flex; flex-wrap: wrap; gap: 10px; margin-bottom: 14px; }
+.template-agent { display: inline-flex; align-items: center; gap: 6px; }
+.template-agent-name { font-size: 11px; color: var(--muted); }
 
 /* ---------- Room detail (3-col) ---------- */
 .workspace {

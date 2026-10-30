@@ -51,6 +51,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/agents", s.saveAgent)
 	mux.HandleFunc("PUT /api/agents/{agentID}", s.updateAgent)
 	mux.HandleFunc("DELETE /api/agents/{agentID}", s.deleteAgent)
+	mux.HandleFunc("GET /api/agents/{agentID}/avatar", s.agentAvatar)
+	mux.HandleFunc("POST /api/agents/{agentID}/avatar/shuffle", s.shuffleAgentAvatar)
 	mux.HandleFunc("POST /api/rooms", s.createRoom)
 	mux.HandleFunc("DELETE /api/rooms/{roomID}", s.deleteRoom)
 	mux.HandleFunc("POST /api/rooms/{roomID}/messages", s.appendRoomMessage)
@@ -286,6 +288,38 @@ func (s *Server) deleteAgent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// agentAvatar serves the cached (or freshly generated) SVG avatar for an agent.
+// It is fetched directly by <img> tags, so it does not require the project
+// query parameter; the server is bound to a single workspace.
+func (s *Server) agentAvatar(w http.ResponseWriter, r *http.Request) {
+	data, err := s.store.AvatarSVG(r.PathValue("agentID"))
+	if err != nil {
+		slog.Debug("agent avatar unavailable", "agent", r.PathValue("agentID"), "error", err)
+	}
+	if len(data) == 0 {
+		http.NotFound(w, r)
+		return
+	}
+	w.Header().Set("Content-Type", "image/svg+xml; charset=utf-8")
+	w.Header().Set("Cache-Control", "public, max-age=604800")
+	_, _ = w.Write(data)
+}
+
+// shuffleAgentAvatar re-rolls an agent's avatar seed/style so a user can pick a
+// different random avatar.
+func (s *Server) shuffleAgentAvatar(w http.ResponseWriter, r *http.Request) {
+	if err := s.verifyProject(r.URL.Query().Get("project")); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	agent, err := s.store.ShuffleAgentAvatar(r.PathValue("agentID"))
+	if err != nil {
+		writeError(w, http.StatusUnprocessableEntity, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, agent)
 }
 
 func (s *Server) deleteRoom(w http.ResponseWriter, r *http.Request) {

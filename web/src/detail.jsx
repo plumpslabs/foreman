@@ -2,8 +2,18 @@ import { useState } from 'preact/hooks';
 import { api } from './api.js';
 import { Icon } from './icons.jsx';
 import { Markdown, STARTER_INSTRUCTIONS } from './markdown.jsx';
+import { AgentAvatar } from './avatar.jsx';
 
 const esc = (s) => String(s ?? '');
+
+// Preset role labels used when a role is picked from the dropdown. Kept in
+// sync with roleTypeLabel in the Go store.
+const ROLE_LABELS = {
+  coordinator: 'Coordinator',
+  specialist: 'Specialist',
+  reviewer: 'Reviewer',
+  custom: 'Custom agent',
+};
 
 /* Complete OpenHands tool catalog (researched from openhands-tools).
    `wired` marks tools Foreman's bridge actually loads today. */
@@ -271,6 +281,8 @@ export function AgentDetailPage({ agentId, state, notify, refresh, onBack }) {
     canSpawn: existing?.canSpawn || '',
     maxIterations: existing?.maxIterations || 0,
     readOnlyBudget: existing?.readOnlyBudget || 0,
+    avatarSeed: existing?.avatarSeed || '',
+    avatarStyle: existing?.avatarStyle || '',
   }));
   const [tab, setTab] = useState('overview');
   const [busy, setBusy] = useState(false);
@@ -280,10 +292,35 @@ export function AgentDetailPage({ agentId, state, notify, refresh, onBack }) {
     ? form[field].filter((x) => x !== value)
     : [...form[field], value]);
 
+  // Choosing a role keeps the descriptive title in sync: it is filled in when
+  // empty or still equal to a preset label, but a hand-written title is kept.
+  const setRoleType = (value) => setForm((prev) => {
+    const next = { ...prev, roleType: value };
+    const presetLabels = Object.values(ROLE_LABELS);
+    if (!prev.role || presetLabels.includes(prev.role)) {
+      next.role = value ? ROLE_LABELS[value] : '';
+    }
+    return next;
+  });
+
+  const shuffleAvatar = async () => {
+    if (!form.id) return;
+    setBusy(true);
+    try {
+      const updated = await api(`/api/agents/${encodeURIComponent(form.id)}/avatar/shuffle`, { method: 'POST' });
+      setForm((prev) => ({ ...prev, avatarSeed: updated.avatarSeed || '', avatarStyle: updated.avatarStyle || '' }));
+    } catch (error) {
+      notify(error.message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const save = async () => {
     setBusy(true);
     try {
-      const body = JSON.stringify({ ...form, name: form.name.trim(), role: form.role.trim() });
+      const roleTitle = form.role.trim() || (form.roleType ? ROLE_LABELS[form.roleType] : '') || 'Agent';
+      const body = JSON.stringify({ ...form, name: form.name.trim(), role: roleTitle });
       if (editing) await api(`/api/agents/${encodeURIComponent(form.id)}`, { method: 'PUT', body });
       else await api('/api/agents', { method: 'POST', body });
       await refresh();
@@ -337,6 +374,23 @@ export function AgentDetailPage({ agentId, state, notify, refresh, onBack }) {
     >
       {tab === 'overview' && (
         <div class="detail-grid">
+          <div class="field" style="grid-column:1/-1">
+            <label>Avatar</label>
+            <div style="display:flex;align-items:center;gap:14px">
+              <AgentAvatar agent={{ id: form.id, name: form.name, avatarSeed: form.avatarSeed }}
+                name={form.name || '?'} size={56} radius={12} style="font-size:20px" />
+              <div style="display:flex;flex-direction:column;gap:6px">
+                <button type="button" class="btn small" disabled={!editing || busy} onClick={shuffleAvatar}>
+                  <Icon name="refresh" size={13} />Shuffle avatar
+                </button>
+                <div class="meta-text">
+                  {editing
+                    ? 'A random avatar is assigned automatically. Shuffle to get a different one.'
+                    : 'A random avatar will be assigned when you create this agent.'}
+                </div>
+              </div>
+            </div>
+          </div>
           <div class="field">
             <label>Agent name</label>
             <input maxlength="80" placeholder="e.g. Sentinel" value={form.name}
@@ -344,24 +398,25 @@ export function AgentDetailPage({ agentId, state, notify, refresh, onBack }) {
           </div>
           <div class="field">
             <label>Role</label>
+            <select value={form.roleType} onChange={(e) => setRoleType(e.currentTarget.value)}>
+              <option value="">Auto (main agent = coordinator)</option>
+              <option value="coordinator">Coordinator</option>
+              <option value="specialist">Specialist</option>
+              <option value="reviewer">Reviewer</option>
+              <option value="custom">Custom…</option>
+            </select>
+            <div class="meta-text">Pick the agent's role, or choose Custom to write your own. Coordinators may delegate (and can still do small tasks themselves); specialists stay on task; reviewers check independently.</div>
+          </div>
+          <div class="field">
+            <label>Role title{form.roleType === 'custom' ? '' : ' (optional)'}</label>
             <input maxlength="160" placeholder="e.g. Security reviewer" value={form.role}
               onInput={(e) => set('role', e.currentTarget.value)} />
+            <div class="meta-text">Shown in team rosters. Leave blank to use the role name above.</div>
           </div>
           <div class="field" style="grid-column:1/-1">
             <label>Short description</label>
             <input maxlength="500" placeholder="What this agent is responsible for" value={form.description}
               onInput={(e) => set('description', e.currentTarget.value)} />
-          </div>
-          <div class="field">
-            <label>Role type</label>
-            <select value={form.roleType} onChange={(e) => set('roleType', e.currentTarget.value)}>
-              <option value="">Auto (main agent = coordinator)</option>
-              <option value="coordinator">Coordinator</option>
-              <option value="specialist">Specialist</option>
-              <option value="reviewer">Reviewer</option>
-              <option value="custom">Custom</option>
-            </select>
-            <div class="meta-text">Sets the agent's run instructions: coordinators may delegate (and may still do small tasks themselves); specialists stay on task; reviewers check independently.</div>
           </div>
           <div class="field">
             <label>Spawn authority</label>
@@ -644,7 +699,7 @@ export function TeamDetailPage({ teamId, state, notify, refresh, onBack, onOpenA
           {form.agents.map((agent) => (
             <div class="team-agent">
               <div class="team-agent-head">
-                <div class="agent-avatar green" style="border-radius:6px">{esc(agent.name).slice(0, 2).toUpperCase()}</div>
+                <AgentAvatar agent={agent} name={agent.name} tone="green" radius={6} />
                 <div style="flex:1;min-width:0">
                   <div class="tool-name">
                     <span class="agent-name-trunc" title={esc(agent.name)}>{esc(agent.name)}</span>
@@ -688,7 +743,7 @@ export function TeamDetailPage({ teamId, state, notify, refresh, onBack, onOpenA
                     <div class="agent-pick-grid">
                       {libraryAgents.map((a) => (
                         <button type="button" class="agent-pick-card" key={a.id} onClick={() => pickFromLibrary(a)}>
-                          <div class="agent-avatar green" style="border-radius:8px">{esc(a.name).slice(0, 2).toUpperCase()}</div>
+                          <AgentAvatar agent={a} name={a.name} tone="green" radius={8} />
                           <div class="agent-pick-name" title={esc(a.name)}>{esc(a.name)}</div>
                           <div class="agent-pick-role" title={esc(a.role)}>{esc(a.role || 'No role')}</div>
                           <div class="agent-pick-meta">

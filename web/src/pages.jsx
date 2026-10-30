@@ -4,6 +4,7 @@ import { Icon } from './icons.jsx';
 import { Markdown } from './markdown.jsx';
 import { ChangesView, parseDiff, mergeFiles } from './diff.jsx';
 import { PlanGraph } from './plan.jsx';
+import { AgentAvatar, findAgent } from './avatar.jsx';
 
 const esc = (s) => String(s ?? '');
 // Priority is a canonical P0..P3 scale; legacy names are mapped so old cards
@@ -36,10 +37,6 @@ const timeAgo = (iso) => {
   if (s < 86400) return `${Math.floor(s / 3600)}h ago`;
   return d.toLocaleDateString();
 };
-
-function avatarInitials(name) {
-  return String(name || '?').slice(0, 2).toUpperCase();
-}
 
 function avatarClass(tone) {
   switch (tone) {
@@ -117,7 +114,7 @@ function RoomRow({ room, onOpen, runs, onDelete, mcpServers }) {
   );
 }
 
-function TemplateCard({ template, onUse }) {
+function TemplateCard({ template, onUse, state }) {
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState('');
   return (
@@ -131,8 +128,13 @@ function TemplateCard({ template, onUse }) {
       <div class="meta-text" style="margin-bottom:10px">
         Main agent: <b>{esc(template.mainAgent)}</b>
       </div>
-      <div class="chip-row" style="margin-bottom:14px">
-        {(template.agents || []).map((a) => <span class="chip" key={a.name}>{esc(a.name)}</span>)}
+      <div class="template-agents">
+        {(template.agents || []).map((a) => (
+          <span class="template-agent" key={a.name} title={esc(a.role || a.name)}>
+            <AgentAvatar agent={a} name={a.name} tone={a.name === template.mainAgent ? 'green' : 'blue'} size={22} radius={5} style="font-size:9px" />
+            <span class="template-agent-name">{esc(a.name)}</span>
+          </span>
+        ))}
       </div>
       <button class="btn" style="width:100%;margin-top:auto" disabled={busy}
         onClick={async () => {
@@ -217,7 +219,7 @@ export function HomePage({ state, openRoom, setModal, onTeamCreate, onUseTemplat
         </div>
       </div>
       <div class="template-grid">
-        {templates.map((t) => <TemplateCard key={t.id} template={t} onUse={useTemplate} />)}
+        {templates.map((t) => <TemplateCard key={t.id} template={t} onUse={useTemplate} state={state} />)}
       </div>
     </>
   );
@@ -717,9 +719,9 @@ export function RoomDetailHost({ room, state, notify, setModal, runTask, refresh
                   const name = m.role === 'user' ? 'You' : (m.agentName || room.mainAgent || 'Main agent');
                   return (
                     <div class={`msg ${m.role === 'user' ? 'user' : ''}`} key={m.id}>
-                      <div class={`msg-avatar ${m.role === 'user' ? 'user' : 'main-agent'}`}>
-                        {m.role === 'user' ? 'ME' : avatarInitials(name)}
-                      </div>
+                      {m.role === 'user'
+                        ? <div class="msg-avatar user">ME</div>
+                        : <AgentAvatar agent={findAgent(state, name)} name={name} className="msg-avatar main-agent" />}
                       <div class="msg-content">
                         <div class="msg-meta">
                           <strong>{esc(name)}</strong>
@@ -771,9 +773,7 @@ export function RoomDetailHost({ room, state, notify, setModal, runTask, refresh
                   const elapsed = elapsedLabel(run.startedAt);
                   return (
                     <div class="msg live-agent-turn" key={`live-turn-${run.id}`}>
-                      <div class="msg-avatar main-agent live-pulsing-avatar">
-                        {avatarInitials(aname)}
-                      </div>
+                      <AgentAvatar agent={findAgent(state, aname)} name={aname} className="msg-avatar main-agent live-pulsing-avatar" />
                       <div class="msg-content">
                         <div class="msg-meta">
                           <strong>{esc(aname)}</strong>
@@ -930,9 +930,9 @@ export function RoomDetailHost({ room, state, notify, setModal, runTask, refresh
                           key={`${cand.type}-${cand.name}`}
                           onMouseDown={(e) => e.preventDefault()}
                           onClick={() => pickMention(cand)}>
-                          <span class={`agent-avatar ${cand.type === 'team' ? 'blue' : 'green'}`} style="border-radius:5px;width:20px;height:20px;font-size:9px">
-                            {cand.type === 'team' ? <Icon name="users" size={11} /> : esc(cand.name).slice(0, 2).toUpperCase()}
-                          </span>
+                          {cand.type === 'team'
+                            ? <span class="agent-avatar blue" style="border-radius:5px;width:20px;height:20px;font-size:9px"><Icon name="users" size={11} /></span>
+                            : <AgentAvatar agent={findAgent(state, cand.name)} name={cand.name} tone="green" size={20} radius={5} style="font-size:9px" />}
                           <span class="mention-name">{cand.type === 'team' ? `#${esc(cand.name)}` : esc(cand.name)}</span>
                           <span class="mention-team">{esc(cand.sub || '')}</span>
                         </button>
@@ -1105,7 +1105,7 @@ export function RoomDetailHost({ room, state, notify, setModal, runTask, refresh
               ? teams.map((t, idx) => (
                 <div class="team-rail" key={t.id}>
                   <div class="agent-line">
-                    <div class="agent-avatar green" style="border-radius:6px">{avatarInitials(t.mainAgent)}</div>
+                    <AgentAvatar agent={(t.agents || []).find((a) => a.name === t.mainAgent) || findAgent(state, t.mainAgent)} name={t.mainAgent} tone="green" radius={6} />
                     <div class="agent-info" style="cursor:pointer" onClick={() => addMention({ type: 'team', name: t.name })} title="Click to mention this team (#team)">
                       <div class="agent-name-row">
                         <span class="agent-name">{esc(t.name)}</span>
@@ -1164,9 +1164,7 @@ export function RoomDetailHost({ room, state, notify, setModal, runTask, refresh
                     }}
                     title={isRunning ? `@${esc(agent.name)} is ${action}` : `Click to mention @${esc(agent.name)}`}
                   >
-                    <div class={`agent-avatar ${agent.isMain ? 'green' : 'blue'}`} style="border-radius:5px;width:22px;height:22px;font-size:9.5px">
-                      {avatarInitials(agent.name)}
-                    </div>
+                    <AgentAvatar agent={findAgent(state, agent.name)} name={agent.name} tone={agent.isMain ? 'green' : 'blue'} size={22} radius={5} style="font-size:9.5px" />
                     <div class="agent-info">
                       <div class="agent-name-row">
                         <span class="agent-name">{esc(agent.name)}</span>
@@ -1384,7 +1382,7 @@ export function TeamsPage({ state, openTeam, onTeamCreate, onUseTemplate, openTe
             <article class="room-row clickable" role="button" tabindex="0"
               onClick={() => openTeam(t.id)}
               onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); openTeam(t.id); } }}>
-              <div class="agent-avatar blue" style="border-radius:6px">{avatarInitials(t.mainAgent)}</div>
+              <AgentAvatar agent={(t.agents || []).find((a) => a.name === t.mainAgent) || findAgent(state, t.mainAgent)} name={t.mainAgent} tone="blue" radius={6} />
               <div class="room-main">
                 <div class="room-title">
                   {esc(t.name)}
@@ -1411,7 +1409,7 @@ export function TeamsPage({ state, openTeam, onTeamCreate, onUseTemplate, openTe
         </div>
       </div>
       <div class="grid" style="grid-template-columns:repeat(auto-fill,minmax(280px,1fr));">
-        {templates.map((t) => <TemplateCard key={t.id} template={t} onUse={useTemplate} />)}
+        {templates.map((t) => <TemplateCard key={t.id} template={t} onUse={useTemplate} state={state} />)}
       </div>
     </>
   );
@@ -1438,7 +1436,7 @@ export function AgentsPage({ state, openAgent, deleteAgent }) {
             <article class="room-row clickable" role="button" tabindex="0"
               onClick={() => openAgent(a.id)}
               onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); openAgent(a.id); } }}>
-              <div class={avatarClass(a.requireReview ? 'orange' : 'green')} style="border-radius:6px">{avatarInitials(a.name)}</div>
+              <AgentAvatar agent={a} name={a.name} tone={a.requireReview ? 'orange' : 'green'} radius={6} />
               <div class="room-main">
                 <div class="room-title">
                   {esc(a.name)}

@@ -248,6 +248,12 @@ type Agent struct {
 	// agent may spend before the loop governor forces it to act (plan, delegate,
 	// edit) or summarize. 0 inherits the workspace default.
 	ReadOnlyBudget int `json:"readOnlyBudget,omitempty"`
+	// AvatarSeed and AvatarStyle describe the agent's generated avatar. A seed
+	// is assigned randomly when an agent is created, so every agent gets a
+	// distinct avatar without the user choosing one. AvatarStyle selects the
+	// DiceBear style; empty means a stable style derived from the seed.
+	AvatarSeed  string `json:"avatarSeed,omitempty"`
+	AvatarStyle string `json:"avatarStyle,omitempty"`
 }
 
 type ChatMessage struct {
