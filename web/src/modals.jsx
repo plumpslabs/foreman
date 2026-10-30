@@ -6,6 +6,28 @@ const esc = (s) => String(s ?? '');
 
 const TEXT_FILE = /\.(md|markdown|txt|json|ya?ml|toml|sh|bash|py|js|ts|tsx|jsx|go|css|html|xml|csv|ini|cfg|rst|adoc)$/i;
 
+// Canonical priority scale P0 (critical) .. P3 (low). Legacy names are still
+// accepted and mapped, so old data keeps rendering correctly.
+const PRIORITY_OPTIONS = [
+  ['p0', 'P0 · Critical'],
+  ['p1', 'P1 · High'],
+  ['p2', 'P2 · Normal'],
+  ['p3', 'P3 · Low'],
+];
+const PRIORITY_COLOR = { p0: 'red', p1: 'orange', p2: 'blue', p3: 'muted' };
+
+function normalizePriority(p) {
+  switch (String(p ?? '').toLowerCase().trim()) {
+    case 'p0': case 'urgent': case 'critical': case 'blocker': return 'p0';
+    case 'p1': case 'high': return 'p1';
+    case 'p2': case 'normal': case 'medium': case '': return 'p2';
+    case 'p3': case 'low': return 'p3';
+    default: return 'p2';
+  }
+}
+const priorityLabel = (p) => normalizePriority(p).toUpperCase();
+const priorityColor = (p) => PRIORITY_COLOR[normalizePriority(p)] || '';
+
 function Backdrop({ onClose, title, submitLabel, onSubmit, busy, children, wide }) {
   return (
     <div class="modal-backdrop open" onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}>
@@ -64,7 +86,7 @@ function ApprovalsInbox({ approvals, onClose, notify, refresh }) {
     try {
       await api('/api/approvals/' + id + '/resolve', {
         method: 'POST',
-        body: { status },
+        body: JSON.stringify({ status }),
       });
       notify('Approval marked as ' + status, 'success');
       await refresh();
@@ -186,13 +208,14 @@ function TaskForm({ room, state, onClose, notify, refresh, task }) {
   const [form, setForm] = useState({
     title: task?.title || '',
     description: task?.description || '',
-    priority: task?.priority || 'normal',
+    priority: normalizePriority(task?.priority),
     effort: task?.effort || state.settings.defaultEffort || 'medium',
     teamId: task?.teamId || '',
     dependencies: task?.dependencies || [],
   });
   const [busy, setBusy] = useState(false);
   if (!room) return null;
+  const editing = !!task;
   const available = state.tasks.filter((t) => t.roomId === room.id && t.id !== (task?.id || ''));
   const teams = state.teams.filter((t) => room.teamIds.includes(t.id));
 
@@ -200,70 +223,83 @@ function TaskForm({ room, state, onClose, notify, refresh, task }) {
 
   const submit = async (e) => {
     e.preventDefault();
-    if (task) { onClose(); return; }
     setBusy(true);
     try {
-      await api(`/api/rooms/${encodeURIComponent(room.id)}/tasks`, {
-        method: 'POST',
-        body: JSON.stringify({
-          title: form.title,
-          description: form.description,
-          teamId: form.teamId,
-          priority: form.priority,
-          effort: form.effort,
-          dependencies: form.dependencies,
-        }),
-      });
-      notify('Task created');
+      if (editing) {
+        await api('/api/tasks/' + encodeURIComponent(task.id), {
+          method: 'PUT',
+          body: JSON.stringify({
+            title: form.title,
+            description: form.description,
+            priority: form.priority,
+            effort: form.effort,
+            dependencies: form.dependencies,
+          }),
+        });
+        notify('Task updated');
+      } else {
+        await api(`/api/rooms/${encodeURIComponent(room.id)}/tasks`, {
+          method: 'POST',
+          body: JSON.stringify({
+            title: form.title,
+            description: form.description,
+            teamId: form.teamId,
+            priority: form.priority,
+            effort: form.effort,
+            dependencies: form.dependencies,
+          }),
+        });
+        notify('Task created');
+      }
       await refresh();
       onClose();
     } catch (err) { notify(err.message); } finally { setBusy(false); }
   };
 
   return (
-    <Backdrop onClose={onClose} title={task ? 'Task details' : 'Create room task'}
-      submitLabel={task ? 'Close' : 'Create task'} onSubmit={submit} busy={busy}>
+    <Backdrop onClose={onClose} title={editing ? 'Edit task' : 'Create room task'}
+      submitLabel={editing ? 'Save changes' : 'Create task'} onSubmit={submit} busy={busy}>
       <div class="field">
         <label>Task title</label>
-        <input required maxlength="200" placeholder="Implement a bounded change" disabled={!!task}
+        <input required maxlength="200" placeholder="Implement a bounded change"
           value={form.title} onInput={(e) => set('title', e.currentTarget.value)} />
       </div>
       <div class="field">
         <label>Description</label>
-        <textarea maxlength="16000" placeholder="What should be done and verified?" disabled={!!task}
+        <textarea maxlength="16000" placeholder="What should be done and verified?"
           value={form.description} onInput={(e) => set('description', e.currentTarget.value)} />
       </div>
       <div class="settings-grid">
         <div class="field">
           <label>Priority</label>
-          <select value={form.priority} disabled={!!task} onChange={(e) => set('priority', e.currentTarget.value)}>
-            <option>normal</option><option>low</option><option>high</option><option>urgent</option>
+          <select value={form.priority} onChange={(e) => set('priority', e.currentTarget.value)}>
+            {PRIORITY_OPTIONS.map(([value, label]) => <option value={value}>{label}</option>)}
           </select>
         </div>
         <div class="field">
           <label>Effort</label>
-          <select value={form.effort} disabled={!!task} onChange={(e) => set('effort', e.currentTarget.value)}>
+          <select value={form.effort} onChange={(e) => set('effort', e.currentTarget.value)}>
             <option>low</option><option>medium</option><option>high</option>
           </select>
         </div>
         <div class="field">
           <label>Team</label>
-          <select value={form.teamId} disabled={!!task} onChange={(e) => set('teamId', e.currentTarget.value)}>
+          <select value={form.teamId} disabled={editing} onChange={(e) => set('teamId', e.currentTarget.value)}>
             <option value="">Room default</option>
             {teams.map((t) => <option value={esc(t.id)}>{esc(t.name)}</option>)}
           </select>
         </div>
         <div class="field">
           <label>Dependencies</label>
-          <select multiple size="3" value={form.dependencies} disabled={!!task}
+          <select multiple size="3" value={form.dependencies}
             onChange={(e) => set('dependencies', Array.from(e.currentTarget.selectedOptions).map((o) => o.value))}>
             {available.map((t) => <option value={esc(t.id)}>{esc(t.title)}</option>)}
           </select>
         </div>
       </div>
       <div class="notice">
-        {task
-          ? 'Task fields are immutable after creation; move work through status transitions.'
+        {editing
+          ? 'Changes apply immediately. Move work through status transitions from the task detail panel.'
           : 'Tasks and dependencies are persisted in this room. Work starts when you click Run.'}
       </div>
     </Backdrop>
@@ -287,7 +323,7 @@ function TaskDetail({ room, state, task, onClose, notify, refresh, onEdit, onRun
   const setStatus = async (status) => {
     setBusy(true);
     try {
-      await api('/api/tasks/' + task.id + '/status', { method: 'PUT', body: { status } });
+      await api('/api/tasks/' + task.id + '/status', { method: 'PUT', body: JSON.stringify({ status }) });
       notify('Status updated');
       await refresh();
     } catch (e) { notify(e.message); } finally { setBusy(false); }
@@ -301,7 +337,7 @@ function TaskDetail({ room, state, task, onClose, notify, refresh, onEdit, onRun
             <h3 style="margin:0">{esc(task.title)}</h3>
             <div style="display:flex;gap:6px;margin-top:8px;flex-wrap:wrap">
               <span class={`tag ${task.status === 'done' ? 'green' : task.status === 'blocked' ? 'orange' : task.status === 'review' ? 'blue' : ''}`}>{esc(task.status)}</span>
-              <span class={`tag ${['high', 'urgent'].includes(task.priority) ? 'orange' : ''}`}>priority: {esc(task.priority)}</span>
+              <span class={`tag ${priorityColor(task.priority)}`}>priority: {esc(priorityLabel(task.priority))}</span>
               <span class="tag">effort: {esc(task.effort)}</span>
               {task.agentName && <span class="tag blue">@ {esc(task.agentName)}</span>}
               {team && <span class="tag">team: {esc(team.name)}</span>}

@@ -6,6 +6,22 @@ import { ChangesView, parseDiff, mergeFiles } from './diff.jsx';
 import { PlanGraph } from './plan.jsx';
 
 const esc = (s) => String(s ?? '');
+// Priority is a canonical P0..P3 scale; legacy names are mapped so old cards
+// still render. Lower rank sorts first.
+const PRIORITY_RANK = { p0: 0, p1: 1, p2: 2, p3: 3 };
+const PRIORITY_COLOR = { p0: 'red', p1: 'orange', p2: 'blue', p3: 'muted' };
+function normalizePriority(p) {
+  switch (String(p ?? '').toLowerCase().trim()) {
+    case 'p0': case 'urgent': case 'critical': case 'blocker': return 'p0';
+    case 'p1': case 'high': return 'p1';
+    case 'p2': case 'normal': case 'medium': case '': return 'p2';
+    case 'p3': case 'low': return 'p3';
+    default: return 'p2';
+  }
+}
+const priorityRank = (p) => PRIORITY_RANK[normalizePriority(p)] ?? 2;
+const priorityLabel = (p) => normalizePriority(p).toUpperCase();
+const priorityColor = (p) => PRIORITY_COLOR[normalizePriority(p)] || '';
 const fmtTokens = (n) => (Number(n) > 0 ? Number(n).toLocaleString() : '—');
 const fmtMoney = (n) => {
   const v = Number(n);
@@ -1299,7 +1315,9 @@ function Board({ roomId, tasks, runTask, setModal, refresh }) {
   return (
     <div class="board">
       {BOARD_COLUMNS.map(([key, title]) => {
-        const columnTasks = tasks.filter((t) => (key === 'todo' ? (t.status === 'todo' || t.status === 'backlog') : t.status === key));
+        const columnTasks = tasks
+          .filter((t) => (key === 'todo' ? (t.status === 'todo' || t.status === 'backlog') : t.status === key))
+          .sort((a, b) => priorityRank(a.priority) - priorityRank(b.priority) || String(a.title).localeCompare(String(b.title)));
         return (
           <div class="board-col">
             <div class="board-col-head">{title}<span>{columnTasks.length}</span></div>
@@ -1315,7 +1333,7 @@ function Board({ roomId, tasks, runTask, setModal, refresh }) {
                     <div class="board-task-foot" style="margin-top:8px;flex-wrap:wrap">
                       {t.severity === 'blocker' && <span class="tag sev-badge sev-blocker">Blocker</span>}
                       {t.severity === 'warning' && <span class="tag sev-badge sev-warning">Warning</span>}
-                      <span class={`tag ${['high', 'urgent'].includes(t.priority) ? 'orange' : ''}`}>{esc(t.priority)}</span>
+                      <span class={`tag ${priorityColor(t.priority)}`}>{esc(priorityLabel(t.priority))}</span>
                       <span class="tag">effort {esc(t.effort)}</span>
                       {t.status === 'review' && <span class="tag blue">Review</span>}
                       {t.status === 'blocked' && <span class="tag orange">Blocked</span>}
