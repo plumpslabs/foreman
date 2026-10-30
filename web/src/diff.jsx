@@ -1,4 +1,4 @@
-import { useState, useMemo } from 'preact/hooks';
+import { useState } from 'preact/hooks';
 import { html as renderDiff } from 'diff2html';
 import 'diff2html/bundles/css/diff2html.min.css';
 import { Icon } from './icons.jsx';
@@ -254,44 +254,76 @@ function subtreeStats(node) {
   return { added, removed, count };
 }
 
+// fileStat counts added/removed lines in one file section.
+function fileStat(file) {
+  let added = 0;
+  let removed = 0;
+  for (const l of file.lines || []) {
+    if (l.type === 'add') added += 1;
+    else if (l.type === 'del') removed += 1;
+  }
+  return { added, removed };
+}
+
+// collectDirPaths returns every directory path in a tree (for collapse-all).
+function collectDirPaths(node, out = []) {
+  for (const d of node.dirs.values()) {
+    out.push(d.path);
+    collectDirPaths(d, out);
+  }
+  return out;
+}
+
 export function ChangesView({ text }) {
   const merged = mergeFiles(parseDiff(text));
-  const tree = useMemo(() => buildTree(merged), [merged]);
   const [openFile, setOpenFile] = useState(() => (merged.length ? merged[0].path : null));
   const [collapsed, setCollapsed] = useState(() => new Set());
   const [mode, setMode] = useState('split');
+  const [filter, setFilter] = useState('');
 
   if (!merged.length) return null;
+
+  const q = filter.trim().toLowerCase();
+  const shown = q ? merged.filter((f) => f.path.toLowerCase().includes(q)) : merged;
+  const tree = buildTree(shown);
+  const dirPaths = collectDirPaths(tree);
+  // While filtering, always expand so matches are visible.
+  const effectiveCollapsed = q ? new Set() : collapsed;
+
+  const totals = merged.reduce((acc, f) => {
+    const s = fileStat(f);
+    return { added: acc.added + s.added, removed: acc.removed + s.removed };
+  }, { added: 0, removed: 0 });
+  const totalChurn = totals.added + totals.removed || 1;
+  const addPct = Math.round((totals.added / totalChurn) * 100);
 
   const toggleFolder = (path) => setCollapsed((prev) => {
     const next = new Set(prev);
     if (next.has(path)) next.delete(path); else next.add(path);
     return next;
   });
+  const allCollapsed = dirPaths.length > 0 && dirPaths.every((p) => collapsed.has(p));
+  const toggleAll = () => setCollapsed(allCollapsed ? new Set() : new Set(dirPaths));
 
   const renderNode = (node, depth, isDir) => {
     if (isDir) {
-      const isCollapsed = collapsed.has(node.path);
+      const isCollapsed = effectiveCollapsed.has(node.path);
       const stat = subtreeStats(node);
       return (
-        <div key={`dir-${node.path}`}>
+        <div class="cf-group" key={`dir-${node.path}`}>
           <div
-            class={`tree-row ${isCollapsed ? '' : ''}`}
-            style={`padding-left:${6 + depth * 14}px`}
+            class={`cf-row cf-dir ${isCollapsed ? '' : 'open'}`}
+            style={`--depth:${depth}`}
             onClick={() => toggleFolder(node.path)}
             title={node.path}
           >
-            <Icon name={isCollapsed ? 'chevron-right' : 'chevron-down'} size={12} class="tree-icon" />
-            <Icon name="folder" size={12} class="tree-icon" />
-            <span class="tree-name">{node.name}</span>
-            <span class="tree-meta">
-              <span class="tag" style="margin-left:2px">{stat.count}</span>
-              {stat.added > 0 ? <span class="diff-count add">+{stat.added}</span> : null}
-              {stat.removed > 0 ? <span class="diff-count del">-{stat.removed}</span> : null}
-            </span>
+            <Icon name="chevron-right" size={12} class="cf-caret" />
+            <Icon name="folder" size={13} class="cf-ficon" />
+            <span class="cf-name">{node.name}</span>
+            <span class="cf-count">{stat.count}</span>
           </div>
           {!isCollapsed && (
-            <div class="tree-children">
+            <div class="cf-children">
               {Array.from(node.dirs.values()).map((d) => renderNode(d, depth + 1, true))}
               {node.files.map((f) => renderNode(f, depth + 1, false))}
             </div>
@@ -299,46 +331,32 @@ export function ChangesView({ text }) {
         </div>
       );
     }
-    const stat = { added: 0, removed: 0 };
-    for (const l of node.lines) {
-      if (l.type === 'add') stat.added += 1;
-      if (l.type === 'del') stat.removed += 1;
-    }
+    const stat = fileStat(node);
     const name = node.path.split('/').pop();
     return (
-      <div key={`file-${node.path}`}>
-        <div
-          class={`tree-row file-row ${openFile === node.path ? 'active' : ''}`}
-          style={`padding-left:${6 + depth * 14}px`}
-          onClick={() => setOpenFile(node.path)}
-          title={node.path}
-        >
-          <Icon name="file-code" size={12} class="tree-icon" />
-          <span class="tree-file-main">
-            <span class="tree-name">{name}</span>
-            {node.path !== name ? <span class="tree-subpath">{node.path}</span> : null}
-          </span>
-          <span class="tree-meta">
-            {stat.added > 0 ? <span class="diff-count add">+{stat.added}</span> : null}
-            {stat.removed > 0 ? <span class="diff-count del">-{stat.removed}</span> : null}
-          </span>
-        </div>
+      <div
+        key={`file-${node.path}`}
+        class={`cf-row cf-file ${openFile === node.path ? 'active' : ''}`}
+        style={`--depth:${depth}`}
+        onClick={() => setOpenFile(node.path)}
+        title={node.path}
+      >
+        <span class="cf-caret-spacer" />
+        <Icon name="file-code" size={13} class="cf-ficon" />
+        <span class="cf-name">{name}</span>
+        <span class="cf-stat">
+          {stat.added > 0 ? <span class="cf-add">+{stat.added}</span> : null}
+          {stat.removed > 0 ? <span class="cf-del">−{stat.removed}</span> : null}
+        </span>
       </div>
     );
   };
 
-  const dirsTop = Array.from(tree.dirs.values());
-  const filesTop = tree.files;
   const selected = merged.find((f) => f.path === openFile) || null;
   const numbered = selected ? numberLines(selected.lines) : [];
   const crumb = selected ? splitPath(selected.path) : { dir: '', base: '' };
   const canRender = !!selected && hasRenderableDiff(selected);
-  const selStat = selected
-    ? {
-      added: selected.lines.filter((l) => l.type === 'add').length,
-      removed: selected.lines.filter((l) => l.type === 'del').length,
-    }
-    : { added: 0, removed: 0 };
+  const selStat = selected ? fileStat(selected) : { added: 0, removed: 0 };
   const renderedHTML = (() => {
     if (!selected || !canRender || mode === 'unified') return '';
     try {
@@ -355,14 +373,55 @@ export function ChangesView({ text }) {
 
   return (
     <div class="changes-layout">
-      <div class="changes-tree" role="tree">
-        <div class="changes-tree-head">Changed files</div>
-        {dirsTop.length === 0 && filesTop.length === 0 ? (
-          <div class="empty" style="padding:10px">No changes yet.</div>
-        ) : null}
-        {dirsTop.map((d) => renderNode(d, 0, true))}
-        {filesTop.map((f) => renderNode(f, 0, false))}
-      </div>
+      <aside class="changes-tree" aria-label="Changed files">
+        <div class="cf-head">
+          <div class="cf-head-top">
+            <span class="cf-title">Changed files</span>
+            <span class="cf-pill">{merged.length}</span>
+            <button
+              type="button"
+              class="cf-act"
+              onClick={toggleAll}
+              title={allCollapsed ? 'Expand all folders' : 'Collapse all folders'}
+              aria-label="Toggle all folders"
+            >
+              <Icon name={allCollapsed ? 'chevron-down' : 'chevron-right'} size={13} />
+            </button>
+          </div>
+          <div class="cf-sum">
+            <span class="cf-add">+{totals.added}</span>
+            <span class="cf-del">−{totals.removed}</span>
+            <span class="cf-bar" aria-hidden="true">
+              <span class="cf-bar-add" style={`width:${addPct}%`} />
+            </span>
+          </div>
+          <label class="cf-filter">
+            <Icon name="search" size={12} />
+            <input
+              type="text"
+              placeholder="Filter files"
+              value={filter}
+              onInput={(e) => setFilter(e.currentTarget.value)}
+              spellcheck={false}
+            />
+            {filter ? (
+              <button type="button" class="cf-filter-clear" aria-label="Clear filter" onClick={() => setFilter('')}>
+                <Icon name="x" size={12} />
+              </button>
+            ) : null}
+          </label>
+        </div>
+        <div class="cf-body">
+          {shown.length === 0 ? (
+            <div class="cf-empty">No files match “{filter}”.</div>
+          ) : (
+            <>
+              {Array.from(tree.dirs.values()).map((d) => renderNode(d, 0, true))}
+              {tree.files.map((f) => renderNode(f, 0, false))}
+            </>
+          )}
+        </div>
+      </aside>
       <div class="changes-diff">
         {selected ? (
           <>
@@ -372,7 +431,7 @@ export function ChangesView({ text }) {
                 <b class="diff-crumb-name">{crumb.base}</b>
               </span>
               <span class="diff-summary">
-                <b class="add">+{selStat.added}</b> · <b class="del">-{selStat.removed}</b>
+                <b class="add">+{selStat.added}</b> · <b class="del">−{selStat.removed}</b>
               </span>
               {canRender && (
                 <span class="diff-mode-toggle">
