@@ -419,7 +419,7 @@ func (rt *Runtime) execute(ctx context.Context, control *RunControl, run AgentRu
 	}
 
 	if result.Message == "" {
-		result.Message = "Agent run finished."
+		result.Message = defaultRunMessage
 	}
 	if result.Status != "failed" {
 		for _, question := range parseAgentQuestions(result.Message) {
@@ -442,8 +442,43 @@ func (rt *Runtime) execute(ctx context.Context, control *RunControl, run AgentRu
 		}
 		_ = rt.store.AppendRoomNotice(room.ID, task.AgentName, "run.finished",
 			fmt.Sprintf("%s Task %s finished — status: %s", statusEmoji, task.Title, result.Status))
+		// A delegated/Kanban task used to stop here: the status notice was the
+		// only trace in the room, while the executor's report lived in the run
+		// record and the Artifacts tab. To the team (and the human) the work
+		// looked like it vanished the moment it completed, so the report is
+		// posted back into the thread it was assigned from.
+		if result.Status == "completed" && isInformativeResult(result.Message) {
+			_ = rt.store.AppendAgentReply(room.ID, task.AgentName, delegatedResultMessage(task, result.Message))
+		}
 	}
 	return final
+}
+
+// defaultRunMessage is the placeholder the runtime substitutes when a run ends
+// without saying anything. It carries no information, so it never gets posted
+// to the room.
+const defaultRunMessage = "Agent run finished."
+
+func isInformativeResult(msg string) bool {
+	msg = strings.TrimSpace(msg)
+	return msg != "" && msg != defaultRunMessage
+}
+
+// delegatedResultMessage frames a finished task's report as a chat handoff: a
+// skimmable header, the report itself, and a pointer to where the complete run
+// output lives. Long reports are truncated so a single verbose task cannot
+// flood the room — the full text stays in Runs & activity.
+func delegatedResultMessage(task Task, report string) string {
+	const maxRunes = 4000
+	if r := []rune(report); len(r) > maxRunes {
+		report = strings.TrimSpace(string(r[:maxRunes])) +
+			"\n\n_(truncated — the full run output is in Runs & activity.)_"
+	}
+	title := task.Title
+	if r := []rune(title); len(r) > 160 {
+		title = string(r[:160]) + "…"
+	}
+	return fmt.Sprintf("**Result · %s**\n\n%s", title, report)
 }
 
 // parseAgentQuestions extracts fenced question blocks from an agent reply:

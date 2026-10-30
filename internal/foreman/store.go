@@ -694,6 +694,13 @@ func (s *Store) RoomRecentContext(roomID string) string {
 	taken := 0
 	for i := len(room.Messages) - 1; i >= 0 && taken < 10; i-- {
 		m := room.Messages[i]
+		// System/activity notices (delegations, retries, "task finished") are
+		// progress chips, not conversation. Including them used to attribute
+		// every ✅/🚀 line to "User" and burn the 10-message window in busy
+		// rooms, pushing the actual thread out of the model's context.
+		if m.Role == "system" || m.Role == "activity" {
+			continue
+		}
 		author := "User"
 		if m.Role == "agent" {
 			author = m.AgentName

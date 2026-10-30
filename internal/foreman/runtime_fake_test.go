@@ -2,6 +2,7 @@ package foreman
 
 import (
 	"context"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -150,6 +151,177 @@ func TestRuntimeFakeEngineCompleted(t *testing.T) {
 	}
 	if !reply {
 		t.Fatal("expected agent reply 'done' in chat")
+	}
+}
+
+// A delegated (Kanban) task must leave its report in the room chat. Before
+// this, only the status notice was posted — the executor's actual work lived
+// in the run record and the Artifacts tab, so to everyone watching the room the
+// task looked like it vanished the moment it completed.
+func TestRuntimeDelegatedResultPostedToChat(t *testing.T) {
+	defer goleak.VerifyNone(t, goleak.IgnoreTopFunction("database/sql.(*DB).connectionOpener"))
+	st, err := OpenStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	ensureFakeProvider(t, st)
+	team, err := st.ImportTeam("quick-fix", "Quick Fix")
+	if err != nil {
+		t.Fatal(err)
+	}
+	room, err := st.CreateRoom("Delegated Room", "", []string{team.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	task, err := st.CreateTask(Task{
+		RoomID: room.ID, TeamID: team.ID, Title: "Fix the waiting color",
+		Description: "check getWaitingSide", Priority: "p2", Effort: "medium",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	rt := NewRuntime(st)
+	rt.SetEngine(&fakeEngine{results: []EngineResult{
+		{Status: "completed", Message: "**Root cause**\n\nThe `||` keeps stale state."},
+	}})
+	defer rt.stopWatchdog()
+
+	run, err := rt.StartTask(context.Background(), task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitRunFinished(t, rt, task.ID)
+	if got := rt.store.RunStatus(run.ID); got != "completed" {
+		t.Fatalf("run status = %s, want completed", got)
+	}
+
+	var reply string
+	var notice bool
+	for _, rm := range st.Snapshot().Rooms {
+		if rm.ID != room.ID {
+			continue
+		}
+		for _, m := range rm.Messages {
+			if m.Role == "agent" && m.AgentName == task.AgentName {
+				reply = m.Content
+			}
+			if m.Role == "system" && m.ActivityType == "run.finished" {
+				notice = true
+			}
+		}
+	}
+	if reply == "" {
+		t.Fatal("delegated task result never reached the room chat")
+	}
+	if !strings.Contains(reply, "**Result · Fix the waiting color**") {
+		t.Fatalf("reply is missing the task header: %q", reply)
+	}
+	if !strings.Contains(reply, "Root cause") {
+		t.Fatalf("reply is missing the executor's report: %q", reply)
+	}
+	if !notice {
+		t.Fatal("the status notice must still be posted alongside the report")
+	}
+}
+
+// The runtime's placeholder message carries no information, so it must not be
+// posted as if the executor had reported something.
+func TestRuntimeDelegatedPlaceholderNotPosted(t *testing.T) {
+	defer goleak.VerifyNone(t, goleak.IgnoreTopFunction("database/sql.(*DB).connectionOpener"))
+	st, err := OpenStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	ensureFakeProvider(t, st)
+	team, err := st.ImportTeam("quick-fix", "Quick Fix")
+	if err != nil {
+		t.Fatal(err)
+	}
+	room, err := st.CreateRoom("Quiet Room", "", []string{team.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	task, err := st.CreateTask(Task{
+		RoomID: room.ID, TeamID: team.ID, Title: "Say nothing",
+		Description: "empty report", Priority: "p2", Effort: "medium",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	rt := NewRuntime(st)
+	rt.SetEngine(&fakeEngine{results: []EngineResult{{Status: "completed", Message: ""}}})
+	defer rt.stopWatchdog()
+
+	if _, err := rt.StartTask(context.Background(), task.ID); err != nil {
+		t.Fatal(err)
+	}
+	waitRunFinished(t, rt, task.ID)
+
+	for _, rm := range st.Snapshot().Rooms {
+		if rm.ID != room.ID {
+			continue
+		}
+		for _, m := range rm.Messages {
+			if m.Role == "agent" {
+				t.Fatalf("placeholder result must not be posted, got %q", m.Content)
+			}
+		}
+	}
+}
+
+// Long reports are truncated in chat so one verbose task cannot flood the room.
+func TestDelegatedResultMessageTruncatesLongReports(t *testing.T) {
+	long := strings.Repeat("evidence line\n", 800) // ~11k runes
+	msg := delegatedResultMessage(Task{Title: "Big refactor"}, long)
+	if r := []rune(msg); len(r) > 5000 {
+		t.Fatalf("truncated message too long: %d runes", len(r))
+	}
+	if !strings.Contains(msg, "truncated") {
+		t.Fatal("truncated message must point at Runs & activity")
+	}
+	short := delegatedResultMessage(Task{Title: "Small fix"}, "done, see diff")
+	if !strings.Contains(short, "done, see diff") || strings.Contains(short, "truncated") {
+		t.Fatalf("short report must be passed through unchanged: %q", short)
+	}
+}
+
+// RoomRecentContext feeds every run prompt, so notices must stay out of it:
+// they used to be attributed to "User" and consume the 10-message window.
+func TestRoomRecentContextSkipsNotices(t *testing.T) {
+	st, err := OpenStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	team, err := st.ImportTeam("quick-fix", "Quick Fix")
+	if err != nil {
+		t.Fatal(err)
+	}
+	room, err := st.CreateRoom("Context Room", "", []string{team.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = st.AppendRoomMessage(room.ID, "user", "check the ticket colors")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = st.AppendRoomNotice(room.ID, "Orion", "run.started", "🚀 @Orion started working on: colors")
+	_ = st.AppendRoomNotice(room.ID, "Orion", "run.finished", "✅ Task colors finished — status: completed")
+	_ = st.AppendAgentReply(room.ID, "Ferro", "Fixed getWaitingSide; unit test added")
+
+	ctx := st.RoomRecentContext(room.ID)
+	if !strings.Contains(ctx, "**User:** check the ticket colors") {
+		t.Fatalf("user message missing from context: %q", ctx)
+	}
+	if !strings.Contains(ctx, "**Ferro:** Fixed getWaitingSide") {
+		t.Fatalf("agent reply missing from context: %q", ctx)
+	}
+	if strings.Contains(ctx, "started working on") || strings.Contains(ctx, "finished — status") {
+		t.Fatalf("notices must not enter the prompt context: %q", ctx)
 	}
 }
 
