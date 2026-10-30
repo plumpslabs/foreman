@@ -1167,12 +1167,6 @@ export function RoomDetailHost({ room, state, notify, setModal, runTask, refresh
                   : runtime === 'paused' ? 'Paused after a failure'
                     : 'No active run'}</span>
             </div>
-            {null}
-            {lastRun && (
-              <div class="section-note" style="margin-top:8px">
-                Last: {esc(lastRun.status)} · {fmtTokens(lastRun.tokens)} tokens
-              </div>
-            )}
           </div>
 
           <div class="rail-section">
