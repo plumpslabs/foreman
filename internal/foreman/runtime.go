@@ -268,7 +268,10 @@ func (rt *Runtime) execute(ctx context.Context, control *RunControl, run AgentRu
 	}
 
 	agentToolIDs := agentToolIDs(team, task)
+	runAgent := activeTeamAgent(team, task)
+	maxIterations, readOnlyBudget := effectiveBudgets(runAgent, settings)
 	prompt := buildRunPrompt(room, task, team, skillsContext(team, task, rt.store.Snapshot().Skills), agentToolIDs)
+	prompt += fmt.Sprintf("\n\n## Exploration budget\nYou may spend up to %d read-only tool rounds (view/grep/search/repo_map/list) before you must act on what you found. Do not re-read the same file or region — if a search or view already answered the question, act on it. Before the budget runs out, choose one: create_plan, spawn_agent / create_task, make the code change, ask_human, or finish_task. Once the budget is spent, further read-only tools are blocked automatically; if that happens, reply with a concise summary of findings and your recommendation instead of retrying reads.", readOnlyBudget)
 	if mcpServers := rt.store.MCPServersByIDs(room.MCPServerIDs); len(mcpServers) > 0 {
 		names := make([]string, 0, len(mcpServers))
 		for _, srv := range mcpServers {
@@ -342,7 +345,8 @@ func (rt *Runtime) execute(ctx context.Context, control *RunControl, run AgentRu
 			PersistenceDir:       filepath.Join(snapshot.ProjectPath, ".foreman", "agent-conversations"),
 			MCPServerIDs:         room.MCPServerIDs,
 			ConversationID:       conversationID(room.ID, task),
-			MaxIterations:        30,
+			MaxIterations:        maxIterations,
+			ReadOnlyBudget:       readOnlyBudget,
 			BudgetUSD:            settings.BudgetUSD,
 			AllowProjectCommands: settings.AllowProjectCommands,
 		}
@@ -721,6 +725,51 @@ func agentToolIDs(team *Team, task Task) []string {
 		}
 	}
 	return nil
+}
+
+// activeTeamAgent resolves the agent that will act for this task, falling back
+// to the team's main agent.
+func activeTeamAgent(team *Team, task Task) *Agent {
+	if team == nil {
+		return nil
+	}
+	target := task.AgentName
+	if target == "" {
+		target = team.MainAgent
+	}
+	for i := range team.Agents {
+		if team.Agents[i].Name == target {
+			return &team.Agents[i]
+		}
+	}
+	for i := range team.Agents {
+		if team.Agents[i].Name == team.MainAgent {
+			return &team.Agents[i]
+		}
+	}
+	return nil
+}
+
+// effectiveBudgets resolves the per-run action-round and read-only budgets,
+// letting an agent override the workspace defaults (0 = inherit).
+func effectiveBudgets(agent *Agent, settings Settings) (maxIterations, readOnlyBudget int) {
+	maxIterations = settings.MaxIterations
+	readOnlyBudget = settings.ReadOnlyBudget
+	if agent != nil {
+		if agent.MaxIterations > 0 {
+			maxIterations = agent.MaxIterations
+		}
+		if agent.ReadOnlyBudget > 0 {
+			readOnlyBudget = agent.ReadOnlyBudget
+		}
+	}
+	if maxIterations <= 0 {
+		maxIterations = 30
+	}
+	if readOnlyBudget <= 0 {
+		readOnlyBudget = 40
+	}
+	return maxIterations, readOnlyBudget
 }
 
 func resultOrError(message string, err error) string {

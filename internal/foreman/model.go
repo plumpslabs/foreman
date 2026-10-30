@@ -87,6 +87,8 @@ type Settings struct {
 	MaxWorkersPerTask     int     `json:"maxWorkersPerTask"`
 	MaxDelegationDepth    int     `json:"maxDelegationDepth"`
 	MaxRetries            int     `json:"maxRetries"`
+	MaxIterations         int     `json:"maxIterations"`
+	ReadOnlyBudget        int     `json:"readOnlyBudget"`
 	MaxExecutionSeconds   int     `json:"maxExecutionSeconds"`
 	BudgetUSD             float64 `json:"budgetUsd"`
 	RequireRunApproval    bool    `json:"requireRunApproval"`
@@ -225,6 +227,14 @@ type Agent struct {
 	// CanSpawn controls spawn authority: "" (default, hierarchy-only),
 	// "request" (must use request_spawn), or "limited" (lead-approved direct).
 	CanSpawn string `json:"canSpawn,omitempty"`
+	// MaxIterations overrides the engine's action-round budget for this agent.
+	// 0 inherits the workspace default. Higher values let a role explore longer;
+	// lower values push it to act sooner.
+	MaxIterations int `json:"maxIterations,omitempty"`
+	// ReadOnlyBudget overrides how many consecutive read-only tool rounds this
+	// agent may spend before the loop governor forces it to act (plan, delegate,
+	// edit) or summarize. 0 inherits the workspace default.
+	ReadOnlyBudget int `json:"readOnlyBudget,omitempty"`
 }
 
 type ChatMessage struct {

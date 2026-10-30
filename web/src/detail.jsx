@@ -267,6 +267,8 @@ export function AgentDetailPage({ agentId, state, notify, refresh, onBack }) {
       .filter(Boolean),
     tools: normalizeTools(existing?.tools),
     requireReview: Boolean(existing?.requireReview),
+    maxIterations: existing?.maxIterations || 0,
+    readOnlyBudget: existing?.readOnlyBudget || 0,
   }));
   const [tab, setTab] = useState('overview');
   const [busy, setBusy] = useState(false);
@@ -374,6 +376,17 @@ export function AgentDetailPage({ agentId, state, notify, refresh, onBack }) {
                 onChange={(e) => set('requireReview', e.currentTarget.checked)} />
               <span>Require review of this agent's output</span>
             </label>
+          </div>
+          <div class="field">
+            <label>Action-round budget (0 = workspace default)</label>
+            <input type="number" min="0" max="200" value={form.maxIterations}
+              onInput={(e) => set('maxIterations', Number(e.currentTarget.value) || 0)} />
+          </div>
+          <div class="field">
+            <label>Read-only exploration budget (0 = workspace default)</label>
+            <input type="number" min="0" max="500" value={form.readOnlyBudget}
+              onInput={(e) => set('readOnlyBudget', Number(e.currentTarget.value) || 0)} />
+            <div class="meta-text">Consecutive read/search rounds allowed before this agent must plan, delegate, or act. Higher = more freedom to explore.</div>
           </div>
         </div>
       )}

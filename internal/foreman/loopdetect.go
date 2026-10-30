@@ -2,8 +2,18 @@ package foreman
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 )
+
+// batchSignature builds a stable signature for a multi-tool round (sorted tool
+// names, no args) so a batch still participates in the cycle/low-progress
+// heuristics instead of resetting the detector.
+func batchSignature(names []string) string {
+	sorted := append([]string(nil), names...)
+	sort.Strings(sorted)
+	return "batch:" + strings.Join(sorted, "+")
+}
 
 // actionDetector implements the loop guard heuristics (doom repeat, period
 // cycles, low-progress) as a pure state machine so it can be unit-tested

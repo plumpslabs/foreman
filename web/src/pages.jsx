@@ -2409,6 +2409,16 @@ export function SettingsPage({ state, notify, refresh }) {
                   onInput={(e) => setField('maxRetries', e.currentTarget.value, true)} />
               </div>
               <div class="field">
+                <label>Action rounds per run</label>
+                <input type="number" min="1" max="200" value={policy.maxIterations || 30}
+                  onInput={(e) => setField('maxIterations', e.currentTarget.value, true)} />
+              </div>
+              <div class="field">
+                <label>Read-only budget (rounds)</label>
+                <input type="number" min="1" max="500" value={policy.readOnlyBudget || 40}
+                  onInput={(e) => setField('readOnlyBudget', e.currentTarget.value, true)} />
+              </div>
+              <div class="field">
                 <label>Run timeout (seconds)</label>
                 <input type="number" min="10" max="3600" value={policy.maxExecutionSeconds}
                   onInput={(e) => setField('maxExecutionSeconds', e.currentTarget.value, true)} />

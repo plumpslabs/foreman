@@ -317,12 +317,29 @@ func (e *ADKEngine) RunControlled(ctx context.Context, req EngineRequest, emit f
 		return EngineResult{}, fmt.Errorf("create agent: %w", err)
 	}
 
+	// Loop guard: cap total tool-call rounds so an agent cannot churn forever.
+	// The ADK runner has no built-in iteration limit; without this, the only
+	// stop is the run timeout.
+	maxToolRounds := req.MaxIterations * 2
+	if maxToolRounds <= 0 {
+		maxToolRounds = 60
+	}
+	// The governor is a soft guardrail layered on top of the hard cap: it blocks
+	// further read-only calls once the read budget is spent, so the model is
+	// pushed to act or summarize instead of silently churning until the cap.
+	guard := newLoopGuard(req.ReadOnlyBudget, maxToolRounds)
+	guardCfg, err := guard.pluginConfig()
+	if err != nil {
+		return EngineResult{}, fmt.Errorf("create loop guard: %w", err)
+	}
+
 	sessSvc := session.InMemoryService()
 	r, err := runner.New(runner.Config{
 		AppName:           "foreman",
 		Agent:             a,
 		SessionService:    sessSvc,
 		AutoCreateSession: true,
+		PluginConfig:      guardCfg,
 	})
 	if err != nil {
 		return EngineResult{}, fmt.Errorf("create runner: %w", err)
@@ -349,15 +366,10 @@ func (e *ADKEngine) RunControlled(ctx context.Context, req EngineRequest, emit f
 	msg := &genai.Content{Role: "user", Parts: []*genai.Part{{Text: req.Prompt}}}
 	var finalText strings.Builder
 
-	// Loop guard: cap total tool-call rounds so an agent cannot churn forever.
-	// The ADK runner has no built-in iteration limit; without this, the only
-	// stop is the run timeout.
-	maxToolRounds := req.MaxIterations * 2
-	if maxToolRounds <= 0 {
-		maxToolRounds = 60
-	}
 	toolRounds := 0
 	loopGuard := false
+	loopGuardReason := ""
+	forcedAt := -1
 	budgetHit := false
 	doomHit := false
 	doomMsg := ""
@@ -398,8 +410,11 @@ func (e *ADKEngine) RunControlled(ctx context.Context, req EngineRequest, emit f
 				break
 			}
 		}
-		// doom-loop detection: 3+ consecutive identical tool calls (same
-		// name + same args) almost always mean the model is stuck retrying.
+		// Doom/cycle detection. A multi-tool batch is fed as a composite
+		// signature (sorted tool names, no args) so it still participates in
+		// cycle/low-progress detection instead of wiping the window — the old
+		// full reset let churn with interleaved batches evade the detector
+		// entirely.
 		if len(toolNames) == 1 {
 			sig := toolNames[0] + ":" + compactArgs(ev.Content.Parts[0].FunctionCall.Args)
 			if stop, reason := det.observe(sig); stop {
@@ -407,8 +422,23 @@ func (e *ADKEngine) RunControlled(ctx context.Context, req EngineRequest, emit f
 				doomMsg = reason
 				break
 			}
-		} else {
-			det.reset()
+		} else if stop, reason := det.observe(batchSignature(toolNames)); stop {
+			doomHit = true
+			doomMsg = reason
+			break
+		}
+		// After the governor spends the read budget it blocks further reads and
+		// asks the model to act or summarize. If the model ignores that and
+		// keeps emitting tool calls, stop a few rounds later instead of draining
+		// the rest of the hard cap.
+		if guard.hasForced() {
+			if forcedAt < 0 {
+				forcedAt = toolRounds
+			} else if toolRounds-forcedAt > 3 {
+				loopGuard = true
+				loopGuardReason = guard.forcedReason() + " The model kept calling tools instead of summarizing."
+				break
+			}
 		}
 		if um := ev.UsageMetadata; um != nil {
 			if um.PromptTokenCount > 0 {
@@ -452,11 +482,24 @@ func (e *ADKEngine) RunControlled(ctx context.Context, req EngineRequest, emit f
 	}
 	if loopGuard {
 		snippet := strings.TrimSpace(finalText.String())
-		if len(snippet) > 120 {
-			snippet = snippet[:120] + "…"
+		if len(snippet) > 240 {
+			snippet = snippet[:240] + "…"
 		}
-		slog.Warn("loop guard hit", "room", req.RoomID[:8], "task", req.TaskID[:8], "rounds", toolRounds, "tokens", totalPrompt+totalCand)
-		msg := fmt.Sprintf("Exploration exceeded %d action rounds without finishing. Last known progress: %q. Resume with a higher iteration budget or narrow the prompt.", toolRounds, snippet)
+		stats := guard.stats()
+		slog.Warn("loop guard hit", "room", req.RoomID[:8], "task", req.TaskID[:8], "rounds", toolRounds, "tokens", totalPrompt+totalCand, "tools", stats)
+		msg := fmt.Sprintf("Exploration reached the %d-round limit without finishing.", toolRounds)
+		if loopGuardReason != "" {
+			msg += " " + loopGuardReason
+		}
+		if stats != "" {
+			msg += fmt.Sprintf(" Tool usage: %s.", stats)
+		}
+		if snippet != "" {
+			msg += fmt.Sprintf(" Partial findings: %q.", snippet)
+		} else {
+			msg += " No written findings were produced."
+		}
+		msg += " Resume with a clearer prompt, a higher iteration budget, or delegate to a specialist."
 		return EngineResult{Status: "blocked", Message: msg,
 			Tokens: int(totalPrompt + totalCand), CostUSD: costEstimate(totalPrompt, totalCand)}, nil
 	}

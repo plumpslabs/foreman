@@ -72,6 +72,7 @@ type EngineRequest struct {
 	PersistenceDir       string       `json:"persistenceDir,omitempty"`
 	ConversationID       string       `json:"conversationId,omitempty"`
 	MaxIterations        int          `json:"maxIterations"`
+	ReadOnlyBudget       int          `json:"readOnlyBudget,omitempty"`
 	BudgetUSD            float64      `json:"budgetUsd"`
 	AllowProjectCommands bool         `json:"allowProjectCommands"`
 }

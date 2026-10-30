@@ -1128,6 +1128,24 @@ func normalizeSettings(v Settings) Settings {
 	if v.MaxRetries > 5 {
 		v.MaxRetries = 5
 	}
+	if v.MaxIterations <= 0 {
+		// Action-round budget per run. 30 has been the implicit default; keep it
+		// but make it tunable so a task can be given more room without editing
+		// code.
+		v.MaxIterations = 30
+	}
+	if v.MaxIterations > 200 {
+		v.MaxIterations = 200
+	}
+	if v.ReadOnlyBudget <= 0 {
+		// Consecutive read-only rounds allowed before the loop governor forces
+		// the agent to act or summarize. Deliberately generous so ordinary
+		// exploration is never cut short.
+		v.ReadOnlyBudget = 40
+	}
+	if v.ReadOnlyBudget > 500 {
+		v.ReadOnlyBudget = 500
+	}
 	if v.MaxExecutionSeconds <= 0 {
 		v.MaxExecutionSeconds = 600
 	}
@@ -1613,7 +1631,15 @@ func (s *Store) UpdateSettings(settings Settings) (Settings, error) {
 	if settings.DefaultEffort != "low" && settings.DefaultEffort != "medium" && settings.DefaultEffort != "high" {
 		return Settings{}, errors.New("default effort must be low, medium, or high")
 	}
-	if settings.MaxConcurrentRuns < 1 || settings.MaxConcurrentRuns > 8 || settings.MaxWorkersPerTask < 1 || settings.MaxWorkersPerTask > 8 || settings.MaxDelegationDepth < 0 || settings.MaxDelegationDepth > 5 || settings.MaxRetries < 0 || settings.MaxRetries > 5 || settings.MaxExecutionSeconds < 10 || settings.MaxExecutionSeconds > 3600 || settings.BudgetUSD < 0 || math.IsNaN(settings.BudgetUSD) || math.IsInf(settings.BudgetUSD, 0) {
+	// Older clients omit the loop-budget fields; treat 0 as "use the default"
+	// so they keep working instead of failing validation.
+	if settings.MaxIterations == 0 {
+		settings.MaxIterations = 30
+	}
+	if settings.ReadOnlyBudget == 0 {
+		settings.ReadOnlyBudget = 40
+	}
+	if settings.MaxConcurrentRuns < 1 || settings.MaxConcurrentRuns > 8 || settings.MaxWorkersPerTask < 1 || settings.MaxWorkersPerTask > 8 || settings.MaxDelegationDepth < 0 || settings.MaxDelegationDepth > 5 || settings.MaxRetries < 0 || settings.MaxRetries > 5 || settings.MaxIterations < 1 || settings.MaxIterations > 200 || settings.ReadOnlyBudget < 1 || settings.ReadOnlyBudget > 500 || settings.MaxExecutionSeconds < 10 || settings.MaxExecutionSeconds > 3600 || settings.BudgetUSD < 0 || math.IsNaN(settings.BudgetUSD) || math.IsInf(settings.BudgetUSD, 0) {
 		return Settings{}, errors.New("policy values are outside supported limits")
 	}
 	s.mu.Lock()
