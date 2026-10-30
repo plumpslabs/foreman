@@ -231,6 +231,12 @@ type Agent struct {
 	Skills        []string `json:"skills,omitempty"`
 	Tools         []string `json:"tools,omitempty"`
 	RequireReview bool     `json:"requireReview,omitempty"`
+	// RoleType is the agent's explicit place in the team: "coordinator",
+	// "specialist", "reviewer", or "custom". Empty infers it (the team's main
+	// agent is a coordinator; everyone else is a specialist). This lets a main
+	// agent act as an executor when a task is small instead of being forced to
+	// coordinate, and lets any member be designated a reviewer.
+	RoleType string `json:"roleType,omitempty"`
 	// CanSpawn controls spawn authority: "" (default, hierarchy-only),
 	// "request" (must use request_spawn), or "limited" (lead-approved direct).
 	CanSpawn string `json:"canSpawn,omitempty"`

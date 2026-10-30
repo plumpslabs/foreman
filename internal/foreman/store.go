@@ -1521,6 +1521,21 @@ func (s *Store) SaveAgent(agent Agent) (Agent, error) {
 	if len(agent.Name) > 80 || len(agent.Role) > 160 || len(agent.Instructions) > 16000 {
 		return Agent{}, errors.New("agent name, role, or instructions exceed the allowed length")
 	}
+	agent.RoleType = strings.ToLower(strings.TrimSpace(agent.RoleType))
+	switch agent.RoleType {
+	case "", "coordinator", "specialist", "reviewer", "custom":
+	default:
+		return Agent{}, errors.New("role type must be coordinator, specialist, reviewer, or custom")
+	}
+	if agent.CanSpawn != "" && agent.CanSpawn != "request" && agent.CanSpawn != "limited" {
+		return Agent{}, errors.New("spawn authority must be request or limited")
+	}
+	if agent.MaxIterations < 0 || agent.MaxIterations > 200 {
+		return Agent{}, errors.New("agent max iterations must be between 0 and 200")
+	}
+	if agent.ReadOnlyBudget < 0 || agent.ReadOnlyBudget > 500 {
+		return Agent{}, errors.New("agent read-only budget must be between 0 and 500")
+	}
 	if agent.ID == "" {
 		agent.ID = uuid.NewString()
 	}

@@ -506,30 +506,22 @@ func buildRunPrompt(room Room, task Task, team *Team, skills string, allowedTool
 			team.Instructions,
 			agentInstructions(*team, activeAgent),
 		)
-		var role string
-		for _, a := range team.Agents {
-			if a.Name == activeAgent {
-				role = a.Role
-				break
-			}
-		}
-		if activeAgent == team.MainAgent {
+		agent := teamAgentByName(*team, activeAgent)
+		switch resolveRoleType(*team, activeAgent, agent) {
+		case "coordinator":
 			sections = append(sections, `## Your role: Coordinator (lead agent)
-- You are the ONLY agent who delegates: create tasks, spawn specialists, and decide scope. Specialists do not spawn or reassign work.
-- Decompose the goal, hand each piece to the right teammate (spawn_agent), track the board, and enforce gates (review before done).
-- Keep the human informed; escalate decisions you cannot make (ask_human) instead of guessing.`)
-		} else {
-			spec := `## Your role: Specialist
-- Work ONLY on your assigned task. Do NOT spawn other agents, do NOT change scope, do NOT reassign work — that is the coordinator's job.
-- Finish with finish_task (status review/done + summary + changed files + evidence). If blocked or you need a decision, use ask_human or escalate to the coordinator.`
-			if strings.Contains(strings.ToLower(role), "review") {
-				spec += `
-
-## You are the Reviewer
+- You hold delegate authority: create tasks and spawn specialists when that saves time, and decide scope.
+- Prefer delegating substantial work to the right teammate (spawn_agent), but you may do a small task yourself when spinning up a teammate would cost more than it returns.
+- Track the board and enforce gates (review before done). Keep the human informed; escalate decisions you cannot make (ask_human) instead of guessing.`)
+		case "reviewer":
+			sections = append(sections, `## Your role: Reviewer
 - Review independently; do not self-approve your own work. Be specific and fair.
-- If changes are needed: finish the review task with status "blocked" and a clear summary of what must change. The system will automatically reopen the implementer's task for rework (bounded), so do not edit the code yourself unless asked.`
-			}
-			sections = append(sections, spec)
+- If changes are needed: finish the review task with status "blocked" and a clear summary of what must change. The system will automatically reopen the implementer's task for rework (bounded), so do not edit the code yourself unless asked.
+- If the work is sound: finish_task with status "done" and the evidence you checked.`)
+		default:
+			sections = append(sections, `## Your role: Specialist
+- Work on your assigned task. Do NOT spawn other agents, do NOT change scope, do NOT reassign work — that is the coordinator's job.
+- Finish with finish_task (status review/done + summary + changed files + evidence). If blocked or you need a decision, use ask_human or escalate to the coordinator.`)
 		}
 	}
 	if skills != "" {
@@ -731,6 +723,35 @@ func agentToolIDs(team *Team, task Task) []string {
 		}
 	}
 	return nil
+}
+
+// teamAgentByName returns a pointer to the named team member, or nil.
+func teamAgentByName(team Team, name string) *Agent {
+	for i := range team.Agents {
+		if team.Agents[i].Name == name {
+			return &team.Agents[i]
+		}
+	}
+	return nil
+}
+
+// resolveRoleType resolves an agent's role: an explicit RoleType wins; otherwise
+// the team's main agent is a coordinator, a role/description mentioning
+// "review" is a reviewer, and everyone else is a specialist.
+func resolveRoleType(team Team, name string, agent *Agent) string {
+	if agent != nil && agent.RoleType != "" {
+		return agent.RoleType
+	}
+	if name == team.MainAgent {
+		return "coordinator"
+	}
+	if agent != nil {
+		hay := strings.ToLower(agent.Role + " " + agent.Description)
+		if strings.Contains(hay, "review") {
+			return "reviewer"
+		}
+	}
+	return "specialist"
 }
 
 // activeTeamAgent resolves the agent that will act for this task, falling back

@@ -268,6 +268,33 @@ func (s *Store) RoomMainAgentName(roomID string) string {
 	return ""
 }
 
+// RoomAgentCanSpawn returns the spawn authority configured for an agent in any
+// of the room's invited teams ("" when the agent is unknown or uses the default
+// hierarchy-only policy).
+func (s *Store) RoomAgentCanSpawn(roomID, agentName string) string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for _, room := range s.state.Rooms {
+		if room.ID != roomID {
+			continue
+		}
+		for _, teamID := range room.TeamIDs {
+			for _, team := range s.state.Teams {
+				if team.ID != teamID {
+					continue
+				}
+				for i := range team.Agents {
+					if team.Agents[i].Name == agentName {
+						return team.Agents[i].CanSpawn
+					}
+				}
+			}
+		}
+		break
+	}
+	return ""
+}
+
 // GetOrCreateChatThread returns the room's hidden chat task, creating it on
 // first use. Later messages reuse the same thread so the conversation keeps its
 // memory (the persisted OpenHands conversation resumes) instead of starting

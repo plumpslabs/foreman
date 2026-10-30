@@ -267,6 +267,8 @@ export function AgentDetailPage({ agentId, state, notify, refresh, onBack }) {
       .filter(Boolean),
     tools: normalizeTools(existing?.tools),
     requireReview: Boolean(existing?.requireReview),
+    roleType: existing?.roleType || '',
+    canSpawn: existing?.canSpawn || '',
     maxIterations: existing?.maxIterations || 0,
     readOnlyBudget: existing?.readOnlyBudget || 0,
   }));
@@ -349,6 +351,26 @@ export function AgentDetailPage({ agentId, state, notify, refresh, onBack }) {
             <label>Short description</label>
             <input maxlength="500" placeholder="What this agent is responsible for" value={form.description}
               onInput={(e) => set('description', e.currentTarget.value)} />
+          </div>
+          <div class="field">
+            <label>Role type</label>
+            <select value={form.roleType} onChange={(e) => set('roleType', e.currentTarget.value)}>
+              <option value="">Auto (main agent = coordinator)</option>
+              <option value="coordinator">Coordinator</option>
+              <option value="specialist">Specialist</option>
+              <option value="reviewer">Reviewer</option>
+              <option value="custom">Custom</option>
+            </select>
+            <div class="meta-text">Sets the agent's run instructions: coordinators may delegate (and may still do small tasks themselves); specialists stay on task; reviewers check independently.</div>
+          </div>
+          <div class="field">
+            <label>Spawn authority</label>
+            <select value={form.canSpawn} onChange={(e) => set('canSpawn', e.currentTarget.value)}>
+              <option value="">Default (lead only)</option>
+              <option value="request">Request (needs lead approval)</option>
+              <option value="limited">Limited (may spawn directly)</option>
+            </select>
+            <div class="meta-text">Default keeps hierarchy: only the team lead spawns. "Request" lets this agent ask the lead to spawn. "Limited" lets it spawn teammates directly.</div>
           </div>
           <div class="field">
             <label>Provider</label>

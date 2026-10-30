@@ -709,10 +709,14 @@ func makeADKTools(ctx adkToolContext) []tool.Tool {
 		if ctx.Store == nil {
 			return nil, fmt.Errorf("store unavailable")
 		}
-		// Spawn model: hierarchical — only the lead agent may spawn peers.
-		// Workers needing help send request_spawn, which the lead approves.
+		// Spawn model: hierarchical — only the lead agent may spawn peers by
+		// default. An agent explicitly granted "limited" authority in its
+		// profile may spawn directly too; "request" (or the default) must go
+		// through request_spawn for lead/human approval.
 		if supervisor := ctx.Store.RoomMainAgentName(ctx.RoomID); supervisor != "" && ctx.AgentName != supervisor {
-			return nil, fmt.Errorf("only the lead agent (%s) may spawn teammates; use request_spawn through the lead", supervisor)
+			if ctx.Store.RoomAgentCanSpawn(ctx.RoomID, ctx.AgentName) != "limited" {
+				return nil, fmt.Errorf("only the lead agent (%s) may spawn teammates; use request_spawn through the lead", supervisor)
+			}
 		}
 		// Depth cap: walk the parent task chain (default max 2).
 		depthCap := ctx.Store.Snapshot().Settings.MaxDelegationDepth
