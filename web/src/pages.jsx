@@ -569,13 +569,15 @@ export function RoomDetailHost({ room, state, notify, setModal, runTask, refresh
     const answer = String(value || '').trim();
     if (!answer) return;
     try {
-      await api(`/api/rooms/${encodeURIComponent(room.id)}/questions/${encodeURIComponent(question.id)}`, {
+      const res = await api(`/api/rooms/${encodeURIComponent(room.id)}/questions/${encodeURIComponent(question.id)}`, {
         method: 'PUT',
         body: JSON.stringify({ answer }),
       });
       setAnswerDraft((prev) => ({ ...prev, [question.id]: '' }));
       await refresh();
-      notify('Answer sent to the room');
+      // The answer starts the asking agent's run; if it could not start, say so
+      // instead of pretending the reply went through.
+      notify(res && res.warning ? res.warning : 'Answer sent — the agent is picking it up');
     } catch (error) {
       notify(error.message);
     }

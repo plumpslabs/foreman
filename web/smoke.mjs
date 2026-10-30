@@ -108,6 +108,19 @@ if (!view.includes('Running')) failures.push('room runtime status missing');
 if (view.includes('Pause run')) failures.push('pause control should be removed (stop-only UX)');
 if (!view.includes('Agent needs a decision')) failures.push('agent question card missing');
 if (!view.includes('Proceed with the refactor?')) failures.push('question prompt missing');
+// Picking an option must PUT the answer — the server resumes the asking agent
+// from that request, so a click that only re-renders would stall the room.
+calls.length = 0;
+const optionBtn = window.document.querySelector('.question-options .btn');
+if (!optionBtn) {
+  failures.push('question option button missing');
+} else {
+  click(optionBtn);
+  await flush();
+  if (!calls.some((c) => c.method === 'PUT' && c.url.includes('/api/rooms/r1/questions/q1'))) {
+    failures.push('answering a question did not PUT the answer');
+  }
+}
 if (!view.includes('Teams invited to this room')) failures.push('team-invited card missing');
 if (!view.includes('Smoke Team')) failures.push('invited team name missing from card');
 if (!window.document.querySelector('.live-agents .live-agent.live-on')) failures.push('live agent indicator missing');

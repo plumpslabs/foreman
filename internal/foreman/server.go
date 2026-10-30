@@ -540,12 +540,40 @@ func (s *Server) answerRoomQuestion(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	question, err := s.store.AnswerRoomQuestion(r.PathValue("roomID"), r.PathValue("questionID"), req.Answer)
+	roomID := r.PathValue("roomID")
+	question, err := s.store.AnswerRoomQuestion(roomID, r.PathValue("questionID"), req.Answer)
 	if err != nil {
 		writeError(w, http.StatusUnprocessableEntity, err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, question)
+	// Answering is a new user message, so it must wake the agent that asked.
+	// Without this the reply only landed in the transcript: the human picked a
+	// confirmation, the dashboard refreshed, and nothing ever happened — no
+	// answer, no history, no continuation. The asker is addressed by mention
+	// (or the room's main agent when the question did not record one), which is
+	// exactly how a typed chat message is routed.
+	content := strings.TrimSpace(req.Answer)
+	if question.AgentName != "" {
+		content = "@" + question.AgentName + " " + content
+	}
+	var run *AgentRun
+	var warning string
+	started, runErr := s.runtime.StartChatRun(context.WithoutCancel(r.Context()), roomID, content)
+	if runErr != nil {
+		// The answer itself is already stored; surface why the agent did not
+		// resume instead of failing the whole request and losing the reply.
+		warning = runErr.Error()
+		_ = s.store.AppendRoomNotice(roomID, question.AgentName, "chat.error",
+			fmt.Sprintf("⚠️ Answer could not be run: %v", runErr))
+		slog.Warn("question answer did not start a run", "room", roomID, "err", runErr)
+	} else {
+		run = &started
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"question": question,
+		"run":      run,
+		"warning":  warning,
+	})
 }
 
 func (s *Server) createTask(w http.ResponseWriter, r *http.Request) {

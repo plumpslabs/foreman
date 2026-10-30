@@ -425,6 +425,10 @@ func (rt *Runtime) execute(ctx context.Context, control *RunControl, run AgentRu
 		for _, question := range parseAgentQuestions(result.Message) {
 			question.ID = uuid.NewString()
 			question.CreatedAt = time.Now().UTC()
+			// Remember who asked: the answer has to wake that agent again,
+			// otherwise the confirmation the human picks only lands in the
+			// transcript and the run never resumes.
+			question.AgentName = task.AgentName
 			_, _ = rt.store.AddRoomQuestion(room.ID, question)
 		}
 	}

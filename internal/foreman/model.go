@@ -200,9 +200,12 @@ type Room struct {
 // AgentQuestion is a decision the agent needs from the human before it can
 // continue. Options may be empty for an open-ended answer.
 type AgentQuestion struct {
-	ID         string    `json:"id"`
-	Prompt     string    `json:"prompt"`
-	Options    []string  `json:"options"`
+	ID      string   `json:"id"`
+	Prompt  string   `json:"prompt"`
+	Options []string `json:"options"`
+	// AgentName is the agent that asked, so the answer can be routed back to
+	// it (with an @mention) instead of being stored as a dead transcript line.
+	AgentName  string    `json:"agentName,omitempty"`
 	Answer     string    `json:"answer,omitempty"`
 	AnsweredAt time.Time `json:"answeredAt,omitempty"`
 	CreatedAt  time.Time `json:"createdAt"`

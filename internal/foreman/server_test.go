@@ -10,6 +10,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 )
 
 func newTestServer(t *testing.T) (*Server, string) {
@@ -512,5 +513,160 @@ func TestAgentLibraryAPI(t *testing.T) {
 	deleted := call(http.MethodDelete, "/api/agents/"+agent.ID, "")
 	if deleted.Code != http.StatusNoContent {
 		t.Fatalf("delete agent status = %d", deleted.Code)
+	}
+}
+
+// questionAnswerResponse is what PUT .../questions/{id} returns: the stored
+// answer plus the run it kicked off (or why it could not).
+type questionAnswerResponse struct {
+	Question AgentQuestion `json:"question"`
+	Run      *AgentRun     `json:"run"`
+	Warning  string        `json:"warning"`
+}
+
+func answerQuestionReq(t *testing.T, server *Server, project, roomID, questionID, body string) *httptest.ResponseRecorder {
+	t.Helper()
+	path := fmt.Sprintf("/api/rooms/%s/questions/%s?project=%s", roomID, questionID, url.QueryEscape(project))
+	req := httptest.NewRequest(http.MethodPut, path, strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.RemoteAddr = "127.0.0.1:1234"
+	req.Host = "127.0.0.1:8080"
+	res := httptest.NewRecorder()
+	server.Handler().ServeHTTP(res, req)
+	return res
+}
+
+// Picking an option on an agent's confirmation card must wake that agent
+// again. The answer used to be written to the transcript only, so the room went
+// silent the moment the human replied: no reply, no history, no continuation.
+func TestAnswerRoomQuestionResumesAskingAgent(t *testing.T) {
+	server, project := newTestServer(t)
+	st := server.store
+	ensureFakeProvider(t, st)
+	team, err := st.ImportTeam("quick-fix", "Quick Fix")
+	if err != nil {
+		t.Fatal(err)
+	}
+	room, err := st.CreateRoom("Confirm Room", "", []string{team.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	question, err := st.AddRoomQuestion(room.ID, AgentQuestion{
+		Prompt:    "Ship the waiting-color fix?",
+		Options:   []string{"Yes", "No"},
+		AgentName: team.MainAgent,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	server.runtime.SetEngine(&fakeEngine{results: []EngineResult{
+		{Status: "completed", Message: "Shipping the fix now."},
+	}})
+	defer server.runtime.stopWatchdog()
+
+	res := answerQuestionReq(t, server, project, room.ID, question.ID, `{"answer":"Yes, ship it"}`)
+	if res.Code != http.StatusOK {
+		t.Fatalf("answer status = %d: %s", res.Code, res.Body.String())
+	}
+	var payload questionAnswerResponse
+	if err := json.Unmarshal(res.Body.Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload.Run == nil {
+		t.Fatalf("answering a confirmation must start a run, warning = %q", payload.Warning)
+	}
+	if payload.Question.Answer != "Yes, ship it" || payload.Question.AgentName != team.MainAgent {
+		t.Fatalf("unexpected answer payload: %#v", payload.Question)
+	}
+
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		running := false
+		for _, run := range st.Snapshot().Runs {
+			if run.Status == "running" {
+				running = true
+			}
+		}
+		if !running {
+			break
+		}
+		time.Sleep(15 * time.Millisecond)
+	}
+
+	runs := st.Snapshot().Runs
+	if len(runs) != 1 || runs[0].RoomID != room.ID {
+		t.Fatalf("expected exactly one run in the room, got %#v", runs)
+	}
+	var thread *Task
+	for i, task := range st.Snapshot().Tasks {
+		if task.RoomID == room.ID && task.Hidden {
+			thread = &st.Snapshot().Tasks[i]
+		}
+	}
+	if thread == nil {
+		t.Fatal("answering did not create/reuse a chat thread")
+	}
+	if thread.AgentName != team.MainAgent {
+		t.Fatalf("answer routed to %q, want the asking agent %q", thread.AgentName, team.MainAgent)
+	}
+	if !strings.Contains(thread.Description, "Yes, ship it") {
+		t.Fatalf("the agent never received the answer: %q", thread.Description)
+	}
+	// The resumed agent's reply must land in the room, otherwise the human
+	// still sees nothing happen after confirming.
+	var reply string
+	for _, m := range st.Snapshot().Rooms[0].Messages {
+		if m.Role == "agent" {
+			reply = m.Content
+		}
+	}
+	if !strings.Contains(reply, "Shipping the fix now.") {
+		t.Fatalf("agent did not reply after the confirmation, got %q", reply)
+	}
+}
+
+// When the run cannot start, the answer must still be kept and the reason must
+// be visible instead of failing the request (which would lose the reply).
+func TestAnswerRoomQuestionReportsRunFailure(t *testing.T) {
+	server, project := newTestServer(t)
+	st := server.store
+	team, err := st.ImportTeam("quick-fix", "Quick Fix")
+	if err != nil {
+		t.Fatal(err)
+	}
+	room, err := st.CreateRoom("Quiet Room", "", []string{team.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	question, err := st.AddRoomQuestion(room.ID, AgentQuestion{
+		Prompt:    "Continue with the migration?",
+		AgentName: team.MainAgent,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	res := answerQuestionReq(t, server, project, room.ID, question.ID, `{"answer":"Yes"}`)
+	if res.Code != http.StatusOK {
+		t.Fatalf("answer status = %d: %s", res.Code, res.Body.String())
+	}
+	var payload questionAnswerResponse
+	if err := json.Unmarshal(res.Body.Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload.Run != nil || payload.Warning == "" {
+		t.Fatalf("expected a warning without a run, got run=%#v warning=%q", payload.Run, payload.Warning)
+	}
+	if payload.Question.Answer != "Yes" {
+		t.Fatalf("answer must be stored even when the run fails: %#v", payload.Question)
+	}
+	notice := false
+	for _, m := range st.Snapshot().Rooms[0].Messages {
+		if m.Role == "system" && m.ActivityType == "chat.error" {
+			notice = true
+		}
+	}
+	if !notice {
+		t.Fatal("no chat notice explains why the answer could not be run")
 	}
 }
