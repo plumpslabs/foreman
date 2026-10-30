@@ -33,10 +33,43 @@ func validateProviderInput(id, name, protocol, rawURL, model string) error {
 	if u.Scheme != "https" && u.Scheme != "http" {
 		return errors.New("provider URL must use HTTP or HTTPS")
 	}
-	if u.Scheme == "http" && !isLoopbackHost(u.Hostname()) {
-		return errors.New("plain HTTP is allowed only for a local provider endpoint")
+	// Plain HTTP is allowed for a loopback, LAN, or VPN-overlay endpoint (e.g. a
+	// Tailscale gateway at 100.x): that traffic never crosses the public
+	// internet, so it does not need TLS to stay private. Public hosts must use
+	// HTTPS.
+	if u.Scheme == "http" && !isLocalOrPrivateHost(u.Hostname()) {
+		return errors.New("plain HTTP is allowed only for a local or private/VPN provider endpoint")
 	}
 	return nil
+}
+
+// cgnatRange is the Carrier-Grade NAT block (100.64.0.0/10) used by Tailscale
+// and other VPN overlays. These addresses are not publicly routable.
+var cgnatRange = &net.IPNet{IP: net.IPv4(100, 64, 0, 0), Mask: net.CIDRMask(10, 32)}
+
+// isLocalOrPrivateHost reports whether host is reachable only on the local
+// machine or a private network/VPN overlay: loopback, RFC1918 private,
+// link-local, CGNAT/Tailscale (100.64.0.0/10), or IPv6 unique-local addresses,
+// or a localhost/.local name.
+func isLocalOrPrivateHost(host string) bool {
+	host = strings.ToLower(strings.TrimSpace(host))
+	if host == "" {
+		return false
+	}
+	if host == "localhost" || strings.HasSuffix(host, ".localhost") || strings.HasSuffix(host, ".local") {
+		return true
+	}
+	ip := net.ParseIP(host)
+	if ip == nil {
+		return false
+	}
+	if ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() {
+		return true
+	}
+	if ip4 := ip.To4(); ip4 != nil && cgnatRange.Contains(ip4) {
+		return true
+	}
+	return false
 }
 
 func validateProviderDestination(ctx context.Context, raw string) error {
@@ -45,11 +78,10 @@ func validateProviderDestination(ctx context.Context, raw string) error {
 		return errors.New("invalid provider URL")
 	}
 	host := strings.ToLower(u.Hostname())
-	if isLoopbackHost(host) {
+	// An explicitly configured local/private/VPN endpoint is allowed (e.g. a
+	// Tailscale gateway). This branch is an IP literal or localhost/.local name.
+	if isLocalOrPrivateHost(host) {
 		return nil
-	}
-	if host == "localhost" || strings.HasSuffix(host, ".localhost") || strings.HasSuffix(host, ".local") {
-		return errors.New("provider endpoints must not target private or local network hosts")
 	}
 	ips, err := net.DefaultResolver.LookupIPAddr(ctx, host)
 	if err != nil {
@@ -58,6 +90,8 @@ func validateProviderDestination(ctx context.Context, raw string) error {
 	if len(ips) == 0 {
 		return errors.New("provider host did not resolve")
 	}
+	// A public name must still resolve only to public addresses; this blocks
+	// DNS-rebinding attempts that hide an internal target behind a public name.
 	for _, addr := range ips {
 		if !addr.IP.IsGlobalUnicast() || addr.IP.IsPrivate() || addr.IP.IsLoopback() || addr.IP.IsLinkLocalUnicast() {
 			return errors.New("provider endpoints must not resolve to private or local network addresses")
