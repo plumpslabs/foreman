@@ -29,6 +29,12 @@ const fmtMoney = (n) => {
   if (!v) return '—';
   return '$' + v.toFixed(2).replace(/\.00$/, '');
 };
+// Room notice types that create a record in the Approvals Inbox (ask_human,
+// git_ops commit, request_spawn, escalate, rework-limit escalation). The
+// "Open Approvals" link renders only for these.
+const APPROVAL_NOTICE_TYPES = new Set([
+  'approval.requested', 'spawn.requested', 'task.escalated', 'review.escalated',
+]);
 const timeAgo = (iso) => {
   const d = new Date(iso);
   const s = Math.floor((Date.now() - d.getTime()) / 1000);
@@ -439,9 +445,11 @@ export function RoomDetailHost({ room, state, notify, setModal, runTask, refresh
             {who ? <b>{plain(who)}</b> : null}{' '}
             {plain(m.content)}
             <span class="notice-time"> · {timeAgo(m.createdAt)}</span>
-            {/* An escalation lands in the Approvals Inbox; without this link
-                the notice was a dead end unless you knew where to look. */}
-            {at.includes('escalat') ? (
+            {/* Only notices that actually CREATED an inbox record link to it.
+                Must be an exact match: run.model_escalate (model rotation on
+                a failed attempt) contains "escalat" and used to show an
+                "Open Approvals" link pointing at an empty inbox. */}
+            {APPROVAL_NOTICE_TYPES.has(at) ? (
               <button type="button" class="btn small subtle notice-link"
                 onClick={() => setModal({ kind: 'approvals' })}>
                 Open Approvals
