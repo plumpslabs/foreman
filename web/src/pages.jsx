@@ -390,6 +390,21 @@ export function RoomDetailHost({ room, state, notify, setModal, runTask, refresh
     return () => clearInterval(id);
   }, [room.id, runningCount]);
 
+  // Tick every second while agents run so the live bubble can show elapsed time
+  // (makes a slow first model call visibly "alive" instead of frozen).
+  const [runTick, setRunTick] = useState(() => Date.now());
+  useEffect(() => {
+    if (!runningCount) return undefined;
+    const id = setInterval(() => setRunTick(Date.now()), 1000);
+    return () => clearInterval(id);
+  }, [runningCount]);
+  const elapsedLabel = (startedAt) => {
+    if (!startedAt) return '';
+    const secs = Math.max(0, Math.round((runTick - new Date(startedAt).getTime()) / 1000));
+    if (secs < 60) return `${secs}s`;
+    return `${Math.floor(secs / 60)}m ${String(secs % 60).padStart(2, '0')}s`;
+  };
+
   const mentionCandidates = (() => {
     const q = mentionQuery.toLowerCase();
     if (mentionTrigger === '#') {
@@ -729,6 +744,15 @@ export function RoomDetailHost({ room, state, notify, setModal, runTask, refresh
                   const earlierSteps = compactSteps.slice(-4, compactSteps.length - 1);
                   const lastMsg = statusEvents[statusEvents.length - 1]?.message || '';
                   const label = lastMsg.includes(' → ') ? 'Running tools…' : lastMsg.includes('engine:') ? 'Reasoning' : 'Working';
+                  // The first event is always the runtime-start marker; while the model
+                  // is still composing its first turn there are no step events yet.
+                  const starting = compactSteps.length <= 1 && /runtime started/i.test(lastStep?.text || '');
+                  const currentText = starting
+                    ? 'Starting the agent…'
+                    : lastStep
+                      ? (lastStep.n > 1 ? `${lastStep.text} (×${lastStep.n})` : lastStep.text)
+                      : `${aname} is working…`;
+                  const elapsed = elapsedLabel(run.startedAt);
                   return (
                     <div class="msg live-agent-turn" key={`live-turn-${run.id}`}>
                       <div class="msg-avatar main-agent live-pulsing-avatar">
@@ -742,9 +766,8 @@ export function RoomDetailHost({ room, state, notify, setModal, runTask, refresh
                         <div class="bubble live-bubble">
                           <div class="live-bubble-status">
                             <span class="live-spinner" />
-                            <span class="live-current-text">
-                              {esc(lastStep ? (lastStep.n > 1 ? `${lastStep.text} (×${lastStep.n})` : lastStep.text) : `${aname} sedang bekerja…`)}
-                            </span>
+                            <span class="live-current-text">{esc(currentText)}</span>
+                            {elapsed ? <span class="live-elapsed">{elapsed}</span> : null}
                           </div>
                           {earlierSteps.length ? (
                             <div class="live-steps-trace">
