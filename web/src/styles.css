@@ -410,6 +410,13 @@ img { max-width: 100%; display: block; }
   white-space: nowrap;
 }
 .notice-time { color: var(--muted); opacity: 0.75; }
+/* Inline action inside a notice chip (e.g. jump to the Approvals Inbox). */
+.notice-link {
+  margin-left: 8px;
+  padding: 1px 8px;
+  font-size: 10.5px;
+  border-color: color-mix(in srgb, var(--border) 80%, transparent);
+}
 /* User messages are plain text: without pre-wrap every newline they typed
    collapsed into one run-on line. */
 .bubble.user-bubble { white-space: pre-wrap; }

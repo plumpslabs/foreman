@@ -355,6 +355,60 @@ func TestClaimTaskClaimsJSONCard(t *testing.T) {
 	}
 }
 
+// A workspace with RequireRunApproval rejected every start ("task requires
+// approval before it can run") while no endpoint ever set Approved — the Run
+// button could only fail. The dashboard needs an approve path.
+func TestRequireRunApprovalHasApprovePath(t *testing.T) {
+	server, project := newApprovalTestServer(t)
+	st := server.store
+	room, team := newReviewRoom(t, st, "Approval Gate Room")
+	task, err := st.CreateTask(Task{
+		RoomID: room.ID, AgentName: team.MainAgent, TeamID: team.ID,
+		Title: "Gated card", Status: "todo", Priority: "normal", Effort: "medium",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	settings := st.Snapshot().Settings
+	settings.RequireRunApproval = true
+	if _, err := st.UpdateSettings(settings); err != nil {
+		t.Fatal(err)
+	}
+
+	_, _, _, _, _, _, err = st.PrepareTaskRun(task.ID)
+	if err == nil || !strings.Contains(err.Error(), "requires approval") {
+		t.Fatalf("gate should reject an unapproved task, got: %v", err)
+	}
+
+	path := "/api/tasks/" + task.ID + "/approve?project=" + url.QueryEscape(project)
+	req := httptest.NewRequest(http.MethodPost, path, nil)
+	req.RemoteAddr = "127.0.0.1:1234"
+	req.Host = "127.0.0.1:8080"
+	res := httptest.NewRecorder()
+	server.Handler().ServeHTTP(res, req)
+	if res.Code != http.StatusOK {
+		t.Fatalf("POST approve = %d: %s", res.Code, res.Body.String())
+	}
+	if !st.Snapshot().Tasks[0].Approved {
+		t.Fatal("approve endpoint did not mark the task approved")
+	}
+
+	// The approval gate must no longer be the reason the run refuses.
+	_, _, _, _, _, _, err = st.PrepareTaskRun(task.ID)
+	if err != nil && strings.Contains(err.Error(), "requires approval") {
+		t.Fatalf("approved task still gated: %v", err)
+	}
+	var activity bool
+	for _, m := range st.Snapshot().Rooms[0].Messages {
+		if m.ActivityType == "task.approved" {
+			activity = true
+		}
+	}
+	if !activity {
+		t.Error("approval is not recorded in the activity feed")
+	}
+}
+
 // The HTTP status surface (board column changes) must accept the same
 // lifecycle the tools now produce, i.e. moving a card out of review.
 func TestUpdateTaskStatusPromotesOutOfReviewOverHTTP(t *testing.T) {

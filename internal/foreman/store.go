@@ -2046,6 +2046,34 @@ func (s *Store) UpdateTaskStatus(taskID, status string, approved bool) (Task, er
 	return *task, nil
 }
 
+// ApproveTask stamps the human approval that RequireRunApproval demands.
+// Without it a gated workspace rejected every start with "task requires
+// approval before it can run" and there was no UI path to approve — the run
+// button could only fail.
+func (s *Store) ApproveTask(taskID string) (Task, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	idx := -1
+	for i := range s.state.Tasks {
+		if s.state.Tasks[i].ID == taskID {
+			idx = i
+			break
+		}
+	}
+	if idx < 0 {
+		return Task{}, fmt.Errorf("unknown task id %q", taskID)
+	}
+	previous := append([]Task(nil), s.state.Tasks...)
+	task := &s.state.Tasks[idx]
+	task.Approved = true
+	task.UpdatedAt = time.Now().UTC()
+	if err := s.save(); err != nil {
+		s.state.Tasks = previous
+		return Task{}, err
+	}
+	return *task, nil
+}
+
 // SetTaskSeverity updates a task's issue severity (info|warning|blocker).
 func (s *Store) SetTaskSeverity(taskID, severity string) (Task, error) {
 	s.mu.Lock()

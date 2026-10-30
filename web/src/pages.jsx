@@ -79,18 +79,28 @@ function RoomRow({ room, onOpen, runs, onDelete, mcpServers }) {
   const teamCount = (room.teamIds || []).length;
   const runtime = roomRuntimeStatus(room, runs);
   const mcpNames = (mcpServers || []).filter((s) => (room.mcpServerIds || []).includes(s.id)).map((s) => s.name);
+  // Unanswered agent questions are invisible from the room list — the row just
+  // said "Idle" while a decision was waiting inside.
+  const pendingQuestions = (room.questions || []).filter((q) => !q.answer).length;
   return (
     <article
       class="room-row clickable"
       role="button"
       tabindex="0"
-      aria-label={`Open room ${room.name}`}
+      aria-label={`Open room ${room.name}${pendingQuestions ? `, ${pendingQuestions} unanswered question(s)` : ''}`}
       onClick={() => onOpen(room.id)}
       onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onOpen(room.id); } }}
     >
       <div class="room-symbol"><Icon name="message-square" /></div>
       <div class="room-main">
-        <div class="room-title">{plain(room.name)}</div>
+        <div class="room-title">
+          {plain(room.name)}
+          {pendingQuestions > 0 && (
+            <span class="tag orange" title="Unanswered agent questions waiting in this room">
+              {pendingQuestions} question{pendingQuestions === 1 ? '' : 's'}
+            </span>
+          )}
+        </div>
         <div class="room-sub">{plain(room.goal || 'No goal provided.')}</div>
         <div class="room-foot">
           <span class={`runtime-dot ${runtime}`} />
@@ -429,6 +439,14 @@ export function RoomDetailHost({ room, state, notify, setModal, runTask, refresh
             {who ? <b>{plain(who)}</b> : null}{' '}
             {plain(m.content)}
             <span class="notice-time"> · {timeAgo(m.createdAt)}</span>
+            {/* An escalation lands in the Approvals Inbox; without this link
+                the notice was a dead end unless you knew where to look. */}
+            {at.includes('escalat') ? (
+              <button type="button" class="btn small subtle notice-link"
+                onClick={() => setModal({ kind: 'approvals' })}>
+                Open Approvals
+              </button>
+            ) : null}
           </span>
         </div>
       );
@@ -1005,9 +1023,10 @@ export function RoomDetailHost({ room, state, notify, setModal, runTask, refresh
 
                   <div class="compose-toolbar">
                     <div class="compose-selects">
-                      <button class="mini-select" type="button" onClick={() => setModal({ kind: 'attach' })}>
-                        <Icon name="paperclip" size={13} />Attach
-                      </button>
+                      {/* No "Attach" button: the modal it opened persisted
+                          nothing (no backend concept) and claimed references
+                          were noted on the room. Reintroduce it together with
+                          an API, not as a fake. */}
                       <button class="mini-select" type="button" onClick={() => setModal({ kind: 'approval', required: settings.requireRunApproval })}>
                         <Icon name="shield-check" size={13} />Approval {settings.requireRunApproval ? 'on' : 'off'}
                       </button>
@@ -1355,7 +1374,14 @@ export function RoomDetailHost({ room, state, notify, setModal, runTask, refresh
             </div>
             <div class="modal-foot">
               <button class="btn" onClick={() => setKickBlock(null)}>Cancel</button>
-              <button class="btn primary" onClick={() => setKickBlock(null)}>Close</button>
+              {/* Both buttons used to just close the modal while the copy
+                  told the user to "stop the run first" — with no way to do it.
+                  Stop it right here, then the team can be removed. */}
+              <button class="btn primary" onClick={async () => {
+                const run = kickBlock.run;
+                setKickBlock(null);
+                if (run && cancelRun) await cancelRun(run.id);
+              }}>Stop run</button>
             </div>
           </div>
         </div>
@@ -1578,7 +1604,7 @@ export function SkillsPage({ state, setModal, openSkill }) {
 }
 
 
-export function RunsPage({ state, cancelRun }) {
+export function RunsPage({ state, cancelRun, runTask }) {
   const { runs, tasks } = state;
   return (
     <>
@@ -1607,6 +1633,12 @@ export function RunsPage({ state, cancelRun }) {
                 </div>
                 {run.status === 'running' && (
                   <button class="btn small" onClick={() => cancelRun(run.id)}>Stop</button>
+                )}
+                {/* A failed/cancelled/timed-out run drops its card back to
+                    Backlog; the only way to retry used to be finding that card
+                    on the Kanban board. Re-run it where the failure is shown. */}
+                {task && ['failed', 'timed_out', 'cancelled', 'blocked'].includes(run.status) && runTask && (
+                  <button class="btn small" onClick={(e) => runTask(task.id, e.currentTarget)}>Run again</button>
                 )}
               </article>
             );

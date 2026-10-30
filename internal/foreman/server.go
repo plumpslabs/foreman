@@ -60,6 +60,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("PUT /api/rooms/{roomID}/questions/{questionID}", s.answerRoomQuestion)
 	mux.HandleFunc("POST /api/rooms/{roomID}/tasks", s.createTask)
 	mux.HandleFunc("PUT /api/tasks/{taskID}/status", s.updateTaskStatus)
+	mux.HandleFunc("POST /api/tasks/{taskID}/approve", s.approveTask)
 	mux.HandleFunc("PUT /api/tasks/{taskID}", s.updateTaskDetails)
 	mux.HandleFunc("POST /api/tasks/{taskID}/run", s.startTask)
 	mux.HandleFunc("POST /api/runs/{runID}/cancel", s.cancelRun)
@@ -615,6 +616,28 @@ func (s *Server) updateTaskStatus(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusUnprocessableEntity, err.Error())
 		return
 	}
+	writeJSON(w, http.StatusOK, task)
+}
+
+// approveTask records the human's explicit approval for a task gated by
+// RequireRunApproval. The run button used to be unable to start anything in a
+// gated workspace: the store rejected it and no endpoint ever set Approved.
+func (s *Server) approveTask(w http.ResponseWriter, r *http.Request) {
+	if err := s.verifyProject(r.URL.Query().Get("project")); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	task, err := s.store.ApproveTask(r.PathValue("taskID"))
+	if err != nil {
+		writeError(w, http.StatusUnprocessableEntity, err.Error())
+		return
+	}
+	_ = s.store.RecordActivity(task.RoomID, "Human", "task.approved",
+		fmt.Sprintf("Run approved by the human for task %q", task.Title), nil)
+	// RecordActivity only reaches the SQLite audit log; the room chat gets the
+	// curated notice so the team sees the human's decision where it works.
+	_ = s.store.AppendRoomNotice(task.RoomID, "Human", "task.approved",
+		fmt.Sprintf("✋ Run approved by the human for task %q", task.Title))
 	writeJSON(w, http.StatusOK, task)
 }
 

@@ -64,7 +64,7 @@ export function ModalHost({ modal, setModal, state, notify, refresh, deleteSkill
           onRun={(id) => { onClose(); if (runTask) runTask(id); }} />
       )}
       {kind === 'skill-import' && <SkillImportForm onClose={onClose} notify={notify} refresh={refresh} />}
-      {kind === 'attach' && <AttachContext onClose={onClose} notify={notify} />}
+      
       {kind === 'route' && <RouteAgent agents={modal.agents || []} current={modal.current} onClose={onClose} onPick={modal.onPick} />}
       {kind === 'effort' && <EffortPicker current={modal.current} onClose={onClose} />}
       {kind === 'approval' && <ApprovalInfo required={modal.required} onClose={onClose} />}
@@ -365,6 +365,19 @@ function TaskDetail({ room, state, task, onClose, notify, refresh, onRun }) {
     } catch (e) { notify(e.message); } finally { setBusy(false); }
   };
 
+  // RequireRunApproval gates every start on task.approved — which nothing set,
+  // so in a gated workspace the Run button could only fail. This is the human's
+  // explicit approval.
+  const needsApproval = !!(state.settings && state.settings.requireRunApproval) && !task.approved;
+  const approve = async () => {
+    setBusy(true);
+    try {
+      await api('/api/tasks/' + encodeURIComponent(task.id) + '/approve', { method: 'POST', body: '{}' });
+      notify('Run approved — you can start it now');
+      await refresh();
+    } catch (e) { notify(e.message); } finally { setBusy(false); }
+  };
+
   const save = async (e) => {
     e.preventDefault();
     setBusy(true);
@@ -399,6 +412,7 @@ function TaskDetail({ room, state, task, onClose, notify, refresh, onRun }) {
               {team && <span class="tag">team: {plain(team.name)}</span>}
               {task.hidden && <span class="tag">chat thread</span>}
               {task.retryCount > 0 && <span class="tag orange">rework ×{task.retryCount}</span>}
+              {needsApproval && startable && <span class="tag orange">awaiting approval</span>}
               {editing && <span class="tag orange">editing</span>}
             </div>
           </div>
@@ -463,6 +477,11 @@ function TaskDetail({ room, state, task, onClose, notify, refresh, onRun }) {
                   <option value="done">Done</option>
                   <option value="cancelled">Cancelled</option>
                 </select>
+                {startable && needsApproval && (
+                  <button type="button" class="btn small" style="color:var(--orange);border-color:#5a4522" disabled={busy} onClick={approve}>
+                    <Icon name="shield-check" size={13} />Approve
+                  </button>
+                )}
                 {startable && <button type="button" class="btn primary small" disabled={busy} onClick={() => onRun(task.id)}>Run</button>}
               </div>
               <button type="button" class="btn" onClick={() => setEditing(true)}>Edit</button>
@@ -649,29 +668,7 @@ function SkillImportForm({ onClose, notify, refresh }) {
 
 /* ---------- Misc ---------- */
 
-function AttachContext({ onClose, notify }) {
-  const [ref, setRef] = useState('');
-  const [why, setWhy] = useState('');
-  const submit = (e) => {
-    e.preventDefault();
-    if (!ref.trim()) { notify('Add a path or reference'); return; }
-    notify(`Context reference attached: ${ref.trim()}`);
-    onClose();
-  };
-  return (
-    <Backdrop onClose={onClose} title="Attach context" submitLabel="Attach" onSubmit={submit} busy={false}>
-      <div class="field">
-        <label>Path, URL, or reference</label>
-        <input required placeholder="e.g. src/checkout or issue #42" value={ref} onInput={(e) => setRef(e.currentTarget.value)} />
-      </div>
-      <div class="field">
-        <label>Why is this relevant?</label>
-        <input placeholder="Optional context for the agent" value={why} onInput={(e) => setWhy(e.currentTarget.value)} />
-      </div>
-      <div class="notice">Context references are noted on the room. A run validates access before using them.</div>
-    </Backdrop>
-  );
-}
+
 
 function RouteAgent({ agents, current, onClose, onPick }) {
   return (
