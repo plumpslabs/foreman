@@ -80,21 +80,28 @@ type MCPServer struct {
 }
 
 type Settings struct {
-	Theme                 string  `json:"theme"`
-	EffortMode            string  `json:"effortMode"`
-	DefaultEffort         string  `json:"defaultEffort"`
-	MaxConcurrentRuns     int     `json:"maxConcurrentRuns"`
-	MaxWorkersPerTask     int     `json:"maxWorkersPerTask"`
-	MaxDelegationDepth    int     `json:"maxDelegationDepth"`
-	MaxRetries            int     `json:"maxRetries"`
-	MaxIterations         int     `json:"maxIterations"`
-	ReadOnlyBudget        int     `json:"readOnlyBudget"`
-	MaxExecutionSeconds   int     `json:"maxExecutionSeconds"`
-	BudgetUSD             float64 `json:"budgetUsd"`
-	RequireRunApproval    bool    `json:"requireRunApproval"`
-	AllowProjectCommands  bool    `json:"allowProjectCommands"`
-	DisableQuickReplies   bool    `json:"disableQuickReplies"`
-	RouteIntentsWithModel bool    `json:"routeIntentsWithModel"`
+	Theme               string  `json:"theme"`
+	EffortMode          string  `json:"effortMode"`
+	DefaultEffort       string  `json:"defaultEffort"`
+	MaxConcurrentRuns   int     `json:"maxConcurrentRuns"`
+	MaxWorkersPerTask   int     `json:"maxWorkersPerTask"`
+	MaxDelegationDepth  int     `json:"maxDelegationDepth"`
+	MaxRetries          int     `json:"maxRetries"`
+	MaxIterations       int     `json:"maxIterations"`
+	ReadOnlyBudget      int     `json:"readOnlyBudget"`
+	MaxExecutionSeconds int     `json:"maxExecutionSeconds"`
+	BudgetUSD           float64 `json:"budgetUsd"`
+	// DisableCompaction turns off ADK context compaction (on by default). When
+	// enabled, older conversation events are summarized before a model call
+	// once the prompt exceeds CompactionThreshold tokens, keeping long runs
+	// from re-sending an ever-growing context.
+	DisableCompaction     bool `json:"disableCompaction"`
+	CompactionThreshold   int  `json:"compactionThreshold"`
+	CompactionRetention   int  `json:"compactionRetention"`
+	RequireRunApproval    bool `json:"requireRunApproval"`
+	AllowProjectCommands  bool `json:"allowProjectCommands"`
+	DisableQuickReplies   bool `json:"disableQuickReplies"`
+	RouteIntentsWithModel bool `json:"routeIntentsWithModel"`
 }
 
 type ProviderConfig struct {

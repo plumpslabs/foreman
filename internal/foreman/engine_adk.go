@@ -25,6 +25,7 @@ import (
 	"google.golang.org/adk/v2/model/openaimodel"
 	"google.golang.org/adk/v2/runner"
 	"google.golang.org/adk/v2/session"
+	"google.golang.org/adk/v2/session/compaction"
 	"google.golang.org/adk/v2/tool"
 	"google.golang.org/adk/v2/tool/mcptoolset"
 	"google.golang.org/adk/v2/tool/toolutils"
@@ -333,6 +334,18 @@ func (e *ADKEngine) RunControlled(ctx context.Context, req EngineRequest, emit f
 		return EngineResult{}, fmt.Errorf("create loop guard: %w", err)
 	}
 
+	// Context compaction: summarize older events before a model call once the
+	// prompt grows past the threshold, so a long exploratory run does not keep
+	// re-sending an ever-larger context. The runner installs an LLM summarizer
+	// over this agent's model when none is supplied.
+	var compactionCfg *compaction.Config
+	if req.ContextTokenLimit > 0 {
+		compactionCfg = &compaction.Config{
+			TokenThreshold:     req.ContextTokenLimit,
+			EventRetentionSize: req.ContextRetention,
+		}
+	}
+
 	sessSvc := session.InMemoryService()
 	r, err := runner.New(runner.Config{
 		AppName:           "foreman",
@@ -340,6 +353,7 @@ func (e *ADKEngine) RunControlled(ctx context.Context, req EngineRequest, emit f
 		SessionService:    sessSvc,
 		AutoCreateSession: true,
 		PluginConfig:      guardCfg,
+		Compaction:        compactionCfg,
 	})
 	if err != nil {
 		return EngineResult{}, fmt.Errorf("create runner: %w", err)

@@ -1155,6 +1155,20 @@ func normalizeSettings(v Settings) Settings {
 	if v.BudgetUSD < 0 || math.IsNaN(v.BudgetUSD) || math.IsInf(v.BudgetUSD, 0) {
 		v.BudgetUSD = 0
 	}
+	if v.CompactionThreshold <= 0 {
+		// Summarize the conversation once a single prompt exceeds this many
+		// tokens. High enough that ordinary runs never pay for it.
+		v.CompactionThreshold = 120000
+	}
+	if v.CompactionThreshold > 1000000 {
+		v.CompactionThreshold = 1000000
+	}
+	if v.CompactionRetention <= 0 {
+		v.CompactionRetention = 24
+	}
+	if v.CompactionRetention > 200 {
+		v.CompactionRetention = 200
+	}
 	return v
 }
 
@@ -1639,7 +1653,13 @@ func (s *Store) UpdateSettings(settings Settings) (Settings, error) {
 	if settings.ReadOnlyBudget == 0 {
 		settings.ReadOnlyBudget = 40
 	}
-	if settings.MaxConcurrentRuns < 1 || settings.MaxConcurrentRuns > 8 || settings.MaxWorkersPerTask < 1 || settings.MaxWorkersPerTask > 8 || settings.MaxDelegationDepth < 0 || settings.MaxDelegationDepth > 5 || settings.MaxRetries < 0 || settings.MaxRetries > 5 || settings.MaxIterations < 1 || settings.MaxIterations > 200 || settings.ReadOnlyBudget < 1 || settings.ReadOnlyBudget > 500 || settings.MaxExecutionSeconds < 10 || settings.MaxExecutionSeconds > 3600 || settings.BudgetUSD < 0 || math.IsNaN(settings.BudgetUSD) || math.IsInf(settings.BudgetUSD, 0) {
+	if settings.CompactionThreshold == 0 {
+		settings.CompactionThreshold = 120000
+	}
+	if settings.CompactionRetention == 0 {
+		settings.CompactionRetention = 24
+	}
+	if settings.MaxConcurrentRuns < 1 || settings.MaxConcurrentRuns > 8 || settings.MaxWorkersPerTask < 1 || settings.MaxWorkersPerTask > 8 || settings.MaxDelegationDepth < 0 || settings.MaxDelegationDepth > 5 || settings.MaxRetries < 0 || settings.MaxRetries > 5 || settings.MaxIterations < 1 || settings.MaxIterations > 200 || settings.ReadOnlyBudget < 1 || settings.ReadOnlyBudget > 500 || settings.CompactionThreshold < 1000 || settings.CompactionThreshold > 1000000 || settings.CompactionRetention < 1 || settings.CompactionRetention > 200 || settings.MaxExecutionSeconds < 10 || settings.MaxExecutionSeconds > 3600 || settings.BudgetUSD < 0 || math.IsNaN(settings.BudgetUSD) || math.IsInf(settings.BudgetUSD, 0) {
 		return Settings{}, errors.New("policy values are outside supported limits")
 	}
 	s.mu.Lock()

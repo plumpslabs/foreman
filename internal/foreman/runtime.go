@@ -270,6 +270,10 @@ func (rt *Runtime) execute(ctx context.Context, control *RunControl, run AgentRu
 	agentToolIDs := agentToolIDs(team, task)
 	runAgent := activeTeamAgent(team, task)
 	maxIterations, readOnlyBudget := effectiveBudgets(runAgent, settings)
+	contextTokenLimit := settings.CompactionThreshold
+	if settings.DisableCompaction {
+		contextTokenLimit = 0
+	}
 	prompt := buildRunPrompt(room, task, team, skillsContext(team, task, rt.store.Snapshot().Skills), agentToolIDs)
 	prompt += fmt.Sprintf("\n\n## Exploration budget\nYou may spend up to %d read-only tool rounds (view/grep/search/repo_map/list) before you must act on what you found. Do not re-read the same file or region — if a search or view already answered the question, act on it. Before the budget runs out, choose one: create_plan, spawn_agent / create_task, make the code change, ask_human, or finish_task. Once the budget is spent, further read-only tools are blocked automatically; if that happens, reply with a concise summary of findings and your recommendation instead of retrying reads.", readOnlyBudget)
 	if mcpServers := rt.store.MCPServersByIDs(room.MCPServerIDs); len(mcpServers) > 0 {
@@ -347,6 +351,8 @@ func (rt *Runtime) execute(ctx context.Context, control *RunControl, run AgentRu
 			ConversationID:       conversationID(room.ID, task),
 			MaxIterations:        maxIterations,
 			ReadOnlyBudget:       readOnlyBudget,
+			ContextTokenLimit:    contextTokenLimit,
+			ContextRetention:     settings.CompactionRetention,
 			BudgetUSD:            settings.BudgetUSD,
 			AllowProjectCommands: settings.AllowProjectCommands,
 		}

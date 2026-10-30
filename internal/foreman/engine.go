@@ -73,6 +73,8 @@ type EngineRequest struct {
 	ConversationID       string       `json:"conversationId,omitempty"`
 	MaxIterations        int          `json:"maxIterations"`
 	ReadOnlyBudget       int          `json:"readOnlyBudget,omitempty"`
+	ContextTokenLimit    int          `json:"contextTokenLimit,omitempty"`
+	ContextRetention     int          `json:"contextRetention,omitempty"`
 	BudgetUSD            float64      `json:"budgetUsd"`
 	AllowProjectCommands bool         `json:"allowProjectCommands"`
 }

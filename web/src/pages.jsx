@@ -2428,6 +2428,19 @@ export function SettingsPage({ state, notify, refresh }) {
                 <input type="number" min="0" step="0.01" value={policy.budgetUsd}
                   onInput={(e) => setField('budgetUsd', e.currentTarget.value, true)} />
               </div>
+              <div class="field">
+                <label>Context compaction</label>
+                <label class="check" style="margin:0">
+                  <input type="checkbox" checked={!policy.disableCompaction}
+                    onChange={(e) => setField('disableCompaction', !e.currentTarget.checked)} />
+                  <span>Summarize old context on long runs</span>
+                </label>
+              </div>
+              <div class="field">
+                <label>Compaction token threshold</label>
+                <input type="number" min="1000" max="1000000" step="1000" value={policy.compactionThreshold || 120000}
+                  onInput={(e) => setField('compactionThreshold', e.currentTarget.value, true)} />
+              </div>
             </div>
           </div>
 
