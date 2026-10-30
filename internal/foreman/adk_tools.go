@@ -61,8 +61,12 @@ type createTaskArgs struct {
 	Dependencies []string `json:"dependencies"`
 }
 
+// Optional-by-default argument tags are not cosmetic: the generated JSON
+// schema treats untagged fields as REQUIRED, so a model calling finish_task
+// with only task_id+status was rejected by schema validation before the tool
+// ever ran — one of the reasons cards never left their stage.
 type updateTaskArgs struct {
-	TaskID      string `json:"task_id"`
+	TaskID      string `json:"task_id,omitempty"`
 	Status      string `json:"status,omitempty"`
 	Severity    string `json:"severity,omitempty"`
 	Title       string `json:"title,omitempty"`
@@ -73,20 +77,20 @@ type updateTaskArgs struct {
 }
 
 type claimTaskArgs struct {
-	TaskID    string `json:"task_id"`
-	AgentName string `json:"agent_name"`
+	TaskID    string `json:"task_id,omitempty"`
+	AgentName string `json:"agent_name,omitempty"`
 }
 
 type finishTaskArgs struct {
-	TaskID       string   `json:"task_id"`
-	Summary      string   `json:"summary"`
-	ChangedFiles []string `json:"changed_files"`
-	Evidence     string   `json:"evidence"`
-	Status       string   `json:"status"`
+	TaskID       string   `json:"task_id,omitempty"`
+	Summary      string   `json:"summary,omitempty"`
+	ChangedFiles []string `json:"changed_files,omitempty"`
+	Evidence     string   `json:"evidence,omitempty"`
+	Status       string   `json:"status,omitempty"`
 }
 
 type listTasksArgs struct {
-	RoomID string `json:"room_id"`
+	RoomID string `json:"room_id,omitempty"`
 }
 
 type createPlanArgs struct {
@@ -147,7 +151,7 @@ type registerPanelArgs struct {
 }
 
 type sendMessageArgs struct {
-	RoomID  string `json:"room_id"`
+	RoomID  string `json:"room_id,omitempty"`
 	Content string `json:"content"`
 }
 
@@ -182,7 +186,7 @@ type searchIndexArgs struct {
 }
 
 type deleteTaskArgs struct {
-	TaskID string `json:"task_id"`
+	TaskID string `json:"task_id,omitempty"`
 }
 
 type deletePlanArgs struct {
@@ -277,6 +281,12 @@ func makeADKTools(ctx adkToolContext) []tool.Tool {
 		if taskID == "" {
 			taskID = ctx.TaskID
 		}
+		// Accept id or exact title, same as finish_task.
+		resolved, err := ctx.Store.ResolveTaskRef(ctx.RoomID, taskID)
+		if err != nil {
+			return nil, err
+		}
+		taskID = resolved.ID
 		// Detail edits (title/description/priority/effort) may happen without a
 		// status change.
 		edited := false
@@ -337,7 +347,7 @@ func makeADKTools(ctx adkToolContext) []tool.Tool {
 	// claim_task
 	add(functiontool.New[claimTaskArgs, map[string]any](functiontool.Config{
 		Name:        "claim_task",
-		Description: "Claim a task card atomically.",
+		Description: "Claim a task card atomically (todo/backlog → in_progress). task_id accepts the card id OR its exact title.",
 	}, func(ac agent.Context, args claimTaskArgs) (map[string]any, error) {
 		if ctx.Store == nil {
 			return nil, fmt.Errorf("store unavailable")
@@ -346,17 +356,29 @@ func makeADKTools(ctx adkToolContext) []tool.Tool {
 		if agentName == "" {
 			agentName = ctx.AgentName
 		}
-		claimed, err := ctx.Store.DB().AtomicClaimTask(args.TaskID, agentName)
+		task, err := ctx.Store.ResolveTaskRef(ctx.RoomID, args.TaskID)
 		if err != nil {
 			return nil, err
 		}
-		return map[string]any{"claimed": claimed}, nil
+		if task.Status != "todo" && task.Status != "backlog" {
+			// Not an error: someone else (or an earlier run) already owns it.
+			return map[string]any{"claimed": false, "status": task.Status,
+				"reason": fmt.Sprintf("task is %s, only todo/backlog cards can be claimed", task.Status)}, nil
+		}
+		// The old path wrote to the SQLite tasks table, which the app never
+		// populates — every claim failed with "no such row".
+		if _, err := ctx.Store.ClaimTask(task.ID, agentName); err != nil {
+			return nil, err
+		}
+		_ = ctx.Store.AppendRoomNotice(ctx.RoomID, agentName, "task.claimed",
+			fmt.Sprintf("🖐️ @%s claimed %q", agentName, task.Title))
+		return map[string]any{"claimed": true, "status": "in_progress", "task_id": task.ID}, nil
 	}))
 
 	// finish_task
 	add(functiontool.New[finishTaskArgs, map[string]any](functiontool.Config{
 		Name:        "finish_task",
-		Description: "Finish a task and record results, changed files, and evidence.",
+		Description: "Finish a task and record results, changed files, and evidence. task_id accepts the card id OR the exact card title (as printed by list_tasks). status: done (approved/complete), review (needs a reviewer), blocked (request rework on the implementation).",
 	}, func(ac agent.Context, args finishTaskArgs) (map[string]any, error) {
 		if ctx.Store == nil {
 			return nil, fmt.Errorf("store unavailable")
@@ -364,21 +386,36 @@ func makeADKTools(ctx adkToolContext) []tool.Tool {
 		if args.TaskID == "" {
 			args.TaskID = ctx.TaskID
 		}
+		// Accept id, exact title, or slug: models pass the title list_tasks
+		// printed, and rejecting it here used to leave the card stuck.
+		task, err := ctx.Store.ResolveTaskRef(ctx.RoomID, args.TaskID)
+		if err != nil {
+			return nil, err
+		}
+		args.TaskID = task.ID
 		status := args.Status
 		if status == "" {
 			status = "done"
 		}
-		_, err := ctx.Store.UpdateTaskStatus(args.TaskID, status, true)
+		_, err = ctx.Store.UpdateTaskStatus(args.TaskID, status, true)
 		if err != nil {
 			return nil, err
 		}
-		var taskTitle string
-		var parentID string
-		for _, t := range ctx.Store.Snapshot().Tasks {
-			if t.ID == args.TaskID {
-				taskTitle = t.Title
-				parentID = t.ParentID
-				break
+		taskTitle := task.Title
+		parentID := task.ParentID
+
+		// A reviewer approving their "Review: …" card closes the implementation
+		// card it was created for. Without this, approved work sat in the Review
+		// column forever: the only parent handling that existed fired on
+		// "blocked" (rework), so a clean approval never propagated.
+		if status == "done" && parentID != "" && strings.HasPrefix(taskTitle, "Review: ") {
+			if parent, perr := ctx.Store.ResolveTaskRef(ctx.RoomID, parentID); perr == nil && parent.Status == "review" {
+				if _, uerr := ctx.Store.UpdateTaskStatus(parent.ID, "done", true); uerr == nil {
+					_ = ctx.Store.RecordActivity(ctx.RoomID, ctx.AgentName, "review.approved",
+						fmt.Sprintf("Review approved; task %s marked done", parent.ID), nil)
+					_ = ctx.Store.AppendRoomNotice(ctx.RoomID, ctx.AgentName, "review.approved",
+						fmt.Sprintf("✅ Review approved — task %q marked done by @%s", parent.Title, ctx.AgentName))
+				}
 			}
 		}
 		var filesList string
@@ -461,7 +498,7 @@ func makeADKTools(ctx adkToolContext) []tool.Tool {
 	// list_tasks
 	add(functiontool.New[listTasksArgs, map[string]any](functiontool.Config{
 		Name:        "list_tasks",
-		Description: "List current tasks on the board.",
+		Description: "List current tasks on the board. room_id accepts a room id or the room's display name (defaults to this room).",
 	}, func(ac agent.Context, args listTasksArgs) (map[string]any, error) {
 		if ctx.Store == nil {
 			return nil, fmt.Errorf("store unavailable")
@@ -469,8 +506,12 @@ func makeADKTools(ctx adkToolContext) []tool.Tool {
 		roomID := args.RoomID
 		if roomID == "" {
 			roomID = ctx.RoomID
+		} else if resolved := ctx.Store.ResolveRoomID(roomID); resolved != "" {
+			// Agents pass the room's display name; matching it against room ids
+			// returned {"tasks": null} and read to the agent as an empty board.
+			roomID = resolved
 		}
-		var out []map[string]any
+		out := []map[string]any{}
 		for _, t := range ctx.Store.Snapshot().Tasks {
 			if t.RoomID == roomID {
 				out = append(out, map[string]any{
@@ -478,7 +519,7 @@ func makeADKTools(ctx adkToolContext) []tool.Tool {
 				})
 			}
 		}
-		return map[string]any{"tasks": out}, nil
+		return map[string]any{"tasks": out, "room_id": roomID}, nil
 	}))
 
 	// create_plan
@@ -806,7 +847,7 @@ func makeADKTools(ctx adkToolContext) []tool.Tool {
 	// send_message
 	add(functiontool.New[sendMessageArgs, map[string]any](functiontool.Config{
 		Name:        "send_message",
-		Description: "Send a message to the room chat.",
+		Description: "Post a message to the room chat as yourself. Address a teammate with @Name so they pick it up as context.",
 	}, func(ac agent.Context, args sendMessageArgs) (map[string]any, error) {
 		if ctx.Store == nil {
 			return nil, fmt.Errorf("store unavailable")
@@ -814,9 +855,14 @@ func makeADKTools(ctx adkToolContext) []tool.Tool {
 		roomID := args.RoomID
 		if roomID == "" {
 			roomID = ctx.RoomID
+		} else if resolved := ctx.Store.ResolveRoomID(roomID); resolved != "" {
+			roomID = resolved
 		}
-		_, err := ctx.Store.AppendRoomMessage(roomID, "assistant", args.Content)
-		if err != nil {
+		// AppendRoomMessage only accepts role "user" (it is the human's input
+		// path), so posting as "assistant" made this tool fail every single
+		// time — teammates never saw the message. Agent speech goes through
+		// AppendAgentReply.
+		if err := ctx.Store.AppendAgentReply(roomID, ctx.AgentName, args.Content); err != nil {
 			return nil, err
 		}
 		return map[string]any{"status": "sent"}, nil
@@ -1006,6 +1052,11 @@ func makeADKTools(ctx adkToolContext) []tool.Tool {
 		if args.TaskID == "" {
 			args.TaskID = ctx.TaskID
 		}
+		resolved, err := ctx.Store.ResolveTaskRef(ctx.RoomID, args.TaskID)
+		if err != nil {
+			return nil, err
+		}
+		args.TaskID = resolved.ID
 		if err := ctx.Store.DeleteTask(args.TaskID); err != nil {
 			return nil, err
 		}

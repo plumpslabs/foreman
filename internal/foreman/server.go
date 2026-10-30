@@ -495,7 +495,9 @@ func (s *Server) appendRoomMessage(w http.ResponseWriter, r *http.Request) {
 		started, runErr := s.runtime.StartChatRun(context.WithoutCancel(r.Context()), r.PathValue("roomID"), req.Content)
 		if runErr != nil {
 			warning = runErr.Error()
-			_ = s.store.AppendRoomNotice(r.PathValue("roomID"), "", "chat.error",
+			// Attribute the failure to the room's lead: a notice with an empty
+			// author renders as an anonymous chip in the chat stream.
+			_ = s.store.AppendRoomNotice(r.PathValue("roomID"), s.store.RoomMainAgentName(r.PathValue("roomID")), "chat.error",
 				fmt.Sprintf("⚠️ Message could not be run: %v", runErr))
 		} else {
 			run = &started

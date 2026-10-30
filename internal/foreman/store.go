@@ -994,7 +994,15 @@ func (s *Store) AnswerRoomQuestion(roomID, questionID, answer string) (AgentQues
 			previousMessages := room.Messages
 			room.Questions[j].Answer = answer
 			room.Questions[j].AnsweredAt = time.Now().UTC()
-			room.Messages = append(previousMessages, NewChatMessage("user", answer))
+			// Link the answer to the question it belongs to: a bare user bubble
+			// floats with no trace of what was being answered, which matters
+			// once several questions are pending.
+			reply := NewChatMessage("user", answer)
+			reply.Metadata = map[string]any{
+				"questionId": questionID,
+				"question":   room.Questions[j].Prompt,
+			}
+			room.Messages = append(previousMessages, reply)
 			if err := s.save(); err != nil {
 				room.Questions = previousQuestions
 				room.Messages = previousMessages
@@ -2331,6 +2339,140 @@ func (s *Store) MarkTaskRunning(taskID string) error {
 	return fmt.Errorf("unknown task id %q", taskID)
 }
 
+// ResolveRoomID maps a room id OR a room's display name onto the room id.
+// Agents routinely pass the name they see in the UI (list_tasks(room_id=
+// "forman tets 1")); without resolution the room filter matched nothing and
+// the tool answered {"tasks": null} — which the agent read as "the board is
+// empty" and gave up on moving any card.
+func (s *Store) ResolveRoomID(idOrName string) string {
+	ref := strings.TrimSpace(idOrName)
+	if ref == "" {
+		return ""
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	byName := ""
+	for _, room := range s.state.Rooms {
+		if room.ID == ref {
+			return room.ID
+		}
+		if byName == "" && strings.EqualFold(room.Name, ref) {
+			byName = room.ID
+		}
+	}
+	return byName
+}
+
+// ResolveTaskRef finds a task inside a room by id, by exact title, or by
+// slugified title. list_tasks prints id AND title, so models naturally pass
+// the title back — finish_task used to accept ids only and rejected the rest
+// as "unknown task id", leaving the card stuck in its old stage.
+func (s *Store) ResolveTaskRef(roomID, ref string) (Task, error) {
+	needle := strings.TrimSpace(ref)
+	if needle == "" {
+		return Task{}, errors.New("task reference is empty")
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	var byID, byTitle *Task
+	var slugMatches []Task
+	needleSlug := slugifyTaskRef(needle)
+	for i := range s.state.Tasks {
+		t := &s.state.Tasks[i]
+		if roomID != "" && t.RoomID != roomID {
+			continue
+		}
+		switch {
+		case t.ID == needle:
+			byID = t
+		case strings.EqualFold(t.Title, needle):
+			if byTitle == nil {
+				byTitle = t
+			}
+		case slugifyTaskRef(t.Title) == needleSlug:
+			slugMatches = append(slugMatches, *t)
+		}
+	}
+	switch {
+	case byID != nil:
+		return *byID, nil
+	case byTitle != nil:
+		return *byTitle, nil
+	case len(slugMatches) == 1:
+		return slugMatches[0], nil
+	case len(slugMatches) > 1:
+		return Task{}, fmt.Errorf("task reference %q is ambiguous (%d cards match) — pass the task id from list_tasks", needle, len(slugMatches))
+	}
+	// Unknown: list what does exist so the model can self-correct.
+	var avail []string
+	for i := range s.state.Tasks {
+		t := &s.state.Tasks[i]
+		if roomID != "" && t.RoomID != roomID {
+			continue
+		}
+		avail = append(avail, fmt.Sprintf("%s — %s (%s)", t.ID, t.Title, t.Status))
+		if len(avail) >= 8 {
+			break
+		}
+	}
+	if len(avail) == 0 {
+		return Task{}, fmt.Errorf("no tasks found in this room for reference %q", needle)
+	}
+	return Task{}, fmt.Errorf("unknown task %q — available tasks: %s", needle, strings.Join(avail, "; "))
+}
+
+// slugifyTaskRef normalizes a task title or id for loose matching.
+func slugifyTaskRef(s string) string {
+	var b strings.Builder
+	lastDash := true
+	for _, r := range strings.ToLower(strings.TrimSpace(s)) {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') {
+			b.WriteRune(r)
+			lastDash = false
+		} else if !lastDash {
+			b.WriteByte('-')
+			lastDash = true
+		}
+	}
+	return strings.Trim(b.String(), "-")
+}
+
+// ClaimTask moves a todo/backlog card to in_progress and stamps the claimer.
+// claim_task used to write to the SQLite tasks table, which the app never
+// populates (tasks live in the workspace JSON), so every claim errored out.
+func (s *Store) ClaimTask(taskID, agentName string) (Task, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for i := range s.state.Tasks {
+		t := &s.state.Tasks[i]
+		if t.ID != taskID {
+			continue
+		}
+		if t.Status != "todo" && t.Status != "backlog" {
+			return *t, fmt.Errorf("task cannot be claimed from status %q", t.Status)
+		}
+		for _, depID := range t.Dependencies {
+			for _, d := range s.state.Tasks {
+				if d.ID == depID && d.Status != "done" {
+					return *t, fmt.Errorf("task is blocked by incomplete dependency %q", depID)
+				}
+			}
+		}
+		previous := append([]Task(nil), s.state.Tasks...)
+		if strings.TrimSpace(agentName) != "" {
+			t.AgentName = strings.TrimSpace(agentName)
+		}
+		t.Status = "in_progress"
+		t.UpdatedAt = time.Now().UTC()
+		if err := s.save(); err != nil {
+			s.state.Tasks = previous
+			return Task{}, err
+		}
+		return *t, nil
+	}
+	return Task{}, fmt.Errorf("unknown task id %q", taskID)
+}
+
 func (s *Store) CreateRun(run AgentRun) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -2403,11 +2545,16 @@ func (s *Store) FinishRun(run AgentRun) error {
 			s.state.Tasks[taskIndex].UpdatedAt = run.EndedAt
 			switch run.Status {
 			case "completed":
-				// Visible Kanban work moves to Review gate; hidden chat threads
-				// must return to todo so the next prompt can reuse the thread.
+				// Visible Kanban work moves to the Review gate — but never
+				// backwards: finish_task may already have closed the card
+				// (done/cancelled) while the run was wrapping up, and
+				// overwriting that here silently reopened finished work as
+				// "review" the moment the run reported completed. Hidden chat
+				// threads must return to todo so the next prompt can reuse the
+				// thread.
 				if s.state.Tasks[taskIndex].Hidden {
 					s.state.Tasks[taskIndex].Status = "todo"
-				} else {
+				} else if st := s.state.Tasks[taskIndex].Status; st != "done" && st != "cancelled" {
 					s.state.Tasks[taskIndex].Status = "review"
 				}
 			case "paused":

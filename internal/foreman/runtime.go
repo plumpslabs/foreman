@@ -38,14 +38,20 @@ type Runtime struct {
 	// watchdogStop halts the background heartbeat watchdog.
 	watchdogStop chan struct{}
 	stopOnce     sync.Once
+	// watchdogNotice rate-limits the chat notice for stalled agents: the
+	// watchdog ticks every 10s and would otherwise spam the room for as long
+	// as the stall lasts.
+	watchdogMu     sync.Mutex
+	watchdogNotice map[string]time.Time
 }
 
 func NewRuntime(st *Store) *Runtime {
 	rt := &Runtime{
-		store:        st,
-		engine:       NewADKEngine(st),
-		active:       map[string]*activeRun{},
-		watchdogStop: make(chan struct{}),
+		store:          st,
+		engine:         NewADKEngine(st),
+		active:         map[string]*activeRun{},
+		watchdogStop:   make(chan struct{}),
+		watchdogNotice: map[string]time.Time{},
 	}
 	// Wake queued spawned/review tasks the moment they are enqueued, instead of
 	// waiting for another run to finish. EnqueueAutoStart fires this hook.
@@ -75,6 +81,7 @@ func (rt *Runtime) startWatchdog() {
 			if rt.store == nil || rt.store.DB() == nil {
 				continue
 			}
+			rt.reapStaleRuns()
 			for _, room := range rt.store.Snapshot().Rooms {
 				stalled, err := rt.store.DB().CheckStalledAgents(room.ID, 45*time.Second)
 				if err != nil || len(stalled) == 0 {
@@ -88,10 +95,59 @@ func (rt *Runtime) startWatchdog() {
 					_ = rt.store.RecordActivity(room.ID, "Watchdog", "watchdog.stalled",
 						fmt.Sprintf("⚠️ Heartbeat alert: Agent @%s stalled (>45s without heartbeat). Supervisor @%s notified.", agent, supervisor),
 						nil)
+					// The activity feed alone kept the stall invisible in the
+					// room while the live bubble just sat there, unexplained.
+					// One chat notice per agent per 10 minutes: the ticker
+					// would otherwise repeat it every 10 seconds.
+					if rt.shouldNotifyStall(room.ID, agent) {
+						_ = rt.store.AppendRoomNotice(room.ID, agent, "watchdog.stalled",
+							fmt.Sprintf("⚠️ @%s stalled (>45s without heartbeat) — the run may be stuck. Supervisor @%s notified; use Stop and resend a narrower prompt if it does not recover.", agent, supervisor))
+					}
 				}
 			}
 		}
 	}()
+}
+
+// shouldNotifyStall rate-limits the per-agent stall notice.
+func (rt *Runtime) shouldNotifyStall(roomID, agent string) bool {
+	key := roomID + "/" + agent
+	rt.watchdogMu.Lock()
+	defer rt.watchdogMu.Unlock()
+	if last, ok := rt.watchdogNotice[key]; ok && time.Since(last) < 10*time.Minute {
+		return false
+	}
+	rt.watchdogNotice[key] = time.Now()
+	return true
+}
+
+// reapStaleRuns closes runs whose goroutine died without FinishRun. They used
+// to stay "running" until the next process restart (the only other reaper),
+// which left the live turn bubble pinned in the chat forever. The run's own
+// deadline is the source of truth: past MaxExecutionSeconds plus a grace
+// period it cannot still be making progress. FinishRun is idempotent — if the
+// run recovered meanwhile, the late FinishRun from the goroutine no-ops.
+func (rt *Runtime) reapStaleRuns() {
+	settings := rt.store.Snapshot().Settings
+	if settings.MaxExecutionSeconds <= 0 {
+		return
+	}
+	cutoff := time.Now().Add(-time.Duration(settings.MaxExecutionSeconds+120) * time.Second)
+	for _, run := range rt.store.Snapshot().Runs {
+		if run.Status != "running" || !run.StartedAt.Before(cutoff) {
+			continue
+		}
+		reaped := run
+		reaped.Status = "timed_out"
+		reaped.Error = "run exceeded its execution deadline without finishing; closed by the watchdog"
+		reaped.EndedAt = time.Now().UTC()
+		if err := rt.store.FinishRun(reaped); err != nil {
+			continue
+		}
+		_ = rt.store.AppendRoomNotice(run.RoomID, "", "run.timed_out",
+			"⏱️ A run went silent past its execution deadline and was closed automatically. Its card moved back to Backlog — send a narrower prompt to continue.")
+		slog.Warn("reaped stale run", "room", run.RoomID, "task", run.TaskID, "started", run.StartedAt)
+	}
 }
 
 // SetEngine swaps the bridge engine; used by tests to inject a fake engine.
@@ -290,8 +346,13 @@ func (rt *Runtime) execute(ctx context.Context, control *RunControl, run AgentRu
 	if recent := rt.store.RoomRecentContext(room.ID); recent != "" {
 		prompt += "\n\n## Recent room conversation\n\n" + recent
 	}
-	_ = rt.store.AppendRoomNotice(room.ID, task.AgentName, "run.started",
-		fmt.Sprintf("🚀 @%s started working on: %s", task.AgentName, task.Title))
+	// Hidden chat runs get no "started" chip: their title is just the first
+	// lines of the user's own message, so every prompt used to echo itself
+	// back as a work notice. The live turn bubble already shows progress.
+	if !task.Hidden {
+		_ = rt.store.AppendRoomNotice(room.ID, task.AgentName, "run.started",
+			fmt.Sprintf("🚀 @%s started working on: %s", task.AgentName, task.Title))
+	}
 	slog.Info("run started", "room", room.ID[:8], "task", task.ID[:8], "agent", task.AgentName)
 	snapshot := rt.store.Snapshot()
 	primaryModel, fallbackModels := resolveModelChain(config, team, task)
@@ -437,8 +498,11 @@ func (rt *Runtime) execute(ctx context.Context, control *RunControl, run AgentRu
 	}
 	final := finish(result.Status, result.Message, nil, result.Tokens, result.CostUSD)
 	slog.Info("run finished", "room", room.ID[:8], "task", task.ID[:8], "status", final.Status, "tokens", final.Tokens, "cost", final.CostUSD)
-	if task.Hidden && final.Result != "" {
-		_ = rt.store.AppendAgentReply(room.ID, task.AgentName, final.Result)
+	if task.Hidden && isInformativeResult(final.Result) {
+		// The ```question fence already became a question card above; posting
+		// the raw fence as well showed the question twice in the bubble, and
+		// the default placeholder used to be posted as a bubble at all.
+		_ = rt.store.AppendAgentReply(room.ID, task.AgentName, stripQuestionBlocks(final.Result))
 	} else if !task.Hidden {
 		statusEmoji := "✅"
 		if result.Status == "failed" || result.Status == "timed_out" || result.Status == "cancelled" {
@@ -451,8 +515,9 @@ func (rt *Runtime) execute(ctx context.Context, control *RunControl, run AgentRu
 		// record and the Artifacts tab. To the team (and the human) the work
 		// looked like it vanished the moment it completed, so the report is
 		// posted back into the thread it was assigned from.
-		if result.Status == "completed" && isInformativeResult(result.Message) {
-			_ = rt.store.AppendAgentReply(room.ID, task.AgentName, delegatedResultMessage(task, result.Message))
+		report := strings.TrimSpace(stripQuestionBlocks(result.Message))
+		if result.Status == "completed" && isInformativeResult(report) {
+			_ = rt.store.AppendAgentReply(room.ID, task.AgentName, delegatedResultMessage(task, report))
 		}
 	}
 	return final
@@ -523,9 +588,39 @@ func parseAgentQuestions(message string) []AgentQuestion {
 		if prompt == "" {
 			continue
 		}
+		// Always a slice, never nil: a nil Options serialized as
+		// "options": null and crashed the dashboard's question card render
+		// (the card maps over options with no null guard).
+		if options == nil {
+			options = []string{}
+		}
 		questions = append(questions, AgentQuestion{Prompt: prompt, Options: options})
 	}
 	return questions
+}
+
+// stripQuestionBlocks removes fenced ```question blocks from a reply. The
+// block is parsed into a question card before the reply is posted, so leaving
+// it in the text showed the question twice — once as raw code, once as the
+// card the human is supposed to answer.
+func stripQuestionBlocks(message string) string {
+	var b strings.Builder
+	rest := message
+	for {
+		start := strings.Index(rest, "```question")
+		if start < 0 {
+			b.WriteString(rest)
+			return strings.TrimSpace(b.String())
+		}
+		b.WriteString(rest[:start])
+		body := rest[start+len("```question"):]
+		end := strings.Index(body, "```")
+		if end < 0 {
+			// Unterminated fence: everything after it is the broken block.
+			return strings.TrimSpace(b.String())
+		}
+		rest = strings.TrimPrefix(body[end+3:], "\n")
+	}
 }
 
 func buildRunPrompt(room Room, task Task, team *Team, skills string, allowedTools []string) string {
@@ -1107,14 +1202,14 @@ var autonomousToolDocs = []struct{ name, doc string }{
 	{"create_task", "create a task card on Kanban (assigns to you if agent_name omitted)."},
 	{"update_task", "move a task card (todo/in_progress/review/blocked/done/cancelled) or edit its title/description/priority/effort."},
 	{"claim_task", "claim an open task card atomically."},
-	{"list_tasks", "list current tasks on the board."},
+	{"list_tasks", "list current tasks on the board (room_id accepts the room id or its display name); returns id, title, status and agent for every card."},
 	{"delete_task", "delete a task card."},
-	{"finish_task", "MUST call this when finishing a task to record results, changed files, and evidence! Never just say done in chat without calling finish_task."},
+	{"finish_task", "MUST call this when finishing a task to record results, changed files, and evidence! Pass task_id as the card id or its exact title (from list_tasks). status: done, review, or blocked (blocked on a Review card requests rework). Never just say done in chat without calling finish_task."},
 	{"spawn_agent", "delegate work to a teammate agent (creates a Kanban task for them)."},
 	{"request_spawn", "ask the lead/supervisor to spawn a teammate (workers only)."},
 	{"create_plan", "save plan checklist and diagram nodes/edges to the Plan tab."},
 	{"delete_plan", "remove a saved plan."},
-	{"send_message", "message teammates in mailbox."},
+	{"send_message", "post a message in the room chat (address a teammate with @Name)."},
 	{"ask_human", "if you encounter ambiguity or require confirmation, do NOT make assumptions—call ask_human, then finish with what you know: the human's decision arrives later as a follow-up message in this room. Set severity (info|warning|blocker) so it is triaged correctly."},
 	{"escalate", "report blockers to supervisor. Set severity (info|warning|blocker); blocker halts, warning needs a decision soon, info is FYI."},
 	{"run_checks", "run test/lint commands (only available when project commands are allowed)."},
