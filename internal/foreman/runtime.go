@@ -306,12 +306,13 @@ func (rt *Runtime) execute(ctx context.Context, control *RunControl, run AgentRu
 	attemptsUsed := 0
 
 	// Model chain cycles across attempts so a rate-limited primary model is not
-	// retried with itself: attempt 0 uses the primary, attempt 1 the first
-	// fallback, and so on, wrapping around.
+	// retried with itself: attempt 0 uses the primary, each rotation moves to
+	// the next model and wraps around.
 	modelChain := append([]string{primaryModel}, fallbackModels...)
 	if len(modelChain) == 0 || modelChain[0] == "" {
 		modelChain = []string{config.DefaultModel}
 	}
+	picker := newRetryPicker(modelChain, maxRetries)
 
 	for ; attempt <= maxRetries; attempt++ {
 		if attempt > 0 {
@@ -324,11 +325,20 @@ func (rt *Runtime) execute(ctx context.Context, control *RunControl, run AgentRu
 			time.Sleep(backoff)
 		}
 
-		// Rotate to the next model in the chain on every retry.
-		modelForAttempt := modelChain[attempt%len(modelChain)]
-		if attempt > 0 && modelForAttempt != primaryModel {
-			_ = rt.store.AppendRoomNotice(room.ID, task.AgentName, "run.model_escalate",
-				fmt.Sprintf("🔁 Retry %d using model %s", attempt, modelForAttempt))
+		// A transient failure (malformed tool-call JSON, empty output) is a
+		// sampling glitch, not a model-capability problem, so the picker
+		// re-samples the SAME model first — but only while there is budget
+		// left to rotate to another model afterwards. Availability failures
+		// (rate limit, overload) rotate immediately, as before.
+		modelForAttempt, resampled := picker.model(attempt, isTransientModelError(lastErr))
+		if attempt > 0 {
+			if resampled {
+				_ = rt.store.AppendRoomNotice(room.ID, task.AgentName, "run.retry_same_model",
+					fmt.Sprintf("🔁 Retry %d re-sampling %s (the previous response had malformed output)", attempt, modelForAttempt))
+			} else {
+				_ = rt.store.AppendRoomNotice(room.ID, task.AgentName, "run.model_escalate",
+					fmt.Sprintf("🔁 Retry %d using model %s", attempt, modelForAttempt))
+			}
 		}
 
 		req := EngineRequest{
@@ -889,6 +899,111 @@ func conversationID(roomID string, task Task) string {
 // backoffForAttempt returns how long to wait before retrying a failed run. It
 // honors a "Retry-After" hint in the provider error when present, otherwise it
 // backs off exponentially (2s, 4s, 8s, ...) capped at 30s.
+// transientMarkers flag a *malformed or empty model response*: the model
+// answered, but the payload could not be parsed into a tool call (or contained
+// nothing at all). This is a sampling/streaming glitch on the provider side
+// and a re-sample of the same model usually fixes it — there is no reason to
+// burn the fallback chain on the first retry.
+var transientMarkers = []string{
+	"parse function call args",
+	"parse function call",
+	"response included no output items",
+	"response output did not contain text or tool content",
+	"openai: empty response",
+	"openai: response failed",
+	"unexpected end of json input",
+	"unexpected eof",
+	"invalid character",
+	"unterminated string",
+}
+
+// availabilityMarkers describe *capacity/credential* failures: the model never
+// really answered, so re-sampling the same model would just fail again. These
+// always rotate through the chain (the whole point of the chain is that a
+// rate-limited primary is not retried with itself).
+var availabilityMarkers = []string{
+	"rate limit",
+	"429",
+	"unauthorized",
+	"quota",
+	"overloaded",
+	"529",
+	"connection refused",
+	"i/o timeout",
+	"model not found",
+	"503",
+	"context deadline exceeded",
+}
+
+// isTransientModelError reports whether err is a malformed/empty response
+// worth re-sampling on the same model. Availability and cancellation errors
+// are explicitly excluded so they keep rotating (or abort) as before.
+func isTransientModelError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	for _, m := range availabilityMarkers {
+		if strings.Contains(msg, m) {
+			return false
+		}
+	}
+	for _, m := range transientMarkers {
+		if strings.Contains(msg, m) {
+			return true
+		}
+	}
+	return false
+}
+
+// retryPicker picks the model for each attempt of a run and carries the
+// bookkeeping across attempts. Two independent counters matter:
+//
+//   - rotations: how many times the chain has been advanced. Keying rotation
+//     off this instead of the attempt number is what keeps the chain aligned
+//     when an attempt deliberately stays on the same model.
+//   - transientRetries: how many same-model re-samples have been spent, so a
+//     persistently malformed model can never be re-sampled forever.
+type retryPicker struct {
+	chain            []string
+	maxRetries       int
+	rotations        int
+	transientRetries int
+}
+
+func newRetryPicker(chain []string, maxRetries int) *retryPicker {
+	return &retryPicker{chain: chain, maxRetries: maxRetries}
+}
+
+// model returns the model for the given attempt (0 = first try) and reports
+// whether this attempt is a same-model re-sample rather than a rotation.
+//
+//   - attempt 0: the primary model.
+//   - transient failure (malformed tool-call args, empty output): the fault is
+//     sampling, not the model, so re-sample the SAME model — but only while
+//     there is still budget left to rotate to another model afterwards. With a
+//     single retry available that retry is spent on the rotation instead, so
+//     one bad sample can never use up the run's only fallback.
+//   - everything else (rate limit, overload, repeated failure): rotate, which
+//     is the pre-existing behaviour a rate-limited primary depends on.
+func (p *retryPicker) model(attempt int, transient bool) (string, bool) {
+	if len(p.chain) == 0 {
+		return "", false
+	}
+	if attempt <= 0 {
+		return p.chain[0], false
+	}
+	if transient && p.transientRetries == 0 && attempt < p.maxRetries {
+		p.transientRetries++
+		return p.chain[p.rotations%len(p.chain)], true
+	}
+	p.rotations++
+	return p.chain[p.rotations%len(p.chain)], false
+}
+
 func backoffForAttempt(err error, attempt int) time.Duration {
 	if attempt < 1 {
 		attempt = 1

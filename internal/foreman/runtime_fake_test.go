@@ -2,6 +2,7 @@ package foreman
 
 import (
 	"context"
+	"sync"
 	"testing"
 	"time"
 
@@ -9,16 +10,29 @@ import (
 )
 
 type fakeEngine struct {
+	mu       sync.Mutex
 	results  []EngineResult
 	errs     []error
 	emit     []EngineEvent
+	models   []string // model requested on each call, in order
 	calls    int
 	panicOn  bool
 	panicReq *EngineRequest
 }
 
+// modelCalls returns the models requested so far, in order.
+func (f *fakeEngine) modelCalls() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.models...)
+}
+
 func (f *fakeEngine) RunControlled(ctx context.Context, req EngineRequest, emit func(EngineEvent), control *RunControl) (EngineResult, error) {
+	f.mu.Lock()
 	f.calls++
+	f.models = append(f.models, req.Model)
+	calls := f.calls
+	f.mu.Unlock()
 	if f.panicOn {
 		f.panicReq = &req
 		panic("fake engine panic")
@@ -32,7 +46,7 @@ func (f *fakeEngine) RunControlled(ctx context.Context, req EngineRequest, emit 
 	}
 	res := EngineResult{Status: "completed", Message: "done"}
 	if len(f.results) > 0 {
-		i := f.calls - 1
+		i := calls - 1
 		if i >= len(f.results) {
 			i = len(f.results) - 1
 		}
@@ -40,7 +54,7 @@ func (f *fakeEngine) RunControlled(ctx context.Context, req EngineRequest, emit 
 	}
 	var err error
 	if len(f.errs) > 0 {
-		i := f.calls - 1
+		i := calls - 1
 		if i >= len(f.errs) {
 			i = len(f.errs) - 1
 		}

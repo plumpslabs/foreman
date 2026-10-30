@@ -2405,6 +2405,15 @@ export function SettingsPage({ state, notify, refresh }) {
                 <label>Max retries</label>
                 <input type="number" min="0" max="5" value={policy.maxRetries}
                   onInput={(e) => setField('maxRetries', e.currentTarget.value, true)} />
+                <div class="md-hint">
+                  0 uses the server default (3). A malformed model response is re-sampled on the same
+                  model first; rate limits rotate to the next fallback.
+                </div>
+                {Number(policy.maxRetries) === 1 ? (
+                  <div class="md-hint" style="color:#ffce9e">
+                    Only 1 retry — a second glitch blocks the run. Use 2 or more.
+                  </div>
+                ) : null}
               </div>
               <div class="field">
                 <label>Action rounds per run</label>
