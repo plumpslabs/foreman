@@ -402,7 +402,30 @@ img { max-width: 100%; display: block; }
   font-size: 13px;
   line-height: 1.45;
   color: #d1dde8;
+  /* Long tool lines are clipped by .chat-scroll's overflow-x:hidden with no
+     ellipsis of their own — keep them on one line and fade with an ellipsis. */
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
+.notice-time { color: var(--muted); opacity: 0.75; }
+/* User messages are plain text: without pre-wrap every newline they typed
+   collapsed into one run-on line. */
+.bubble.user-bubble { white-space: pre-wrap; }
+/* Reply context above a bubble (an answer linked to its question). */
+.msg-context {
+  font-size: 11px;
+  color: var(--muted);
+  margin: 2px 0 4px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.paused-bubble { opacity: 0.75; border-style: dashed; }
+/* Agent prose: honour the line breaks agents write (single newlines are
+   meaningful in reports); spaces still collapse. */
+.md-p { white-space: pre-line; }
 .live-elapsed {
   margin-left: auto;
   font-size: 11px;

@@ -215,7 +215,7 @@ func TestRuntimeDelegatedResultPostedToChat(t *testing.T) {
 	if reply == "" {
 		t.Fatal("delegated task result never reached the room chat")
 	}
-	if !strings.Contains(reply, "**Result · Fix the waiting color**") {
+	if !strings.Contains(reply, "## Result · Fix the waiting color") {
 		t.Fatalf("reply is missing the task header: %q", reply)
 	}
 	if !strings.Contains(reply, "Root cause") {

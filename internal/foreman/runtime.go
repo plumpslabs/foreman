@@ -547,7 +547,9 @@ func delegatedResultMessage(task Task, report string) string {
 	if r := []rune(title); len(r) > 160 {
 		title = string(r[:160]) + "…"
 	}
-	return fmt.Sprintf("**Result · %s**\n\n%s", title, report)
+	// A structural heading, not inline bold: it reads as a block boundary in
+	// the bubble and cannot be broken by markdown emphasis inside the title.
+	return fmt.Sprintf("## Result · %s\n\n%s", title, report)
 }
 
 // parseAgentQuestions extracts fenced question blocks from an agent reply:

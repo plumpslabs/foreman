@@ -6,7 +6,7 @@ import { ChangesView, parseDiff, mergeFiles } from './diff.jsx';
 import { PlanGraph } from './plan.jsx';
 import { AgentAvatar, findAgent } from './avatar.jsx';
 
-const esc = (s) => String(s ?? '');
+const plain = (s) => String(s ?? '');
 // Priority is a canonical P0..P3 scale; legacy names are mapped so old cards
 // still render. Lower rank sorts first.
 const PRIORITY_RANK = { p0: 0, p1: 1, p2: 2, p3: 3 };
@@ -55,10 +55,10 @@ function StatCard({ label, icon, num, sub }) {
     <article class="stat">
       <div class="stat-top">
         <span class="stat-icon"><Icon name={icon} size={15} /></span>
-        <span>{esc(label)}</span>
+        <span>{plain(label)}</span>
       </div>
-      <div class="stat-num">{esc(num)}</div>
-      <div class="stat-foot">{esc(sub)}</div>
+      <div class="stat-num">{plain(num)}</div>
+      <div class="stat-foot">{plain(sub)}</div>
     </article>
   );
 }
@@ -90,16 +90,16 @@ function RoomRow({ room, onOpen, runs, onDelete, mcpServers }) {
     >
       <div class="room-symbol"><Icon name="message-square" /></div>
       <div class="room-main">
-        <div class="room-title">{esc(room.name)}</div>
-        <div class="room-sub">{esc(room.goal || 'No goal provided.')}</div>
+        <div class="room-title">{plain(room.name)}</div>
+        <div class="room-sub">{plain(room.goal || 'No goal provided.')}</div>
         <div class="room-foot">
           <span class={`runtime-dot ${runtime}`} />
           <span class={`runtime-label ${runtime}`}>
             {runtime === 'running' ? 'Running' : runtime === 'paused' ? 'Paused' : 'Idle'}
           </span>
-          <span class={`tag ${statusTag}`}>{esc(room.status)}</span>
+          <span class={`tag ${statusTag}`}>{plain(room.status)}</span>
           <span class="meta-text">{teamCount} team{teamCount === 1 ? '' : 's'} · {timeAgo(room.createdAt)}</span>
-          {mcpNames.map((n) => <span class="tag blue" key={n}>MCP · {esc(n)}</span>)}
+          {mcpNames.map((n) => <span class="tag blue" key={n}>MCP · {plain(n)}</span>)}
         </div>
       </div>
       {onDelete && (
@@ -123,16 +123,16 @@ function TemplateCard({ template, onUse, state }) {
         <div class="team-icon"><Icon name="users" size={19} /></div>
         <span class="tag">{template.agents.length} agents</span>
       </div>
-      <div class="team-name">{esc(template.name)}</div>
-      <div class="team-desc">{esc(template.purpose)}</div>
+      <div class="team-name">{plain(template.name)}</div>
+      <div class="team-desc">{plain(template.purpose)}</div>
       <div class="meta-text" style="margin-bottom:10px">
-        Main agent: <b>{esc(template.mainAgent)}</b>
+        Main agent: <b>{plain(template.mainAgent)}</b>
       </div>
       <div class="template-agents">
         {(template.agents || []).map((a) => (
-          <span class="template-agent" key={a.name} title={esc(a.role || a.name)}>
+          <span class="template-agent" key={a.name} title={plain(a.role || a.name)}>
             <AgentAvatar agent={a} name={a.name} tone={a.name === template.mainAgent ? 'green' : 'blue'} size={22} radius={5} style="font-size:9px" />
-            <span class="template-agent-name">{esc(a.name)}</span>
+            <span class="template-agent-name">{plain(a.name)}</span>
           </span>
         ))}
       </div>
@@ -156,7 +156,7 @@ function TemplateCard({ template, onUse, state }) {
         {busy ? <span class="btn-spin"><Icon name="refresh" size={14} /></span> : <Icon name="plus" size={14} />}
         {busy ? 'Mengimpor…' : 'Use this template'}
       </button>
-      {err ? <div class="template-err" style="color:var(--red);font-size:11px;margin-top:6px">{esc(err)}</div> : null}
+      {err ? <div class="template-err" style="color:var(--red);font-size:11px;margin-top:6px">{plain(err)}</div> : null}
     </article>
   );
 }
@@ -166,8 +166,8 @@ function ActivityItem({ icon, text, time }) {
     <div class="activity-item">
       <div class="activity-mark"><Icon name={icon} size={15} /></div>
       <div>
-        <div class="activity-text">{esc(text)}</div>
-        <div class="activity-time">{esc(time)}</div>
+        <div class="activity-text">{plain(text)}</div>
+        <div class="activity-time">{plain(time)}</div>
       </div>
     </div>
   );
@@ -388,7 +388,76 @@ export function RoomDetailHost({ room, state, notify, setModal, runTask, refresh
   };
   const activeRunForAgent = (agentName) => runningRuns.find((run) => agentNameForRun(run) === agentName);
   const activeAgentsCount = roomAgentsList.filter((a) => activeRunForAgent(a.name)).length;
-  const pendingQuestions = (room.questions || []).filter((q) => !q.answer);
+  // Pending questions store newest-first (the backend prepends them); render
+  // oldest-first so the stream reads in the order they were asked.
+  const pendingQuestions = (room.questions || [])
+    .filter((q) => !q.answer)
+    .slice()
+    .sort((a, b) => (Date.parse(a.createdAt) || 0) - (Date.parse(b.createdAt) || 0));
+  // Room.mainAgent does not exist on the model — resolve the lead from the
+  // invited teams instead so unattributed agent lines get a real name.
+  const roomLead = (teams || []).map((t) => t.mainAgent).find(Boolean) || 'Main agent';
+
+  // Chronology: the live turn used to be pinned after every message, so a
+  // message sent while a run was going on rendered ABOVE the run answering it.
+  // Split the stream at the earliest active run's start instead.
+  const parsedAt = (x) => Date.parse(x) || 0;
+  const sortedMessages = (room.messages || [])
+    .slice()
+    .sort((a, b) => parsedAt(a.createdAt) - parsedAt(b.createdAt));
+  const liveStart = runningRuns.length
+    ? Math.min(...runningRuns.map((r) => parsedAt(r.startedAt)))
+    : null;
+  const messagesBeforeLive = liveStart
+    ? sortedMessages.filter((m) => parsedAt(m.createdAt) < liveStart)
+    : sortedMessages;
+  const messagesDuringLive = liveStart
+    ? sortedMessages.filter((m) => parsedAt(m.createdAt) >= liveStart)
+    : [];
+
+  const renderMessage = (m) => {
+    if (m.role === 'system' || m.role === 'activity') {
+      const who = m.agentName || '';
+      const at = m.activityType || '';
+      const body = String(m.content || '');
+      const sevClass = body.includes('🛑')
+        ? 'sev-blocker'
+        : (/escalat|blocked|rework|failed/.test(at) ? 'sev-warning' : '');
+      return (
+        <div class="notice-row" key={m.id}>
+          <span class={`notice-chip ${sevClass}`}>
+            {who ? <b>{plain(who)}</b> : null}{' '}
+            {plain(m.content)}
+            <span class="notice-time"> · {timeAgo(m.createdAt)}</span>
+          </span>
+        </div>
+      );
+    }
+    const name = m.role === 'user' ? 'You' : (m.agentName || roomLead);
+    return (
+      <div class={`msg ${m.role === 'user' ? 'user' : ''}`} key={m.id}>
+        {m.role === 'user'
+          ? <div class="msg-avatar user">ME</div>
+          : <AgentAvatar agent={findAgent(state, name)} name={name} className="msg-avatar main-agent" />}
+        <div class="msg-content">
+          <div class="msg-meta">
+            <strong>{plain(name)}</strong>
+            <span>· {timeAgo(m.createdAt)}</span>
+          </div>
+          {m.metadata && m.metadata.question ? (
+            <div class="msg-context" title={plain(m.metadata.question)}>
+              ↩︎ answering: {plain(m.metadata.question)}
+            </div>
+          ) : null}
+          <div class={`bubble ${m.role === 'user' ? 'user-bubble' : ''}`}>
+            {m.role === 'user'
+              ? plain(m.content)
+              : (m.content ? <Markdown text={m.content} /> : null)}
+          </div>
+        </div>
+      </div>
+    );
+  };
 
   const chatScrollRef = useRef(null);
 
@@ -635,11 +704,11 @@ export function RoomDetailHost({ room, state, notify, setModal, runTask, refresh
           <div class="room-toolbar">
             <button class="icon-btn" onClick={onBack} aria-label="Back to rooms"><Icon name="arrow-left" /></button>
             <div style="min-width:0;flex:1">
-              <div class="room-title-large">{esc(room.name)}</div>
-              <div class="room-desc-small">{esc(room.goal || 'No goal provided.')}</div>
+              <div class="room-title-large">{plain(room.name)}</div>
+              <div class="room-desc-small">{plain(room.goal || 'No goal provided.')}</div>
               {roomMcpNames.length ? (
                 <div style="display:flex;gap:5px;flex-wrap:wrap;margin-top:6px">
-                  {roomMcpNames.map((n) => <span class="tag blue" key={n}>MCP · {esc(n)}</span>)}
+                  {roomMcpNames.map((n) => <span class="tag blue" key={n}>MCP · {plain(n)}</span>)}
                 </div>
               ) : null}
             </div>
@@ -677,7 +746,7 @@ export function RoomDetailHost({ room, state, notify, setModal, runTask, refresh
             </button>
             {approvedPanels.map((p) => (
               <button key={p.id} class={`room-tab ${tab === 'panel-' + p.id ? 'active' : ''}`} onClick={() => setTab('panel-' + p.id)}>
-                <Icon name={p.icon || 'layout'} />{esc(p.title)}
+                <Icon name={p.icon || 'layout'} />{plain(p.title)}
               </button>
             ))}
           </div>
@@ -693,56 +762,22 @@ export function RoomDetailHost({ room, state, notify, setModal, runTask, refresh
                       <div class="invite-members">
                         {teams.map((t) => (
                           <span key={t.id} class="invite-team">
-                            <b>{esc(t.name)}</b>
-                            <span>{(t.agents || []).map((a) => esc(a.name)).join(', ') || 'no members'}</span>
+                            <b>{plain(t.name)}</b>
+                            <span>{(t.agents || []).map((a) => plain(a.name)).join(', ') || 'no members'}</span>
                           </span>
                         ))}
                       </div>
                     </div>
                   </div>
                 ) : null}
-                {(room.messages || []).map((m) => {
-                  if (m.role === 'system' || m.role === 'activity') {
-                    const who = m.agentName || '';
-                    const at = m.activityType || '';
-                    const body = String(m.content || '');
-                    const sevClass = body.includes('🛑')
-                      ? 'sev-blocker'
-                      : (/escalat|blocked|rework|failed/.test(at) ? 'sev-warning' : '');
-                    return (
-                      <div class="notice-row" key={m.id}>
-                        <span class={`notice-chip ${sevClass}`}>
-                          {who ? <b>{esc(who)}</b> : null}{' '}
-                          {esc(m.content)}
-                        </span>
-                      </div>
-                    );
-                  }
-                  const name = m.role === 'user' ? 'You' : (m.agentName || room.mainAgent || 'Main agent');
-                  return (
-                    <div class={`msg ${m.role === 'user' ? 'user' : ''}`} key={m.id}>
-                      {m.role === 'user'
-                        ? <div class="msg-avatar user">ME</div>
-                        : <AgentAvatar agent={findAgent(state, name)} name={name} className="msg-avatar main-agent" />}
-                      <div class="msg-content">
-                        <div class="msg-meta">
-                          <strong>{esc(name)}</strong>
-                          <span>{m.role === 'user' ? 'You' : esc(name)} · {timeAgo(m.createdAt)}</span>
-                        </div>
-                        <div class={`bubble ${m.role === 'user' ? 'user-bubble' : ''}`}>
-                          {m.role === 'user' ? esc(m.content) : <Markdown text={m.content} />}
-                        </div>
-                      </div>
-                    </div>
-                  );
-                })}
+                {messagesBeforeLive.map(renderMessage)}
                 {!(room.messages || []).length ? (
                   <div class="empty chat-welcome">
                     <div class="chat-welcome-title">No messages yet. Describe the goal below to start this room's conversation.</div>
                     <div class="chat-welcome-actions">
                       {['Draft a plan for this room\'s goal', 'Summarize open work', 'What changed so far?'].map((s) => (
                         <button type="button" class="chip chip-add" key={s} onClick={() => setDraft(s)}>
-                          <Icon name="plus" size={11} />{esc(s)}
+                          <Icon name="plus" size={11} />{plain(s)}
                         </button>
                       ))}
                     </div>
@@ -778,21 +813,21 @@ export function RoomDetailHost({ room, state, notify, setModal, runTask, refresh
                       <AgentAvatar agent={findAgent(state, aname)} name={aname} className="msg-avatar main-agent live-pulsing-avatar" />
                       <div class="msg-content">
                         <div class="msg-meta">
-                          <strong>{esc(aname)}</strong>
+                          <strong>{plain(aname)}</strong>
                           <span class="live-tag"><span class="live-dot pulsing" /> {label}</span>
                         </div>
                         <div class="bubble live-bubble">
                           <div class="live-bubble-status">
                             <span class="live-spinner" />
-                            <span class="live-current-text">{esc(currentText)}</span>
+                            <span class="live-current-text">{plain(currentText)}</span>
                             {elapsed ? <span class="live-elapsed">{elapsed}</span> : null}
                           </div>
                           {earlierSteps.length ? (
                             <div class="live-steps-trace">
                               {earlierSteps.map((ev, idx) => (
-                                <div class="live-step-item" key={idx}>
+                                <div class="live-step-item" key={`${idx}-${ev.text}`}>
                                   <span class="live-step-dot" />
-                                  <span class="live-step-msg">{esc(ev.n > 1 ? `${ev.text} (×${ev.n})` : ev.text)}</span>
+                                  <span class="live-step-msg">{plain(ev.n > 1 ? `${ev.text} (×${ev.n})` : ev.text)}</span>
                                 </div>
                               ))}
                             </div>
@@ -810,8 +845,31 @@ export function RoomDetailHost({ room, state, notify, setModal, runTask, refresh
                   );
                 })}
 
+                {messagesDuringLive.map(renderMessage)}
+
+                {/* Paused runs used to render nothing at all: the turn just
+                    vanished from the stream with no way to understand why. */}
+                {pausedRuns.map((run) => {
+                  const aname = agentNameForRun(run);
+                  return (
+                    <div class="msg paused-run-turn" key={`paused-turn-${run.id}`}>
+                      <AgentAvatar agent={findAgent(state, aname)} name={aname} className="msg-avatar main-agent" />
+                      <div class="msg-content">
+                        <div class="msg-meta">
+                          <strong>{plain(aname)}</strong>
+                          <span class="live-tag">⏸ Paused</span>
+                        </div>
+                        <div class="bubble live-bubble paused-bubble">
+                          This run paused before finishing — its partial work is saved. Send a message in the chat
+                          to pick the thread back up.
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })}
+
                 {pendingQuestions.map((question) => (
-                  <div class="question-card">
+                  <div class="question-card" key={question.id || question.prompt}>
                     <div class="question-head" style="color:var(--orange)">
                       <Icon name="sparkles" size={15} />
                       Agent needs a decision
@@ -819,11 +877,14 @@ export function RoomDetailHost({ room, state, notify, setModal, runTask, refresh
                     <div style="font-size:12px;color:var(--orange);margin-top:4px">
                       ⚠️ Ambiguity confirmation: Agent paused execution to avoid assumption bias.
                     </div>
-                    <div class="question-prompt" style="margin-top:8px">{esc(question.prompt)}</div>
-                    {question.options.length ? (
+                    <div class="question-prompt" style="margin-top:8px">{plain(question.prompt)}</div>
+                    {/* options may be null on questions stored before the
+                        backend normalized them — that used to crash the whole
+                        room view with no error boundary. */}
+                    {(question.options || []).length ? (
                       <div class="question-options">
-                        {question.options.map((option) => (
-                          <button class="btn" onClick={() => answerQuestion(question, option)}>{esc(option)}</button>
+                        {(question.options || []).map((option) => (
+                          <button class="btn" key={option} onClick={() => answerQuestion(question, option)}>{plain(option)}</button>
                         ))}
                       </div>
                     ) : null}
@@ -854,12 +915,12 @@ export function RoomDetailHost({ room, state, notify, setModal, runTask, refresh
                       </>
                     ) : (
                       <>
-                        <div class="sdk-hint-reason">{esc(engineReason)}</div>
-                        {engineHint ? <div class="sdk-hint-hint">{esc(engineHint)}</div> : null}
+                        <div class="sdk-hint-reason">{plain(engineReason)}</div>
+                        {engineHint ? <div class="sdk-hint-hint">{plain(engineHint)}</div> : null}
                         {engineLog ? (
                           <details class="sdk-log">
                             <summary>Lihat log instalasi</summary>
-                            <pre>{esc(engineLog)}</pre>
+                            <pre>{plain(engineLog)}</pre>
                           </details>
                         ) : null}
                       </>
@@ -885,9 +946,9 @@ export function RoomDetailHost({ room, state, notify, setModal, runTask, refresh
                         : 'working';
                     const aname = agentNameForRun(run);
                     return (
-                      <span class="live-agent live-on" key={run.id} title={`${esc(aname)} · ${label}`}>
+                      <span class="live-agent live-on" key={run.id} title={`${plain(aname)} · ${label}`}>
                         <span class="live-dot" />
-                        <span class="live-agent-name">{esc(aname)}</span>
+                        <span class="live-agent-name">{plain(aname)}</span>
                         <em>{label}</em>
                       </span>
                     );
@@ -903,11 +964,11 @@ export function RoomDetailHost({ room, state, notify, setModal, runTask, refresh
                         {mentions.map((m) => (
                           <span class={`mention-badge ${m.type === 'team' ? 'team' : 'agent'}`} key={`${m.type}-${m.name}`}>
                             <Icon name={m.type === 'team' ? 'users' : 'bot'} size={11} />
-                            <span>{m.type === 'team' ? `#${esc(m.name)}` : `@${esc(m.name)}`}</span>
+                            <span>{m.type === 'team' ? `#${plain(m.name)}` : `@${plain(m.name)}`}</span>
                             <button
                               type="button"
                               class="icon-btn mention-remove"
-                              title={`Hapus mention ${esc(m.name)}`}
+                              title={`Hapus mention ${plain(m.name)}`}
                               onClick={() => removeMention(m.name, m.type)}
                             >
                               <Icon name="x" size={10} />
@@ -935,8 +996,8 @@ export function RoomDetailHost({ room, state, notify, setModal, runTask, refresh
                           {cand.type === 'team'
                             ? <span class="agent-avatar blue" style="border-radius:5px;width:20px;height:20px;font-size:9px"><Icon name="users" size={11} /></span>
                             : <AgentAvatar agent={findAgent(state, cand.name)} name={cand.name} tone="green" size={20} radius={5} style="font-size:9px" />}
-                          <span class="mention-name">{cand.type === 'team' ? `#${esc(cand.name)}` : esc(cand.name)}</span>
-                          <span class="mention-team">{esc(cand.sub || '')}</span>
+                          <span class="mention-name">{cand.type === 'team' ? `#${plain(cand.name)}` : plain(cand.name)}</span>
+                          <span class="mention-team">{plain(cand.sub || '')}</span>
                         </button>
                       ))}
                     </div>
@@ -978,13 +1039,13 @@ export function RoomDetailHost({ room, state, notify, setModal, runTask, refresh
               <div class="tab-scroll">
                 <div style="display:flex;justify-content:space-between;align-items:center">
                   <div>
-                    <div class="section-title">{roomPlan ? esc(roomPlan.title || 'Plan') : 'Task graph'}</div>
+                    <div class="section-title">{roomPlan ? plain(roomPlan.title || 'Plan') : 'Task graph'}</div>
                     <div class="section-note" style="margin-top:5px">
                       Dependencies determine when workers can be spawned. Parallel work is scheduled only when safe.
                     </div>
                   </div>
                   {roomPlan && roomPlan.tier && (
-                    <span class="tag blue" style="text-transform:uppercase">{esc(roomPlan.tier)} tier</span>
+                    <span class="tag blue" style="text-transform:uppercase">{plain(roomPlan.tier)} tier</span>
                   )}
                 </div>
 
@@ -1045,13 +1106,13 @@ export function RoomDetailHost({ room, state, notify, setModal, runTask, refresh
                       <div style="display:flex;justify-content:space-between;align-items:center">
                         <div style="display:flex;align-items:center;gap:8px">
                           <Icon name="file" size={16} />
-                          <h4 style="margin:0;font-size:15px">{esc(art.title)}</h4>
+                          <h4 style="margin:0;font-size:15px">{plain(art.title)}</h4>
                         </div>
-                        <span class="tag blue">{esc(art.type)}</span>
+                        <span class="tag blue">{plain(art.type)}</span>
                       </div>
                       {art.summary && (
                         <div style="margin-top:10px;font-size:13px;line-height:1.6">
-                          <b>Summary:</b> {esc(art.summary)}
+                          <b>Summary:</b> {plain(art.summary)}
                         </div>
                       )}
                       {art.content && (
@@ -1061,7 +1122,7 @@ export function RoomDetailHost({ room, state, notify, setModal, runTask, refresh
                       )}
                       {art.path && art.path !== '[]' && (
                         <div class="meta-text" style="margin-top:10px">
-                          Files: <code>{esc(art.path)}</code>
+                          Files: <code>{plain(art.path)}</code>
                         </div>
                       )}
                     </article>
@@ -1077,17 +1138,17 @@ export function RoomDetailHost({ room, state, notify, setModal, runTask, refresh
             return (
               <div class="room-view active">
                 <div class="tab-scroll">
-                  <div class="section-title">{esc(p.title)}</div>
-                  <div class="section-note" style="margin-top:5px">Custom Agent Panel ({esc(p.renderer)})</div>
+                  <div class="section-title">{plain(p.title)}</div>
+                  <div class="section-note" style="margin-top:5px">Custom Agent Panel ({plain(p.renderer)})</div>
                   <div class="panel" style="margin-top:16px;padding:16px">
                     {p.renderer === 'markdown' && <Markdown text={p.manifestJson || p.dataSource || 'No content.'} />}
                     {p.renderer === 'table' && (
-                      <pre style="overflow:auto;font-size:12px">{esc(p.manifestJson || p.dataSource)}</pre>
+                      <pre style="overflow:auto;font-size:12px">{plain(p.manifestJson || p.dataSource)}</pre>
                     )}
                     {p.renderer !== 'markdown' && p.renderer !== 'table' && (
                       <div>
-                        <div class="tag blue">{esc(p.renderer)} view</div>
-                        <pre style="margin-top:10px;overflow:auto">{esc(p.manifestJson || p.dataSource)}</pre>
+                        <div class="tag blue">{plain(p.renderer)} view</div>
+                        <pre style="margin-top:10px;overflow:auto">{plain(p.manifestJson || p.dataSource)}</pre>
                       </div>
                     )}
                   </div>
@@ -1110,14 +1171,14 @@ export function RoomDetailHost({ room, state, notify, setModal, runTask, refresh
                     <AgentAvatar agent={(t.agents || []).find((a) => a.name === t.mainAgent) || findAgent(state, t.mainAgent)} name={t.mainAgent} tone="green" radius={6} />
                     <div class="agent-info" style="cursor:pointer" onClick={() => addMention({ type: 'team', name: t.name })} title="Click to mention this team (#team)">
                       <div class="agent-name-row">
-                        <span class="agent-name">{esc(t.name)}</span>
+                        <span class="agent-name">{plain(t.name)}</span>
                         {idx === 0 ? (
                           <span class="member-badge main mini-tag" title="Lead Team · Default responder for unmentioned chat">Lead</span>
                         ) : (
                           <span class="member-badge secondary-lead mini-tag" title="Specialist Team">Specialist</span>
                         )}
                       </div>
-                      <div class="agent-role">Main: {esc(t.mainAgent)}</div>
+                      <div class="agent-role">Main: {plain(t.mainAgent)}</div>
                     </div>
                     {teams.length > 1 && idx !== 0 && (
                       <button class="icon-btn" title="Set as Lead Team" onClick={() => {
@@ -1164,19 +1225,19 @@ export function RoomDetailHost({ room, state, notify, setModal, runTask, refresh
                     onClick={() => {
                       addMention({ type: 'agent', name: agent.name });
                     }}
-                    title={isRunning ? `@${esc(agent.name)} is ${action}` : `Click to mention @${esc(agent.name)}`}
+                    title={isRunning ? `@${plain(agent.name)} is ${action}` : `Click to mention @${plain(agent.name)}`}
                   >
                     <AgentAvatar agent={findAgent(state, agent.name)} name={agent.name} tone={agent.isMain ? 'green' : 'blue'} size={22} radius={5} style="font-size:9.5px" />
                     <div class="agent-info">
                       <div class="agent-name-row">
-                        <span class="agent-name">{esc(agent.name)}</span>
+                        <span class="agent-name">{plain(agent.name)}</span>
                         {agent.isLead ? (
                           <span class="member-badge main mini-tag" title="Room Lead · Primary coordinator">main</span>
                         ) : agent.isMain ? (
-                          <span class="member-badge secondary-lead mini-tag" title={`${esc(agent.teamName)} Team Lead`}>lead</span>
+                          <span class="member-badge secondary-lead mini-tag" title={`${plain(agent.teamName)} Team Lead`}>lead</span>
                         ) : null}
                       </div>
-                      <div class="agent-role">{esc(agent.role ? `${agent.role} · ${agent.teamName}` : agent.teamName)}</div>
+                      <div class="agent-role">{plain(agent.role ? `${agent.role} · ${agent.teamName}` : agent.teamName)}</div>
                     </div>
                     <div class="agent-status-indicator">
                       {isRunning ? (
@@ -1214,8 +1275,8 @@ export function RoomDetailHost({ room, state, notify, setModal, runTask, refresh
             <div style="margin-top:9px">
               {roomTasks.filter((t) => t.status !== 'done').slice(0, 4).map((t) => (
                 <div class="rail-task" key={t.id}>
-                  <span style="color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{esc(t.title)}</span>
-                  <span class={`tag ${t.status === 'in_progress' ? 'blue' : ''}`} style="margin-left:auto">{esc(t.status)}</span>
+                  <span style="color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{plain(t.title)}</span>
+                  <span class={`tag ${t.status === 'in_progress' ? 'blue' : ''}`} style="margin-left:auto">{plain(t.status)}</span>
                 </div>
               ))}
               {!roomTasks.length && <div class="muted" style="font-size:11px">No tasks in this room.</div>}
@@ -1228,7 +1289,7 @@ export function RoomDetailHost({ room, state, notify, setModal, runTask, refresh
           <div class="rail-section">
             <div class="rail-title">Execution policy</div>
             <div style="display:flex;flex-wrap:wrap;gap:6px">
-              <span class="policy-chip green">{esc(settings.effortMode)} effort</span>
+              <span class="policy-chip green">{plain(settings.effortMode)} effort</span>
               <span class="policy-chip blue">Max {settings.maxConcurrentRuns} runs</span>
               <span class="policy-chip blue">Timeout {settings.maxExecutionSeconds}s</span>
               {settings.requireRunApproval
@@ -1258,8 +1319,8 @@ export function RoomDetailHost({ room, state, notify, setModal, runTask, refresh
                       <label class={`team-pick ${invited.includes(t.id) ? 'on' : ''}`}>
                         <input type="checkbox" checked={invited.includes(t.id)} onChange={() => toggleInvite(t.id)} />
                         <span class="team-pick-body">
-                          <span class="team-pick-name">{esc(t.name)}</span>
-                          <span class="team-pick-desc">Main: {esc(t.mainAgent)} · {esc(t.purpose)}</span>
+                          <span class="team-pick-name">{plain(t.name)}</span>
+                          <span class="team-pick-desc">Main: {plain(t.mainAgent)} · {plain(t.purpose)}</span>
                         </span>
                       </label>
                     ))
@@ -1288,8 +1349,8 @@ export function RoomDetailHost({ room, state, notify, setModal, runTask, refresh
             </div>
             <div class="modal-body">
               <p style="font-size:13px;color:var(--text);line-height:1.6;margin:0">
-                Team <b>{esc(kickBlock.teamName)}</b> still has work running in this room
-                (<b>{esc(agentNameForRun(kickBlock.run))}</b>). Stop the run first before removing the team.
+                Team <b>{plain(kickBlock.teamName)}</b> still has work running in this room
+                (<b>{plain(agentNameForRun(kickBlock.run))}</b>). Stop the run first before removing the team.
               </p>
             </div>
             <div class="modal-foot">
@@ -1324,17 +1385,17 @@ function Board({ roomId, tasks, runTask, setModal, refresh }) {
             <div class="board-tasks">
               {columnTasks.length
                 ? columnTasks.map((t) => (
-                  <article class={`board-task sev-${esc(t.severity || 'none')}`} onClick={() => setModal({ kind: 'task-detail', roomId, task: t })} title="Click for details">
+                  <article class={`board-task sev-${plain(t.severity || 'none')}`} onClick={() => setModal({ kind: 'task-detail', roomId, task: t })} title="Click for details">
                     <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:6px">
-                      <div class="board-task-title">{esc(t.title)}</div>
-                      {t.agentName && <span class="tag blue small">@{esc(t.agentName)}</span>}
+                      <div class="board-task-title">{plain(t.title)}</div>
+                      {t.agentName && <span class="tag blue small">@{plain(t.agentName)}</span>}
                     </div>
-                    <div class="board-task-desc">{esc(t.description || 'No description.')}</div>
+                    <div class="board-task-desc">{plain(t.description || 'No description.')}</div>
                     <div class="board-task-foot" style="margin-top:8px;flex-wrap:wrap">
                       {t.severity === 'blocker' && <span class="tag sev-badge sev-blocker">Blocker</span>}
                       {t.severity === 'warning' && <span class="tag sev-badge sev-warning">Warning</span>}
-                      <span class={`tag ${priorityColor(t.priority)}`}>{esc(priorityLabel(t.priority))}</span>
-                      <span class="tag">effort {esc(t.effort)}</span>
+                      <span class={`tag ${priorityColor(t.priority)}`}>{plain(priorityLabel(t.priority))}</span>
+                      <span class="tag">effort {plain(t.effort)}</span>
                       {t.status === 'review' && <span class="tag blue">Review</span>}
                       {t.status === 'blocked' && <span class="tag orange">Blocked</span>}
                       {t.dependencies && t.dependencies.length > 0 && <span class="tag">deps {t.dependencies.length}</span>}
@@ -1387,15 +1448,15 @@ export function TeamsPage({ state, openTeam, onTeamCreate, onUseTemplate, openTe
               <AgentAvatar agent={(t.agents || []).find((a) => a.name === t.mainAgent) || findAgent(state, t.mainAgent)} name={t.mainAgent} tone="blue" radius={6} />
               <div class="room-main">
                 <div class="room-title">
-                  {esc(t.name)}
-                  <span class="tag">{esc(t.templateId)} template</span>
+                  {plain(t.name)}
+                  <span class="tag">{plain(t.templateId)} template</span>
                 </div>
-                <div class="room-sub">{esc(t.purpose)}</div>
+                <div class="room-sub">{plain(t.purpose)}</div>
                 <div class="room-foot">
-                  <span class="meta-text">Main: {esc(t.mainAgent)} · {(t.agents || []).length} agents</span>
+                  <span class="meta-text">Main: {plain(t.mainAgent)} · {(t.agents || []).length} agents</span>
                 </div>
                 <div class="chip-row">
-                  {(t.agents || []).map((a) => <span class="chip" key={a.name}>{esc(a.name)}</span>)}
+                  {(t.agents || []).map((a) => <span class="chip" key={a.name}>{plain(a.name)}</span>)}
                 </div>
               </div>
               <span class="row-action"><Icon name="chevron-right" size={14} />Open</span>
@@ -1441,12 +1502,12 @@ export function AgentsPage({ state, openAgent, deleteAgent }) {
               <AgentAvatar agent={a} name={a.name} tone={a.requireReview ? 'orange' : 'green'} radius={6} />
               <div class="room-main">
                 <div class="room-title">
-                  {esc(a.name)}
+                  {plain(a.name)}
                   {a.requireReview ? <span class="tag orange">Requires review</span> : <span class="tag">Profile</span>}
                 </div>
-                <div class="room-sub">{esc(a.role)}</div>
+                <div class="room-sub">{plain(a.role)}</div>
                 <div class="room-foot">
-                  <span class="meta-text">{(a.tools || []).length} tools · {(a.skills || []).length} skills · {esc(a.model || 'auto model')}</span>
+                  <span class="meta-text">{(a.tools || []).length} tools · {(a.skills || []).length} skills · {plain(a.model || 'auto model')}</span>
                 </div>
               </div>
               {deleteAgent && (
@@ -1500,11 +1561,11 @@ export function SkillsPage({ state, setModal, openSkill }) {
               <div class="folder-icon"><Icon name="folder" size={20} /></div>
               <div class="skill-body">
                 <div class="skill-title">
-                  {esc(s.name)}
-                  <span class="tag">v{esc(s.version)}</span>
+                  {plain(s.name)}
+                  <span class="tag">v{plain(s.version)}</span>
                   <span class={`tag ${s.mode === 'active' ? 'green' : 'muted'}`}>{s.mode === 'active' ? 'Active' : 'Passive'}</span>
                 </div>
-                <div class="skill-desc">{esc(s.description || 'No description.')}</div>
+                <div class="skill-desc">{plain(s.description || 'No description.')}</div>
                 <div class="skill-meta">{(s.files || []).length} file{(s.files || []).length === 1 ? '' : 's'} · {(s.files || []).map((f) => f.path).slice(0, 3).join(', ')}</div>
               </div>
               <span class="row-action"><Icon name="chevron-right" size={14} />Open</span>
@@ -1537,10 +1598,10 @@ export function RunsPage({ state, cancelRun }) {
               <article class="room-row">
                 <div class={avatarClass(tone)} style="border-radius:6px"><Icon name="activity" size={14} /></div>
                 <div class="room-main">
-                  <div class="room-title">{esc(run.status)} · {esc(run.model)}{task?.hidden ? ' · chat' : ''}</div>
-                  <div class="room-sub">{esc(task ? task.title : 'Unknown task')} · {esc(run.result || run.error || 'Run executing…')}</div>
+                  <div class="room-title">{plain(run.status)} · {plain(run.model)}{task?.hidden ? ' · chat' : ''}</div>
+                  <div class="room-sub">{plain(task ? task.title : 'Unknown task')} · {plain(run.result || run.error || 'Run executing…')}</div>
                   <div class="room-foot">
-                    <span class="tag">{esc(run.provider)}</span>
+                    <span class="tag">{plain(run.provider)}</span>
                     <span class="meta-text">Started {new Date(run.startedAt).toLocaleString()} · {fmtTokens(run.tokens)} tokens · cost {fmtMoney(run.costUsd)}</span>
                   </div>
                 </div>
@@ -1624,13 +1685,13 @@ function PresetCard({ preset, configured, onOpen }) {
       onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onOpen(); } }}>
       <div class="preset-top">
         <span class="preset-mark">{providerInitials(preset.name)}</span>
-        <span class="preset-name">{esc(preset.name)}</span>
+        <span class="preset-name">{plain(preset.name)}</span>
         {configured ? <span class="tag green">Configured</span> : <span class="tag">Available</span>}
       </div>
-      <div class="preset-note">{esc(preset.note)}</div>
-      <div class="preset-url">{esc(preset.baseUrl || 'Custom endpoint')}</div>
+      <div class="preset-note">{plain(preset.note)}</div>
+      <div class="preset-url">{plain(preset.baseUrl || 'Custom endpoint')}</div>
       <div class="chip-row">
-        {preset.models.slice(0, 3).map((model) => <span class="chip">{esc(model)}</span>)}
+        {preset.models.slice(0, 3).map((model) => <span class="chip">{plain(model)}</span>)}
         {preset.models.length > 3 ? <span class="chip">+{preset.models.length - 3}</span> : null}
       </div>
     </article>
@@ -1780,7 +1841,7 @@ function ProviderModal({ initial, isNew, onClose, notify, refresh }) {
                 {suggestions.map((model) => (
                   <button type="button" class={`chip chip-add ${models.includes(model) ? 'on' : ''}`}
                     onClick={() => addModel(model)}>
-                    <Icon name="plus" size={11} />{esc(model)}
+                    <Icon name="plus" size={11} />{plain(model)}
                   </button>
                 ))}
               </div>
@@ -1801,7 +1862,7 @@ function ProviderModal({ initial, isNew, onClose, notify, refresh }) {
           {test.state !== 'idle' && (
             <div class={`test-result ${test.state === 'ok' ? 'ok' : test.state === 'error' ? 'error' : ''}`}>
               <Icon name={test.state === 'ok' ? 'check-circle' : test.state === 'error' ? 'x' : 'refresh'} size={14} />
-              <span>{esc(test.message)}</span>
+              <span>{plain(test.message)}</span>
             </div>
           )}
         </div>
@@ -1851,16 +1912,16 @@ function ProvidersTab({ state, onPreset, onEdit, onDelete, onToggle }) {
                 <span class="preset-mark">{providerInitials(provider.name)}</span>
                 <div class="provider-main">
                   <div class="provider-name">
-                    {esc(provider.name)}
-                    <span class="tag">{esc(provider.id)}</span>
+                    {plain(provider.name)}
+                    <span class="tag">{plain(provider.id)}</span>
                     {provider.enabled ? <span class="tag green">Enabled</span> : <span class="tag muted">Disabled</span>}
                     {provider.hasApiKey ? <span class="tag blue">Key saved</span> : <span class="tag orange">No key</span>}
                   </div>
-                  <div class="provider-url">{esc(provider.protocol)} · {esc(provider.baseUrl)}</div>
+                  <div class="provider-url">{plain(provider.protocol)} · {plain(provider.baseUrl)}</div>
                   <div class="chip-row">
                     {(provider.models || []).map((model, index) => (
                       <span class={`chip ${index === 0 ? 'chip-default' : ''}`}>
-                        {esc(model)}{index === 0 ? ' · default' : ''}
+                        {plain(model)}{index === 0 ? ' · default' : ''}
                       </span>
                     ))}
                   </div>
@@ -1924,7 +1985,7 @@ function EngineCard({ notify }) {  const [status, setStatus] = useState(null);
           <h3>Agent engine</h3>
           <p>
             {status
-              ? `Python ${esc(status.pythonVersion || '?')} · pip ${status.pipAvailable ? 'tersedia' : 'tidak tersedia'}`
+              ? `Python ${plain(status.pythonVersion || '?')} · pip ${status.pipAvailable ? 'tersedia' : 'tidak tersedia'}`
               : 'Memeriksa environment…'}
           </p>
         </div>
@@ -1938,11 +1999,11 @@ function EngineCard({ notify }) {  const [status, setStatus] = useState(null);
             {busy ? <span class="btn-spin"><Icon name="refresh" size={13} /></span> : <Icon name="refresh" size={13} />}
             {busy ? 'Installing…' : reason ? 'Retry' : 'Install runtime'}
           </button>
-          {reason ? <div class="md-hint" style="color:#ffce9e;margin-top:8px">{esc(reason)}</div> : null}
+          {reason ? <div class="md-hint" style="color:#ffce9e;margin-top:8px">{plain(reason)}</div> : null}
           {log ? (
             <details class="sdk-log">
               <summary>Lihat log instalasi</summary>
-              <pre>{esc(log)}</pre>
+              <pre>{plain(log)}</pre>
             </details>
           ) : null}
         </div>
@@ -2043,13 +2104,13 @@ function RoomMCPModal({ room, servers, onClose, notify, refresh }) {
               <input type="checkbox" checked={ids.includes(srv.id)} onChange={() => toggle(srv.id)} />
               <span class="team-pick-body">
                 <span class="team-pick-name">
-                  {esc(srv.name)}
+                  {plain(srv.name)}
                   {!srv.enabled ? <span class="tag muted" style="margin-left:6px">Disabled</span>
                     : st && st.state === 'ok' ? <span class="tag green" style="margin-left:6px">Connected · {st.tools} tools</span>
                     : st && st.state === 'error' ? <span class="tag orange" style="margin-left:6px">Failed</span>
                     : <span class="tag" style="margin-left:6px">Checking…</span>}
                 </span>
-                <span class="team-pick-desc">{esc(srv.type)} · {esc(srv.type === 'http' ? srv.url : srv.command)}</span>
+                <span class="team-pick-desc">{plain(srv.type)} · {plain(srv.type === 'http' ? srv.url : srv.command)}</span>
               </span>
             </label>
             );
@@ -2157,14 +2218,14 @@ function MCPCard({ state, notify, refresh }) {
             <span class="preset-mark">MCP</span>
             <div class="provider-main">
               <div class="provider-name">
-                {esc(srv.name)}
-                <span class="tag">{esc(srv.type)}</span>
+                {plain(srv.name)}
+                <span class="tag">{plain(srv.type)}</span>
                 {!srv.enabled ? <span class="tag muted">Disabled</span>
                   : status[srv.id] && status[srv.id].state === 'ok' ? <span class="tag green">Connected · {status[srv.id].tools} tools</span>
                   : status[srv.id] && status[srv.id].state === 'error' ? <span class="tag orange">Failed</span>
                   : <span class="tag">Checking…</span>}
               </div>
-              <div class="provider-url">{esc(srv.type === 'http' ? srv.url : srv.command + (srv.args && srv.args.length ? ' ' + srv.args.join(' ') : ''))}</div>
+              <div class="provider-url">{plain(srv.type === 'http' ? srv.url : srv.command + (srv.args && srv.args.length ? ' ' + srv.args.join(' ') : ''))}</div>
             </div>
             <div class="provider-actions">
               <button class="btn small" disabled={busyId === srv.id} onClick={() => test(srv)}>
@@ -2510,9 +2571,9 @@ export function SettingsPage({ state, notify, refresh }) {
               </div>
             </div>
             <div class="kv-list">
-              <div class="kv"><span>Workspace</span><code>{esc(state.projectPath)}/.foreman/workspace.json</code></div>
+              <div class="kv"><span>Workspace</span><code>{plain(state.projectPath)}/.foreman/workspace.json</code></div>
               <div class="kv"><span>Credentials</span><code>.foreman/credentials.json</code><span class="tag">0600</span></div>
-              <div class="kv"><span>Schema</span><span class="tag">v{esc(state.schemaVersion || 3)}</span></div>
+              <div class="kv"><span>Schema</span><span class="tag">v{plain(state.schemaVersion || 3)}</span></div>
             </div>
           </div>
         </div>

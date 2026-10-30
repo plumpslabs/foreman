@@ -3,7 +3,7 @@ import { api } from './api.js';
 import { Icon } from './icons.jsx';
 import { Markdown, MarkdownEditor } from './markdown.jsx';
 
-const esc = (s) => String(s ?? '');
+const plain = (s) => String(s ?? '');
 
 const TEXT_FILE = /\.(md|markdown|txt|json|ya?ml|toml|sh|bash|py|js|ts|tsx|jsx|go|css|html|xml|csv|ini|cfg|rst|adoc)$/i;
 
@@ -34,13 +34,13 @@ function Backdrop({ onClose, title, submitLabel, onSubmit, busy, children, wide 
     <div class="modal-backdrop open" onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}>
       <form class={`modal ${wide ? 'modal-lg' : ''}`} onSubmit={onSubmit}>
         <header class="modal-head">
-          <h3>{esc(title)}</h3>
+          <h3>{plain(title)}</h3>
           <button type="button" class="icon-btn" aria-label="Close" onClick={onClose}><Icon name="x" /></button>
         </header>
         <div class="modal-body">{children}</div>
         <footer class="modal-foot">
           <button type="button" class="btn" onClick={onClose}>Cancel</button>
-          <button type="submit" class="btn primary" disabled={!!busy}>{esc(submitLabel)}</button>
+          <button type="submit" class="btn primary" disabled={!!busy}>{plain(submitLabel)}</button>
         </footer>
       </form>
     </div>
@@ -128,13 +128,13 @@ function ApprovalsInbox({ approvals, onClose, notify, refresh }) {
                     <div>
                       <div style="display:flex;align-items:center;gap:6px">
                         <span class={`tag sev-badge sev-${sev(app)}`}>{SEV_LABEL[sev(app)]}</span>
-                        <span class="tag orange">{esc(app.type || 'Approval')}</span>
+                        <span class="tag orange">{plain(app.type || 'Approval')}</span>
                         <span class="meta-text">{app.createdAt ? new Date(app.createdAt).toLocaleTimeString() : ''}</span>
                       </div>
-                      <div style="font-weight:600;margin-top:6px;font-size:14px">{esc(app.description)}</div>
+                      <div style="font-weight:600;margin-top:6px;font-size:14px">{plain(app.description)}</div>
                       {app.payloadJson && app.payloadJson !== '{}' && (
                         <pre style="background:var(--bg-subtle);padding:8px;border-radius:4px;font-size:12px;margin-top:8px;overflow-x:auto">
-                          {esc(app.payloadJson)}
+                          {plain(app.payloadJson)}
                         </pre>
                       )}
                     </div>
@@ -197,8 +197,8 @@ function RoomForm({ teams, onClose, notify, refresh }) {
               <label class={`team-pick ${teamIds.includes(t.id) ? 'on' : ''}`}>
                 <input type="checkbox" checked={teamIds.includes(t.id)} onChange={() => toggleTeam(t.id)} />
                 <span class="team-pick-body">
-                  <span class="team-pick-name">{esc(t.name)}</span>
-                  <span class="team-pick-desc">{esc(t.purpose)}</span>
+                  <span class="team-pick-name">{plain(t.name)}</span>
+                  <span class="team-pick-desc">{plain(t.purpose)}</span>
                 </span>
               </label>
             ))
@@ -311,14 +311,14 @@ function TaskFormFields({ form, set, room, state, task }) {
           <label>Team</label>
           <select value={form.teamId} disabled={editing} onChange={(e) => set('teamId', e.currentTarget.value)}>
             <option value="">Room default</option>
-            {teams.map((t) => <option value={esc(t.id)}>{esc(t.name)}</option>)}
+            {teams.map((t) => <option value={plain(t.id)}>{plain(t.name)}</option>)}
           </select>
         </div>
         <div class="field">
           <label>Dependencies</label>
           <select multiple size="3" value={form.dependencies}
             onChange={(e) => set('dependencies', Array.from(e.currentTarget.selectedOptions).map((o) => o.value))}>
-            {available.map((t) => <option value={esc(t.id)}>{esc(t.title)}</option>)}
+            {available.map((t) => <option value={plain(t.id)}>{plain(t.title)}</option>)}
           </select>
         </div>
       </div>
@@ -390,13 +390,13 @@ function TaskDetail({ room, state, task, onClose, notify, refresh, onRun }) {
       <Shell class="modal modal-lg" onSubmit={editing ? save : undefined}>
         <header class="modal-head">
           <div>
-            <h3 style="margin:0">{esc(editing ? form.title || task.title : task.title)}</h3>
+            <h3 style="margin:0">{plain(editing ? form.title || task.title : task.title)}</h3>
             <div style="display:flex;gap:6px;margin-top:8px;flex-wrap:wrap">
-              <span class={`tag ${task.status === 'done' ? 'green' : task.status === 'blocked' ? 'orange' : task.status === 'review' ? 'blue' : ''}`}>{esc(task.status)}</span>
-              <span class={`tag ${priorityColor(editing ? form.priority : task.priority)}`}>priority: {esc(priorityLabel(editing ? form.priority : task.priority))}</span>
-              <span class="tag">effort: {esc(editing ? form.effort : task.effort)}</span>
-              {task.agentName && <span class="tag blue">@ {esc(task.agentName)}</span>}
-              {team && <span class="tag">team: {esc(team.name)}</span>}
+              <span class={`tag ${task.status === 'done' ? 'green' : task.status === 'blocked' ? 'orange' : task.status === 'review' ? 'blue' : ''}`}>{plain(task.status)}</span>
+              <span class={`tag ${priorityColor(editing ? form.priority : task.priority)}`}>priority: {plain(priorityLabel(editing ? form.priority : task.priority))}</span>
+              <span class="tag">effort: {plain(editing ? form.effort : task.effort)}</span>
+              {task.agentName && <span class="tag blue">@ {plain(task.agentName)}</span>}
+              {team && <span class="tag">team: {plain(team.name)}</span>}
               {task.hidden && <span class="tag">chat thread</span>}
               {task.retryCount > 0 && <span class="tag orange">rework ×{task.retryCount}</span>}
               {editing && <span class="tag orange">editing</span>}
@@ -427,7 +427,7 @@ function TaskDetail({ room, state, task, onClose, notify, refresh, onRun }) {
               <div class="field">
                 <label>Dependencies</label>
                 <div style="display:flex;flex-direction:column;gap:4px;align-items:flex-start">
-                  {depTitles.map((t) => <span class="tag" key={t}>{esc(t)}</span>)}
+                  {depTitles.map((t) => <span class="tag" key={t}>{plain(t)}</span>)}
                 </div>
               </div>
             )}
@@ -435,13 +435,13 @@ function TaskDetail({ room, state, task, onClose, notify, refresh, onRun }) {
               <div class="field">
                 <label>Evidence</label>
                 <div style="background:var(--bg-subtle);padding:10px;border-radius:6px;font-size:12px;word-break:break-word;white-space:pre-wrap">
-                  {esc(task.evidence)}
+                  {plain(task.evidence)}
                 </div>
               </div>
             )}
             <div class="notice meta-text">
               Created {task.createdAt ? new Date(task.createdAt).toLocaleString() : '—'} · Updated {task.updatedAt ? new Date(task.updatedAt).toLocaleString() : '—'}
-              · id {esc(task.id)}
+              · id {plain(task.id)}
             </div>
           </div>
         )}
@@ -631,7 +631,7 @@ function SkillImportForm({ onClose, notify, refresh }) {
           {files.map((f) => (
             <div class="file-item">
               <Icon name="file-text" size={13} />
-              <span class="file-path">{esc(f.path)}</span>
+              <span class="file-path">{plain(f.path)}</span>
               <span class="file-size">{f.content.length} B</span>
               <button type="button" class="icon-btn" aria-label="Remove"
                 onClick={() => setFiles((prev) => prev.filter((x) => x.path !== f.path))}>
@@ -685,7 +685,7 @@ function RouteAgent({ agents, current, onClose, onPick }) {
               <label class={`choice ${t.mainAgent === current ? 'selected' : ''}`}>
                 <input type="radio" name="routeAgent" checked={t.mainAgent === current}
                   onChange={() => { if (onPick) onPick(t.mainAgent); onClose(); }} />
-                <span><b>{esc(t.mainAgent)}</b><br /><small>{esc(t.purpose)}</small></span>
+                <span><b>{plain(t.mainAgent)}</b><br /><small>{plain(t.purpose)}</small></span>
               </label>
             ))
             : <span class="muted">Invite a team to this room to route messages to its agents.</span>}
@@ -713,7 +713,7 @@ function EffortPicker({ current, onClose }) {
           {options.map(([label, sub]) => (
             <label class={`choice ${String(current).toLowerCase().includes(label) ? 'selected' : ''}`}>
               <input type="radio" name="effort" checked={String(current).toLowerCase().includes(label)} readOnly />
-              <span><b>{esc(label)}</b><br /><small>{esc(sub)}</small></span>
+              <span><b>{plain(label)}</b><br /><small>{plain(sub)}</small></span>
             </label>
           ))}
         </div>

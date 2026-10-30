@@ -4,7 +4,7 @@ import { Icon } from './icons.jsx';
 import { Markdown, MarkdownEditor, STARTER_INSTRUCTIONS } from './markdown.jsx';
 import { AgentAvatar } from './avatar.jsx';
 
-const esc = (s) => String(s ?? '');
+const plain = (s) => String(s ?? '');
 
 // Preset role labels used when a role is picked from the dropdown. Kept in
 // sync with roleTypeLabel in the Go store.
@@ -138,8 +138,8 @@ function ProviderModelField({ providerId, providers, model, onChange, onProvider
       </label>
       <div class="model-picker">
         <button type="button" class="model-trigger" onClick={() => setOpen(!open)}>
-          <span class="model-badge">{esc(model || 'auto')}</span>
-          <span class="model-source">{isMulti ? `${model.split(',').length} models in chain` : esc(sourceName)}</span>
+          <span class="model-badge">{plain(model || 'auto')}</span>
+          <span class="model-source">{isMulti ? `${model.split(',').length} models in chain` : plain(sourceName)}</span>
           <span class={`model-caret ${open ? 'open' : ''}`}><Icon name="chevron-down" size={13} /></span>
         </button>
         {open && (
@@ -154,8 +154,8 @@ function ProviderModelField({ providerId, providers, model, onChange, onProvider
               {filtered.map(({ model: m, provider: p }) => (
                 <div class="model-option" key={`${p.id}-${m}`} style="display:flex;justify-content:space-between;align-items:center">
                   <div style="flex:1;cursor:pointer" onClick={() => pick(m, p)}>
-                    <span class="model-opt-name">{esc(m)}</span>
-                    <span class="model-opt-src">{esc(p.name)}</span>
+                    <span class="model-opt-name">{plain(m)}</span>
+                    <span class="model-opt-src">{plain(p.name)}</span>
                   </div>
                   {model && model !== 'auto' && !model.includes(m) ? (
                     <button type="button" class="btn small subtle" title="Add as fallback model" onClick={(e) => { e.stopPropagation(); addFallback(m); }}>
@@ -166,7 +166,7 @@ function ProviderModelField({ providerId, providers, model, onChange, onProvider
               ))}
               {ql && !filtered.some((x) => x.model.toLowerCase() === ql) && (
                 <button type="button" class="model-option custom" onClick={() => pick(q.trim(), null)}>
-                  <span class="model-opt-name">Use custom “{esc(q.trim())}”</span>
+                  <span class="model-opt-name">Use custom “{plain(q.trim())}”</span>
                 </button>
               )}
             </div>
@@ -185,7 +185,7 @@ function ProviderModelField({ providerId, providers, model, onChange, onProvider
       <div class="md-hint" style="margin-top:4px">
         {!model || model === 'auto'
           ? <span class="meta-text">This agent uses the provider's default model. (Auto fallback chain: automatically rotates across provider models on failure)</span>
-          : <span class="meta-text"><strong>Fallback chain:</strong> Models will be tried in order ({esc(model)}). If primary fails, Foreman automatically rotates to the next model.</span>}
+          : <span class="meta-text"><strong>Fallback chain:</strong> Models will be tried in order ({plain(model)}). If primary fails, Foreman automatically rotates to the next model.</span>}
       </div>
     </div>
   );
@@ -200,9 +200,9 @@ function DetailShell({ kicker, title, subtitle, tabs, tab, onTab, onBack, action
         <div style="display:flex;align-items:flex-start;gap:10px;min-width:0">
           <button class="icon-btn" onClick={onBack} aria-label="Back"><Icon name="arrow-left" /></button>
           <div style="min-width:0">
-            <div class="eyebrow">{esc(kicker)}</div>
-            <h1 class="detail-title">{esc(title)}</h1>
-            <div class="detail-sub">{esc(subtitle)}</div>
+            <div class="eyebrow">{plain(kicker)}</div>
+            <h1 class="detail-title">{plain(title)}</h1>
+            <div class="detail-sub">{plain(subtitle)}</div>
           </div>
         </div>
         <div class="detail-actions">{actions}</div>
@@ -222,9 +222,9 @@ function DetailShell({ kicker, title, subtitle, tabs, tab, onTab, onBack, action
 function Field({ label, hint, children }) {
   return (
     <div class="field">
-      <label>{esc(label)}</label>
+      <label>{plain(label)}</label>
       {children}
-      {hint ? <div class="md-hint">{esc(hint)}</div> : null}
+      {hint ? <div class="md-hint">{plain(hint)}</div> : null}
     </div>
   );
 }
@@ -405,7 +405,7 @@ export function AgentDetailPage({ agentId, state, notify, refresh, onBack }) {
             <label>Provider</label>
             <select value={form.providerId} onChange={(e) => set('providerId', e.currentTarget.value)}>
               <option value="">Auto / workspace default</option>
-              {(state.providers || []).map((p) => <option value={esc(p.id)}>{esc(p.name)}</option>)}
+              {(state.providers || []).map((p) => <option value={plain(p.id)}>{plain(p.name)}</option>)}
             </select>
           </div>
           <ProviderModelField providerId={form.providerId} providers={state.providers || []}
@@ -482,13 +482,13 @@ export function AgentDetailPage({ agentId, state, notify, refresh, onBack }) {
                       onChange={() => toggle('tools', tool.id)} />
                     <span class="tool-info">
                       <span class="tool-name">
-                        {esc(tool.label)}
-                        <code>{esc(tool.sdk)}</code>
+                        {plain(tool.label)}
+                        <code>{plain(tool.sdk)}</code>
                         <span class="tag green">Wired</span>
                         {tool.gated ? <span class="tag orange">Policy gated</span> : null}
                         {tool.optional ? <span class="tag orange">Needs SDK extras</span> : null}
                       </span>
-                      <span class="tool-desc">{esc(tool.desc)}</span>
+                      <span class="tool-desc">{plain(tool.desc)}</span>
                     </span>
                   </label>
                 ))}
@@ -516,14 +516,14 @@ export function AgentDetailPage({ agentId, state, notify, refresh, onBack }) {
                       onChange={() => toggle('skills', skill.id)} />
                     <span class="tool-info">
                       <span class="tool-name">
-                        {esc(skill.name)}
+                        {plain(skill.name)}
                         <span class={`tag ${skill.mode === 'active' ? 'green' : 'muted'}`}>
                           {skill.mode === 'active' ? 'Active' : 'Passive'}
                         </span>
-                        <span class="tag">v{esc(skill.version)}</span>
+                        <span class="tag">v{plain(skill.version)}</span>
                         {isAttached ? <span class="tag green">Attached</span> : null}
                       </span>
-                      <span class="tool-desc">{esc(skill.description || 'No description.')}</span>
+                      <span class="tool-desc">{plain(skill.description || 'No description.')}</span>
                     </span>
                   </label>
                 );
@@ -593,7 +593,7 @@ export function TeamDetailPage({ teamId, state, notify, refresh, onBack, onOpenA
     <DetailShell
       kicker="Team"
       title={form.name || 'Team'}
-      subtitle={`${esc(form.templateId)} template · ${form.agents.length} agents`}
+      subtitle={`${plain(form.templateId)} template · ${form.agents.length} agents`}
       tabs={[
         ['overview', 'Overview', 'users'],
         ['instructions', 'Instructions', 'file-text'],
@@ -629,7 +629,7 @@ export function TeamDetailPage({ teamId, state, notify, refresh, onBack, onOpenA
           <div class="field">
             <label>Main agent</label>
             <select value={form.mainAgent} onChange={(e) => set('mainAgent', e.currentTarget.value)}>
-              {form.agents.map((a) => <option value={esc(a.name)}>{esc(a.name)}</option>)}
+              {form.agents.map((a) => <option value={plain(a.name)}>{plain(a.name)}</option>)}
             </select>
           </div>
           <div class="field" style="grid-column:1/-1">
@@ -676,11 +676,11 @@ export function TeamDetailPage({ teamId, state, notify, refresh, onBack, onOpenA
                 <AgentAvatar agent={agent} name={agent.name} tone="green" radius={6} />
                 <div style="flex:1;min-width:0">
                   <div class="tool-name">
-                    <span class="agent-name-trunc" title={esc(agent.name)}>{esc(agent.name)}</span>
+                    <span class="agent-name-trunc" title={plain(agent.name)}>{plain(agent.name)}</span>
                     {agent.name === form.mainAgent ? <span class="tag green">Main agent</span> : <span class="tag">Worker</span>}
                     {agent.requireReview ? <span class="tag orange">Requires review</span> : null}
                   </div>
-                  <div class="tool-desc">{esc(agent.role)}</div>
+                  <div class="tool-desc">{plain(agent.role)}</div>
                 </div>
                 <label class="main-pick" title="Set as the team's main agent">
                   <input type="radio" name="team-main-agent" checked={agent.name === form.mainAgent}
@@ -691,7 +691,7 @@ export function TeamDetailPage({ teamId, state, notify, refresh, onBack, onOpenA
                   <Icon name="x" size={14} />
                 </button>
               </div>
-              {agent.description ? <div class="agent-detail-value">{esc(agent.description)}</div> : null}
+              {agent.description ? <div class="agent-detail-value">{plain(agent.description)}</div> : null}
               {agent.instructions ? (
                 <details class="team-agent-details">
                   <summary>Instructions</summary>
@@ -699,8 +699,8 @@ export function TeamDetailPage({ teamId, state, notify, refresh, onBack, onOpenA
                 </details>
               ) : null}
               <div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:8px">
-                {(agent.tools || []).map((t) => <span class="chip" title={esc(t)}>{esc(t)}</span>)}
-                {(agent.skills || []).map((s) => <span class="chip" title={esc(skillName(s))}>{esc(skillName(s))}</span>)}
+                {(agent.tools || []).map((t) => <span class="chip" title={plain(t)}>{plain(t)}</span>)}
+                {(agent.skills || []).map((s) => <span class="chip" title={plain(skillName(s))}>{plain(skillName(s))}</span>)}
               </div>
             </div>
           ))}
@@ -718,8 +718,8 @@ export function TeamDetailPage({ teamId, state, notify, refresh, onBack, onOpenA
                       {libraryAgents.map((a) => (
                         <button type="button" class="agent-pick-card" key={a.id} onClick={() => pickFromLibrary(a)}>
                           <AgentAvatar agent={a} name={a.name} tone="green" radius={8} />
-                          <div class="agent-pick-name" title={esc(a.name)}>{esc(a.name)}</div>
-                          <div class="agent-pick-role" title={esc(a.role)}>{esc(a.role || 'No role')}</div>
+                          <div class="agent-pick-name" title={plain(a.name)}>{plain(a.name)}</div>
+                          <div class="agent-pick-role" title={plain(a.role)}>{plain(a.role || 'No role')}</div>
                           <div class="agent-pick-meta">
                             {(a.tools || []).length} tools · {(a.skills || []).length} skills
                           </div>
@@ -801,10 +801,10 @@ export function TeamCreatePage({ state, notify, refresh, onCreated, onBack }) {
             <label class={`template-option ${templateId === t.id ? 'on' : ''}`}>
               <input type="radio" name="template" checked={templateId === t.id} onChange={() => pick(t.id)} />
               <span>
-                <b>{esc(t.name)}</b>
-                <small>{esc(t.purpose)}</small>
+                <b>{plain(t.name)}</b>
+                <small>{plain(t.purpose)}</small>
                 <span class="chip-row" style="margin-top:6px">
-                  <span class="chip">Main: {esc(t.mainAgent)}</span>
+                  <span class="chip">Main: {plain(t.mainAgent)}</span>
                   <span class="chip">{t.agents.length} agents</span>
                 </span>
               </span>
@@ -816,7 +816,7 @@ export function TeamCreatePage({ state, notify, refresh, onCreated, onBack }) {
           <div class="form-section" style="margin-top:16px">
             <div class="form-section-title">Agents in this template</div>
             <div class="chip-row">
-              {template.agents.map((a) => <span class="chip">{esc(a.name)} · {esc(a.role)}</span>)}
+              {template.agents.map((a) => <span class="chip">{plain(a.name)} · {plain(a.role)}</span>)}
             </div>
           </div>
         )}
@@ -854,7 +854,7 @@ function TreeView({ node, prefix, expanded, onToggle, selected, onSelect, onDele
             <button type="button" class={`tree-row tree-dir ${open ? 'open' : ''}`} onClick={() => onToggle(path)}>
               <Icon name="chevron-right" size={13} class="tree-caret" />
               <Icon name="folder" size={14} />
-              <span class="tree-name" title={path}>{esc(dir.name)}</span>
+              <span class="tree-name" title={path}>{plain(dir.name)}</span>
               <span class="tree-count">{dir.files.length + dir.dirs.size}</span>
             </button>
             {open && (
@@ -870,7 +870,7 @@ function TreeView({ node, prefix, expanded, onToggle, selected, onSelect, onDele
         <div class={`tree-file ${selected === file.path ? 'on' : ''}`}>
           <button type="button" class="tree-file-main" onClick={() => onSelect(file.path)} title={file.path}>
             <Icon name="file-text" size={13} />
-            <span class="tree-name">{esc(file.name)}</span>
+            <span class="tree-name">{plain(file.name)}</span>
           </button>
           <button type="button" class="tree-file-del" title={`Delete ${file.path}`}
             onClick={() => onDelete(file.path)}>

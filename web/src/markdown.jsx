@@ -7,7 +7,9 @@ import { Icon } from './icons.jsx';
 
 const SAFE_HREF = /^(https?:\/\/|\/|#|mailto:)/i;
 
-const INLINE = /(`[^`\n]+`)|(\*\*[^*\n]+\*\*)|(__[^_\n]+__)|(\*[^*\n]+\*)|(_[^_\n]+_)|(\[[^\]]+\]\([^)\s]+\))/g;
+// Bold allows a single * inside (task titles and error strings often contain
+// one) as long as it is not a closing ** and the match stays on one line.
+const INLINE = /(`[^`\n]+`)|(\*\*(?:[^*\n]|\*(?!\*))+?\*\*)|(__[^_\n]+__)|(\*[^*\n]+\*)|(_[^_\n]+_)|(\[[^\]]+\]\([^)\s]+\))/g;
 
 function inline(text, keyBase) {
   const out = [];
@@ -217,7 +219,10 @@ export function Markdown({ text, class: cls = '' }) {
     // BLOCK_START can match a line no branch above handles (e.g. a stray "|"
     // with no delimiter row after it). Emit it instead of dropping it.
     if (!buffer.length) { buffer.push(lines[i]); i += 1; }
-    blocks.push(<p key={key++} class="md-p">{inline(buffer.join(' '), `p${key}`)}</p>);
+    // Keep the source line breaks: agent reports are written with meaningful
+    // single newlines, and joining with a space flattened every one of them.
+    // .md-p is white-space:pre-line, so spaces still collapse.
+    blocks.push(<p key={key++} class="md-p">{inline(buffer.join('\n'), `p${key}`)}</p>);
   }
 
   if (!blocks.length) {
