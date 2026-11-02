@@ -88,57 +88,68 @@ function attemptBudget(settings) {
 
 /* Model chain picker bound to the connected providers. Picked models render as
    a numbered badge list — badge order is the retry order — and the popover
-   toggles models in and out until the attempt budget is full. The run calls a
-   single provider (base URL + key), so the primary badge decides which
-   provider serves the chain. */
+   toggles models in and out until the attempt budget is full.
+
+   A chain may span providers: the runtime resolves each model to the provider
+   that declares it and sends that attempt to that provider's own endpoint and
+   key. Same-named models are kept separate per provider, because the same id on
+   two endpoints is two different services. */
 function ProviderModelField({ providerId, providers, model, onChange, onProviderChange, maxAttempts }) {
   const [open, setOpen] = useState(false);
   const [q, setQ] = useState('');
-  const provider = providers.find((p) => p.id === providerId);
-  const allModels = [];
-  const providerOf = new Map();
-  for (const p of providers) {
-    for (const m of p.models || []) {
-      if (!providerOf.has(m)) providerOf.set(m, p);
-      if (!allModels.some((x) => x.model === m)) allModels.push({ model: m, provider: p });
-    }
-  }
   const chain = (model || '').split(',').map((s) => s.trim()).filter(Boolean);
   const cap = Math.max(1, maxAttempts || 1);
   const full = chain.length >= cap;
   const ql = q.trim().toLowerCase();
-  const filtered = ql
-    ? allModels.filter((x) => x.model.toLowerCase().includes(ql) || (x.provider.name || '').toLowerCase().includes(ql))
-    : allModels;
-  const sourceName = provider ? provider.name : providerId || 'workspace default';
 
-  // The primary badge decides which provider (base URL + key) serves every
-  // attempt, so keep providerId in sync with badge #1 as it changes.
+  // Resolve a model id to the provider that serves it: the agent's provider
+  // first (a hand-typed id belongs there), then whichever provider declares it.
+  const providerFor = (m) => {
+    const own = providers.find((p) => p.id === providerId);
+    const declares = (p) => (p.models || []).some((x) => x === m);
+    if (own && declares(own)) return own;
+    return providers.find((p) => p && declares(p)) || own || null;
+  };
+
+  // Ordered groups: the agent's provider first, then the rest by name.
+  const ordered = [...providers].sort((a, b) => {
+    if (a.id === providerId) return -1;
+    if (b.id === providerId) return 1;
+    return (a.name || '').localeCompare(b.name || '');
+  });
+  const groups = ordered
+    .map((p) => ({
+      provider: p,
+      models: (p.models || []).filter((m) => m && (!ql
+        || m.toLowerCase().includes(ql)
+        || (p.name || '').toLowerCase().includes(ql))),
+    }))
+    .filter((g) => g.models.length > 0);
+
+  // The primary badge decides the agent's provider field, which the runtime
+  // uses for any model no provider declares.
   const syncProvider = (next) => {
-    const p = next[0] ? providerOf.get(next[0]) : null;
+    const p = next[0] ? providerFor(next[0]) : null;
     if (p && p.id !== providerId && onProviderChange) onProviderChange(p.id);
+  };
+  const setChain = (next) => {
+    onChange(next.join(', '));
+    syncProvider(next);
   };
 
   const toggle = (m) => {
     if (chain.includes(m)) {
-      const next = chain.filter((x) => x !== m);
-      onChange(next.join(', '));
-      syncProvider(next);
+      setChain(chain.filter((x) => x !== m));
       return;
     }
     if (full) return;
-    const next = [...chain, m];
-    onChange(next.join(', '));
-    syncProvider(next);
+    setChain([...chain, m]);
     setOpen(false);
     setQ('');
   };
 
-  const remove = (m) => {
-    const next = chain.filter((x) => x !== m);
-    onChange(next.join(', '));
-    syncProvider(next);
-  };
+  const chainProviders = [...new Set(chain.map((m) => providerFor(m)?.name).filter(Boolean))];
+  const spansProviders = chainProviders.length > 1;
 
   return (
     <div class="field" style="grid-column:1/-1">
@@ -150,17 +161,26 @@ function ProviderModelField({ providerId, providers, model, onChange, onProvider
         <button type="button" class="model-trigger" onClick={() => setOpen(!open)}>
           {chain.length === 0
             ? <span class="model-badge">auto</span>
-            : chain.map((m, idx) => (
-              <span class="model-badge" key={m} title={providerOf.get(m) ? `Provider: ${providerOf.get(m).name}` : m}>
-                <span style="opacity:.55;font-weight:500">{idx + 1}.</span> {plain(m)}
-                <span
-                  onClick={(e) => { e.stopPropagation(); remove(m); }}
-                  role="button" tabIndex={-1} aria-label={`Remove ${m} from chain`}
-                  style="margin-left:6px;cursor:pointer;opacity:.7"
-                >×</span>
-              </span>
-            ))}
-          <span class="model-source">{chain.length ? `tried in order via ${plain(sourceName)}` : plain(sourceName)}</span>
+            : chain.map((m, idx) => {
+              const p = providerFor(m);
+              return (
+                <span class="model-badge" key={m} title={p ? `Provider: ${p.name}` : m}>
+                  <span style="opacity:.55;font-weight:500">{idx + 1}.</span> {plain(m)}
+                  <span
+                    onClick={(e) => { e.stopPropagation(); setChain(chain.filter((x) => x !== m)); }}
+                    role="button" tabIndex={-1} aria-label={`Remove ${m} from chain`}
+                    style="margin-left:6px;cursor:pointer;opacity:.7"
+                  >×</span>
+                </span>
+              );
+            })}
+          <span class="model-source">
+            {chain.length
+              ? (spansProviders
+                ? `tried in order via ${plain(chainProviders.join(' → '))}`
+                : `tried in order via ${plain(chainProviders[0] || 'workspace default')}`)
+              : plain(providers.find((p) => p.id === providerId)?.name || providerId || 'workspace default')}
+          </span>
           <span class={`model-caret ${open ? 'open' : ''}`}><Icon name="chevron-down" size={13} /></span>
         </button>
         {open && (
@@ -172,24 +192,49 @@ function ProviderModelField({ providerId, providers, model, onChange, onProvider
                 <span class="model-opt-name"><strong>auto</strong> (workspace & provider rotation)</span>
                 <span class="model-opt-src">{chain.length === 0 ? '✓ in chain' : 'pick to reset'}</span>
               </button>
-              {filtered.map(({ model: m, provider: p }) => {
-                const on = chain.includes(m);
-                const blocked = !on && full;
-                return (
-                  <div class="model-option" key={`${p.id}-${m}`} style="display:flex;align-items:center;gap:8px">
-                    <div style="flex:1;cursor:pointer" onClick={() => toggle(m)}>
-                      <span class="model-opt-name">{on ? '✓ ' : ''}{plain(m)}</span>
-                      <span class="model-opt-src">{plain(p.name)}</span>
-                    </div>
-                    <span class="model-opt-src">{on ? 'in chain — click to remove' : blocked ? 'attempt budget full' : '+ add to chain'}</span>
+              {groups.map(({ provider: p, models }, groupIndex) => (
+                <div key={p.id}>
+                  <div class="model-group-head">
+                    <span>{plain(p.name)}</span>
+                    <span class="model-opt-src">
+                      {p.id === providerId ? 'agent provider' : 'fallback provider'}
+                    </span>
                   </div>
-                );
-              })}
-              {ql && !filtered.some((x) => x.model.toLowerCase() === ql) && (
-                <button type="button" class="model-option custom" onClick={() => toggle(q.trim())}>
-                  <span class="model-opt-name">Add custom “{plain(q.trim())}”</span>
-                  <span class="model-opt-src">{full ? 'attempt budget full' : '+ add to chain'}</span>
-                </button>
+                  {models.map((m) => {
+                    const on = chain.includes(m);
+                    const blocked = !on && full;
+                    // The chain stores bare model ids, so the same id on two
+                    // providers is one entry. Name the provider that will
+                    // actually serve it instead of pretending otherwise.
+                    const servedBy = on ? providerFor(m) : null;
+                    const elsewhere = on && servedBy && servedBy.id !== p.id;
+                    return (
+                      <div class="model-option" key={`${p.id}-${m}`} style="display:flex;align-items:center;gap:8px">
+                        <div style="flex:1;cursor:pointer" onClick={() => toggle(m)}>
+                          <span class="model-opt-name">{on ? '✓ ' : ''}{plain(m)}</span>
+                          <span class="model-opt-src">{plain(p.name)}</span>
+                        </div>
+                        <span class="model-opt-src">
+                          {on
+                            ? (elsewhere ? `in chain — runs on ${plain(servedBy.name)}` : 'in chain — click to remove')
+                            : blocked ? 'attempt budget full' : '+ add to chain'}
+                        </span>
+                      </div>
+                    );
+                  })}
+                  {ql && (p.id === providerId || (groupIndex === 0 && !providerId))
+                    && !models.some((m) => m.toLowerCase() === ql) && (
+                    <button type="button" class="model-option custom" onClick={() => toggle(q.trim())}>
+                      <span class="model-opt-name">Add custom “{plain(q.trim())}”</span>
+                      <span class="model-opt-src">{full ? 'attempt budget full' : `+ add to ${plain(p.name)}`}</span>
+                    </button>
+                  )}
+                </div>
+              ))}
+              {groups.length === 0 && (
+                <div class="field-note" style="padding:8px 10px">
+                  No models match “{plain(q)}”. Add models in Settings → Providers first.
+                </div>
               )}
             </div>
           </div>
@@ -200,6 +245,9 @@ function ProviderModelField({ providerId, providers, model, onChange, onProvider
           ? <span class="meta-text">Auto — workspace/provider default model, with automatic rotation across the provider's models on failure.</span>
           : <span class="meta-text"><strong>Fallback chain:</strong> {chain.map(plain).join(' → ')} — tried in order across {cap} attempt{cap === 1 ? '' : 's'} (Max retries: {cap - 1}).</span>}
         {full ? <span class="meta-text"> Attempt budget full — remove a badge to swap models.</span> : null}
+        {spansProviders
+          ? <span class="meta-text"> Each model runs on the provider that declares it, with that provider's endpoint and keys — a rejected key there falls back to that provider's next account.</span>
+          : <span class="meta-text"> A model from another provider starts a fallback stage on that provider.</span>}
       </div>
     </div>
   );

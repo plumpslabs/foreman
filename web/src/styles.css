@@ -748,13 +748,19 @@ select { cursor: pointer; }
    actions on the right, and a validation line underneath when needed. */
 .key-list { display: flex; flex-direction: column; gap: 8px; margin-bottom: 10px; }
 .key-row {
-  display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: center;
+  display: grid; grid-template-columns: auto auto minmax(0, 1fr); align-items: center;
   gap: 6px 10px; padding: 9px 11px; border: 1px solid var(--line);
   border-radius: 8px; background: #15181e;
 }
 .key-row.invalid { border-color: #523030; background: #1c1618; }
 .key-toggle { display: flex; align-items: center; gap: 7px; cursor: pointer; }
 .key-toggle .tag { font-size: 9.5px; }
+/* Attempt order: accounts are tried top to bottom, so the number is part of
+   the meaning, not decoration. */
+.key-order {
+  font-size: 10px; font-weight: 700; color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
 .key-name {
   font-size: 12px; font-weight: 600; min-width: 0;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
@@ -974,6 +980,15 @@ select { cursor: pointer; }
 .model-option.custom { color: var(--accent); }
 .model-opt-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .model-opt-src { margin-left: auto; font-size: 10.5px; color: var(--muted); flex-shrink: 0; }
+/* Provider group heading inside the model popover: the chain is scoped to one
+   provider, so the section labels carry the endpoint identity. */
+.model-group-head {
+  display: flex; align-items: baseline; gap: 8px; padding: 8px 9px 3px;
+  font-size: 10px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase;
+  color: var(--muted); border-top: 1px solid var(--line); margin-top: 4px;
+}
+.model-group-head:first-of-type { border-top: 0; margin-top: 0; }
+.model-group-head .model-opt-src { font-size: 10px; font-weight: 500; letter-spacing: 0; text-transform: none; }
 
 /* Room team rail: member badges */
 .team-rail { margin-bottom: 10px; }

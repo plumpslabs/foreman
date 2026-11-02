@@ -16,6 +16,8 @@ type fakeEngine struct {
 	errs     []error
 	emit     []EngineEvent
 	models   []string // model requested on each call, in order
+	keys     []string // API key used on each call, in order
+	urls     []string // base URL used on each call, in order
 	calls    int
 	panicOn  bool
 	panicReq *EngineRequest
@@ -28,10 +30,26 @@ func (f *fakeEngine) modelCalls() []string {
 	return append([]string(nil), f.models...)
 }
 
+// urlCalls returns the base URLs used so far, in order.
+func (f *fakeEngine) urlCalls() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.urls...)
+}
+
+// keyCalls returns the API keys used so far, in order.
+func (f *fakeEngine) keyCalls() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.keys...)
+}
+
 func (f *fakeEngine) RunControlled(ctx context.Context, req EngineRequest, emit func(EngineEvent), control *RunControl) (EngineResult, error) {
 	f.mu.Lock()
 	f.calls++
 	f.models = append(f.models, req.Model)
+	f.keys = append(f.keys, req.APIKey)
+	f.urls = append(f.urls, req.BaseURL)
 	calls := f.calls
 	f.mu.Unlock()
 	if f.panicOn {

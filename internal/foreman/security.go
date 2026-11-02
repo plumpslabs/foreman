@@ -197,9 +197,13 @@ func (s *Store) loadProviderKey(projectPath, providerID, keyName string) (string
 	return credentials[credentialKey(providerID, keyName)], nil
 }
 
-// ProviderSecretForRun selects the secret to use for a provider at run time:
+// ProviderSecretForRun selects a single representative secret for a provider:
 // the first enabled named key when the provider has multiple keys, otherwise
 // the default (legacy) credential. Returns "" if nothing usable is stored.
+//
+// It is used for display/health checks ("does this provider have a key?").
+// A run does NOT use it: PrepareTaskRun builds a RunPlan with the full ordered
+// key pool so the retry loop can rotate accounts.
 func (s *Store) ProviderSecretForRun(projectPath string, config ProviderConfig) string {
 	if len(config.Keys) > 0 {
 		for _, k := range config.Keys {
@@ -324,11 +328,12 @@ func maskSecret(secret string) string {
 }
 
 // SaveProviderKey adds or updates a named API key on a provider and stores the
-// secret under "providerID|keyName" in credentials.json. When a provider has at
-// least one named key, its default (legacy) credential is ignored at run time —
-// the engine uses the first enabled named key. This lets a user attach several
-// accounts (e.g. two Zro/MoonMath keys) to one provider entry. Rotation between
-// keys is intentionally NOT handled here: it is the agent profile's job.
+// secret under "providerID|keyName" in credentials.json. This lets a user attach
+// several accounts (e.g. two Zro/MoonMath keys) to one provider entry.
+//
+// Storage only: the run-time rotation lives in the run engine, which builds an
+// ordered key pool from the enabled keys and switches accounts when one is
+// rejected (401/403) or rate-limited (429).
 func (s *Store) SaveProviderKey(providerID, keyName, secret string, enabled bool) error {
 	keyName = strings.TrimSpace(keyName)
 	if providerID == "" || keyName == "" {

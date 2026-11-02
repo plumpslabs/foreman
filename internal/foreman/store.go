@@ -2417,9 +2417,13 @@ func (s *Store) UpdateTaskDetails(taskID string, patch TaskDetailsPatch) (Task, 
 	return *task, nil
 }
 
-func (s *Store) PrepareTaskRun(taskID string) (Task, Room, *Team, ProviderConfig, string, Settings, error) {
+// PrepareTaskRun resolves everything one run needs: the task, its room and team,
+// and a RunPlan holding the provider stages (each with its own credentials and
+// models, in attempt order).
+func (s *Store) PrepareTaskRun(taskID string) (Task, Room, *Team, RunPlan, Settings, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
+	empty := RunPlan{}
 	var task *Task
 	for i := range s.state.Tasks {
 		if s.state.Tasks[i].ID == taskID {
@@ -2429,23 +2433,23 @@ func (s *Store) PrepareTaskRun(taskID string) (Task, Room, *Team, ProviderConfig
 		}
 	}
 	if task == nil {
-		return Task{}, Room{}, nil, ProviderConfig{}, "", Settings{}, fmt.Errorf("unknown task id %q", taskID)
+		return Task{}, Room{}, nil, empty, Settings{}, fmt.Errorf("unknown task id %q", taskID)
 	}
 	if task.Status != "todo" && task.Status != "blocked" && task.Status != "paused" {
-		return Task{}, Room{}, nil, ProviderConfig{}, "", Settings{}, errors.New("only todo, paused, or dependency-ready tasks can be run")
+		return Task{}, Room{}, nil, empty, Settings{}, errors.New("only todo, paused, or dependency-ready tasks can be run")
 	}
 	if task.Status == "blocked" {
-		return Task{}, Room{}, nil, ProviderConfig{}, "", Settings{}, errors.New("task is blocked")
+		return Task{}, Room{}, nil, empty, Settings{}, errors.New("task is blocked")
 	}
 	for _, depID := range task.Dependencies {
 		for _, dep := range s.state.Tasks {
 			if dep.ID == depID && dep.Status != "done" {
-				return Task{}, Room{}, nil, ProviderConfig{}, "", Settings{}, fmt.Errorf("task is blocked by incomplete dependency %q", depID)
+				return Task{}, Room{}, nil, empty, Settings{}, fmt.Errorf("task is blocked by incomplete dependency %q", depID)
 			}
 		}
 	}
 	if s.state.Settings.RequireRunApproval && !task.Approved {
-		return Task{}, Room{}, nil, ProviderConfig{}, "", Settings{}, errors.New("task requires approval before it can run")
+		return Task{}, Room{}, nil, empty, Settings{}, errors.New("task requires approval before it can be run")
 	}
 	var room *Room
 	for i := range s.state.Rooms {
@@ -2456,7 +2460,7 @@ func (s *Store) PrepareTaskRun(taskID string) (Task, Room, *Team, ProviderConfig
 		}
 	}
 	if room == nil {
-		return Task{}, Room{}, nil, ProviderConfig{}, "", Settings{}, errors.New("task's room no longer exists")
+		return Task{}, Room{}, nil, empty, Settings{}, errors.New("task's room no longer exists")
 	}
 	var team *Team
 	if task.TeamID != "" {
@@ -2524,7 +2528,7 @@ func (s *Store) PrepareTaskRun(taskID string) (Task, Room, *Team, ProviderConfig
 		}
 	}
 	if config == nil {
-		return Task{}, Room{}, nil, ProviderConfig{}, "", Settings{}, errors.New("no enabled provider is configured")
+		return Task{}, Room{}, nil, empty, Settings{}, errors.New("no enabled provider is configured")
 	}
 	// An agent may pin a model that differs from the provider default. Only
 	// the primary model goes here: a comma-separated chain used as a single
@@ -2535,20 +2539,135 @@ func (s *Store) PrepareTaskRun(taskID string) (Task, Room, *Team, ProviderConfig
 			config.DefaultModel = first
 		}
 	}
-	secret := s.ProviderSecretForRun(s.state.ProjectPath, *config)
-	if secret == "" {
-		// Fall back to the legacy default credential (covers providers that
-		// predate named keys).
-		legacy, err := s.loadProviderCredential(s.state.ProjectPath, config.ID)
-		if err != nil {
-			return Task{}, Room{}, nil, ProviderConfig{}, "", Settings{}, err
+	keys, err := s.runKeysLocked(*config)
+	if err != nil {
+		return Task{}, Room{}, nil, empty, Settings{}, err
+	}
+	if len(keys) == 0 && !config.HasAPIKey {
+		if len(config.Keys) > 0 {
+			return Task{}, Room{}, nil, empty, Settings{}, fmt.Errorf("provider %q has no enabled API key — switch one on in Settings → Providers", config.ID)
 		}
-		secret = legacy
+		return Task{}, Room{}, nil, empty, Settings{}, fmt.Errorf("provider %q has no saved API key", config.ID)
 	}
-	if !config.HasAPIKey && secret == "" {
-		return Task{}, Room{}, nil, ProviderConfig{}, "", Settings{}, fmt.Errorf("provider %q has no saved API key", config.ID)
+	primary, fallbacks := resolveModelChain(*config, team, *task)
+	modelChain := append([]string{primary}, fallbacks...)
+	if modelChain[0] == "" {
+		modelChain = []string{config.DefaultModel}
 	}
-	return *task, *room, team, *config, secret, s.state.Settings, nil
+	plan, err := s.buildRunPlan(*config, keys, modelChain)
+	if err != nil {
+		return Task{}, Room{}, nil, empty, Settings{}, err
+	}
+	return *task, *room, team, plan, s.state.Settings, nil
+}
+
+// buildRunPlan groups a model chain into per-provider stages.
+//
+// A model id is only meaningful on the endpoint that serves it: sending
+// "claude-sonnet-5" to an OpenAI-compatible base URL just 404s. The agent's own
+// provider serves the models it declares; a model declared only by another
+// provider starts a new stage on that provider, so a chain can genuinely fall
+// back across providers. Models nobody declares stay on the agent's provider —
+// that is how a hand-typed model id works today.
+//
+// Consecutive models on the same provider share one stage (one key pool).
+func (s *Store) buildRunPlan(primary ProviderConfig, primaryKeys []RunKey, modelChain []string) (RunPlan, error) {
+	stageOf := func(model string) (ProviderConfig, []RunKey, error) {
+		if providerDeclaresModel(primary, model) {
+			return primary, primaryKeys, nil
+		}
+		for _, p := range s.state.Providers {
+			if !p.Enabled || p.ID == primary.ID {
+				continue
+			}
+			if !providerDeclaresModel(p, model) {
+				continue
+			}
+			keys, err := s.runKeysLocked(p)
+			if err != nil {
+				return ProviderConfig{}, nil, err
+			}
+			if len(keys) == 0 && !p.HasAPIKey {
+				continue // provider cannot serve a run; keep looking
+			}
+			return p, keys, nil
+		}
+		// Unknown model: keep it on the primary provider, as before.
+		return primary, primaryKeys, nil
+	}
+
+	plan := RunPlan{ModelChain: modelChain}
+	for _, model := range modelChain {
+		if strings.TrimSpace(model) == "" {
+			continue
+		}
+		provider, keys, err := stageOf(model)
+		if err != nil {
+			return RunPlan{}, err
+		}
+		if n := len(plan.Stages); n > 0 && plan.Stages[n-1].Provider.ID == provider.ID {
+			plan.Stages[n-1].Models = append(plan.Stages[n-1].Models, model)
+			continue
+		}
+		plan.Stages = append(plan.Stages, RunStage{Provider: provider, Keys: keys, Models: []string{model}})
+	}
+	return plan.normalize(), nil
+}
+
+// providerDeclaresModel reports whether a provider advertises a model id.
+func providerDeclaresModel(config ProviderConfig, model string) bool {
+	model = strings.TrimSpace(model)
+	if model == "" {
+		return false
+	}
+	if strings.EqualFold(model, config.DefaultModel) {
+		return true
+	}
+	for _, m := range config.Models {
+		if strings.EqualFold(strings.TrimSpace(m), model) {
+			return true
+		}
+	}
+	return false
+}
+
+// runKeysLocked returns every usable credential for a provider, in the order
+// they should be tried. Named keys come in their configured order; a provider
+// with no usable named key falls back to the legacy default credential.
+// Disabled keys and keys with an empty stored secret are skipped, so the retry
+// loop never wastes an attempt on an account the user switched off.
+func (s *Store) runKeysLocked(config ProviderConfig) ([]RunKey, error) {
+	var keys []RunKey
+	for _, k := range config.Keys {
+		if !k.Enabled {
+			continue
+		}
+		secret, err := s.loadProviderKey(s.state.ProjectPath, config.ID, k.Name)
+		if err != nil {
+			return nil, err
+		}
+		if secret == "" {
+			continue
+		}
+		keys = append(keys, RunKey{Name: k.Name, Secret: secret})
+	}
+	if len(keys) > 0 {
+		return keys, nil
+	}
+	// A provider that HAS named accounts never falls back to the legacy
+	// credential: switching every account off must mean "do not run", not
+	// "silently use the key the user just retired".
+	if len(config.Keys) > 0 {
+		return nil, nil
+	}
+	legacy, err := s.loadProviderCredential(s.state.ProjectPath, config.ID)
+	if err != nil {
+		return nil, err
+	}
+	if legacy == "" {
+		return nil, nil
+	}
+	return []RunKey{{Name: "Default", Secret: legacy}}, nil
 }
 
 func (s *Store) MarkTaskRunning(taskID string) error {

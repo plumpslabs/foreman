@@ -375,7 +375,7 @@ func TestRequireRunApprovalHasApprovePath(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	_, _, _, _, _, _, err = st.PrepareTaskRun(task.ID)
+	_, _, _, _, _, err = st.PrepareTaskRun(task.ID)
 	if err == nil || !strings.Contains(err.Error(), "requires approval") {
 		t.Fatalf("gate should reject an unapproved task, got: %v", err)
 	}
@@ -394,7 +394,7 @@ func TestRequireRunApprovalHasApprovePath(t *testing.T) {
 	}
 
 	// The approval gate must no longer be the reason the run refuses.
-	_, _, _, _, _, _, err = st.PrepareTaskRun(task.ID)
+	_, _, _, _, _, err = st.PrepareTaskRun(task.ID)
 	if err != nil && strings.Contains(err.Error(), "requires approval") {
 		t.Fatalf("approved task still gated: %v", err)
 	}

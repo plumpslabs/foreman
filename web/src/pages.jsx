@@ -2079,7 +2079,7 @@ function ProviderModal({ initial, isNew, existingIds = [], onClose, notify, refr
 
           <div class="field">
             <div class="field-label-row">
-              <label>Default API key</label>
+              <label>Default API key <span class="meta-text" style="font-weight:400">· fallback account</span></label>
               {initial?.hasApiKey ? <span class="tag blue">Saved</span> : null}
             </div>
             <div class={`key-field ${defaultKeyInvalid ? 'invalid' : ''}`}>
@@ -2107,8 +2107,9 @@ function ProviderModal({ initial, isNew, existingIds = [], onClose, notify, refr
               </button>
             </div>
             <div class="field-note">
-              <span class="field-note-lead">Used for every run</span>
-              — Foreman sends the first enabled key and retries by switching <em>models</em>, never keys.
+              <span class="field-note-lead">Fallback account</span>
+              — used when no account below is switched on. A rejected key (401/403) is retired and the next
+              account is tried; a rate-limited key (429) is skipped for the rest of the run.
             </div>
             {keyChecks.__default && keyChecks.__default.state !== 'running' ? (
               <div class={`key-check ${keyChecks.__default.state}`}>
@@ -2136,7 +2137,7 @@ function ProviderModal({ initial, isNew, existingIds = [], onClose, notify, refr
               <>
                 {keys.length > 0 ? (
                   <div class="key-list">
-                    {keys.map((k) => {
+                    {keys.map((k, index) => {
                       const chk = keyChecks[k.name];
                       const invalid = chk && chk.state === 'error';
                       const testing = chk && chk.state === 'running';
@@ -2147,6 +2148,7 @@ function ProviderModal({ initial, isNew, existingIds = [], onClose, notify, refr
                               onChange={(e) => toggleKey(k.name, e.currentTarget.checked)} />
                             <span class={`tag ${k.enabled ? 'blue' : 'grey'}`}>{k.enabled ? 'On' : 'Off'}</span>
                           </label>
+                          <span class="key-order" title="Attempt order">{index + 1}.</span>
                           <span class="key-name" title={plain(k.name)}>{plain(k.name)}</span>
                           <div class="key-field key-field-compact">
                             <input type={revealed[k.name] ? 'text' : 'password'} readonly
@@ -2194,9 +2196,11 @@ function ProviderModal({ initial, isNew, existingIds = [], onClose, notify, refr
                   </button>
                 </div>
                 <div class="field-note">
-                  <span class="field-note-lead">One key per run</span>
-                  — Foreman uses the first enabled key and retries by switching models, never keys.
-                  Turn a key off to make the next one active.
+                  <span class="field-note-lead">Attempt order</span>
+                  — Foreman tries accounts top to bottom. When a key is rejected (401/403) it is retired and
+                  the next account is used; a rate-limited key (429) is skipped for the rest of that run.
+                  Model failures (503, overload, missing model) switch <em>models</em> instead and keep the
+                  same account. Turn an account off to drop it from the rotation.
                 </div>
               </>
             )}
@@ -2847,8 +2851,10 @@ export function SettingsPage({ state, notify, refresh }) {
                   onInput={(e) => setField('maxRetries', e.currentTarget.value, true)} />
                 <div class="md-hint">
                   0 uses the server default (3). A malformed model response is re-sampled on the same
-                  model first; rate limits rotate to the next fallback. Attempts = retries + 1, and an
-                  agent profile can chain one model per attempt (N retries N + 1 model badges).
+                  model first; a rejected key (401/403) rotates to the next account; rate limits try
+                  the next account, then the next model; overloads and missing models rotate the model.
+                  Attempts = retries + 1, raised to the number of accounts so every account is tried
+                  once. An agent profile can chain one model per attempt, across providers.
                 </div>
                 {Number(policy.maxRetries) === 1 ? (
                   <div class="md-hint" style="color:#ffce9e">

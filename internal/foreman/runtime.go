@@ -43,6 +43,18 @@ type Runtime struct {
 	// as the stall lasts.
 	watchdogMu     sync.Mutex
 	watchdogNotice map[string]time.Time
+	// sleepFn is the backoff wait. Tests replace it to keep rotation cases fast;
+	// production always uses time.Sleep.
+	sleepFn func(time.Duration)
+}
+
+// sleep waits out a retry backoff, honoring an injected test hook.
+func (rt *Runtime) sleep(d time.Duration) {
+	if rt.sleepFn != nil {
+		rt.sleepFn(d)
+		return
+	}
+	time.Sleep(d)
 }
 
 func NewRuntime(st *Store) *Runtime {
@@ -53,6 +65,7 @@ func NewRuntime(st *Store) *Runtime {
 		watchdogStop:   make(chan struct{}),
 		watchdogDone:   make(chan struct{}),
 		watchdogNotice: map[string]time.Time{},
+		sleepFn:        time.Sleep,
 	}
 	// Wake queued spawned/review tasks the moment they are enqueued, instead of
 	// waiting for another run to finish. EnqueueAutoStart fires this hook.
@@ -161,7 +174,7 @@ func (rt *Runtime) reapStaleRuns() {
 func (rt *Runtime) SetEngine(e RunEngine) { rt.engine = e }
 
 func (rt *Runtime) StartTask(parent context.Context, taskID string) (AgentRun, error) {
-	task, room, team, providerConfig, secret, settings, err := rt.store.PrepareTaskRun(taskID)
+	task, room, team, plan, settings, err := rt.store.PrepareTaskRun(taskID)
 	if err != nil {
 		return AgentRun{}, err
 	}
@@ -194,8 +207,8 @@ func (rt *Runtime) StartTask(parent context.Context, taskID string) (AgentRun, e
 		ID:        uuid.NewString(),
 		TaskID:    task.ID,
 		RoomID:    room.ID,
-		Provider:  providerConfig.ID,
-		Model:     providerConfig.DefaultModel,
+		Provider:  plan.provider().ID,
+		Model:     plan.provider().DefaultModel,
 		Status:    "running",
 		StartedAt: time.Now().UTC(),
 		Events:    []RunEvent{{ID: uuid.NewString(), Type: "status", Message: "Agent runtime started", CreatedAt: time.Now().UTC()}},
@@ -227,7 +240,7 @@ func (rt *Runtime) StartTask(parent context.Context, taskID string) (AgentRun, e
 				if finished.ID == "" {
 					finished = AgentRun{
 						ID: run.ID, TaskID: task.ID, RoomID: room.ID,
-						Provider: providerConfig.ID, Model: run.Model,
+						Provider: plan.provider().ID, Model: run.Model,
 						Status: "failed", Error: "agent panic: " + fmt.Sprint(rec),
 						StartedAt: run.StartedAt, EndedAt: time.Now().UTC(),
 					}
@@ -235,7 +248,7 @@ func (rt *Runtime) StartTask(parent context.Context, taskID string) (AgentRun, e
 				_ = rt.store.FinishRun(finished)
 			}
 		}()
-		finished = rt.execute(runCtx, control, run, task, room, team, providerConfig, secret, settings)
+		finished = rt.execute(runCtx, control, run, task, room, team, plan, settings)
 		_ = rt.store.FinishRun(finished)
 	}()
 	return run, nil
@@ -299,17 +312,20 @@ func (rt *Runtime) PauseRun(runID string) error {
 }
 
 // execute drives one OpenHands bridge run and persists its events.
-func (rt *Runtime) execute(ctx context.Context, control *RunControl, run AgentRun, task Task, room Room, team *Team, config ProviderConfig, secret string, settings Settings) AgentRun {
+func (rt *Runtime) execute(ctx context.Context, control *RunControl, run AgentRun, task Task, room Room, team *Team, plan RunPlan, settings Settings) AgentRun {
+	// Redact every credential in the plan, not just the one that happened to be
+	// active when an error was produced: a rotation can surface a later key.
+	secrets := plan.secrets()
 	finish := func(status, message string, err error, tokens int, cost float64) AgentRun {
 		run.Status, run.Result, run.EndedAt = status, message, time.Now().UTC()
 		if err != nil {
-			run.Error = safeRuntimeError(err, secret)
+			run.Error = safeRuntimeErrorMulti(err, secrets)
 		}
 		run.Tokens, run.CostUSD = &tokens, &cost
 		run.Events = append(run.Events, RunEvent{
 			ID:        uuid.NewString(),
 			Type:      status,
-			Message:   safeRuntimeError(errors.New(message), secret),
+			Message:   safeRuntimeErrorMulti(errors.New(message), secrets),
 			CreatedAt: time.Now().UTC(),
 		})
 		return run
@@ -434,7 +450,6 @@ func (rt *Runtime) execute(ctx context.Context, control *RunControl, run AgentRu
 	}
 	slog.Info("run started", "room", room.ID[:8], "task", task.ID[:8], "agent", task.AgentName)
 	snapshot := rt.store.Snapshot()
-	primaryModel, fallbackModels := resolveModelChain(config, team, task)
 
 	var result EngineResult
 	var lastErr error
@@ -442,19 +457,33 @@ func (rt *Runtime) execute(ctx context.Context, control *RunControl, run AgentRu
 	if maxRetries < 1 {
 		maxRetries = 3
 	}
+	rot := newRotation(plan)
+	attemptsAllowed := maxRetries + 1
+	// Every account and every provider stage deserves at least one attempt: a
+	// 3-key provider followed by a second provider must not stop after two
+	// attempts just because Max retries is 2.
+	if n := rot.attemptFloor(); n > attemptsAllowed {
+		attemptsAllowed = n
+	}
+
+	// Two independent rotation axes:
+	//   - model: advanced when the failure is about the model or the
+	//     provider's capacity (overload, missing model, malformed output).
+	//   - key: advanced when the failure is about the credential (401/403 or
+	//     exhausted quota). A rejected key is retired for the rest of the run.
+	// Keeping them separate is what stops a dead key from burning every model
+	// in the chain, and a rate-limited model from burning every account.
 	attempt := 0
 	attemptsUsed := 0
 
-	// Model chain cycles across attempts so a rate-limited primary model is not
-	// retried with itself: attempt 0 uses the primary, each rotation moves to
-	// the next model and wraps around.
-	modelChain := append([]string{primaryModel}, fallbackModels...)
-	if len(modelChain) == 0 || modelChain[0] == "" {
-		modelChain = []string{config.DefaultModel}
+	// Defensive: a plan with no attemptable stage can only be a configuration
+	// bug, but it must surface as a clear failure rather than an empty status.
+	if _, _, _, ok := rot.position(); !ok {
+		return finish("failed", "No usable model or provider is configured for this agent.", errors.New("run plan has no attemptable provider stage"), 0, 0)
 	}
-	picker := newRetryPicker(modelChain, maxRetries)
 
-	for ; attempt <= maxRetries; attempt++ {
+attemptLoop:
+	for ; attempt < attemptsAllowed; attempt++ {
 		if attempt > 0 {
 			backoff := backoffForAttempt(lastErr, attempt)
 			_ = rt.store.RecordActivity(room.ID, task.AgentName, "retry",
@@ -462,25 +491,83 @@ func (rt *Runtime) execute(ctx context.Context, control *RunControl, run AgentRu
 				nil)
 			_ = rt.store.AppendRoomNotice(room.ID, task.AgentName, "run.retry",
 				fmt.Sprintf("⚠️ Attempt %d failed (%v). Retrying in %v…", attempt, lastErr, backoff))
-			time.Sleep(backoff)
+			rt.sleep(backoff)
 		}
 
-		// A transient failure (malformed tool-call JSON, empty output) is a
-		// sampling glitch, not a model-capability problem, so the picker
-		// re-samples the SAME model first — but only while there is budget
-		// left to rotate to another model afterwards. Availability failures
-		// (rate limit, overload) rotate immediately, as before.
-		modelForAttempt, resampled := picker.model(attempt, isTransientModelError(lastErr))
+		// Decide which axis moves before building the request, because a
+		// credential rotation must keep the model steady (the model was never
+		// the problem) and a capacity failure must keep the account.
+		keySwitched := false
 		if attempt > 0 {
-			if resampled {
-				_ = rt.store.AppendRoomNotice(room.ID, task.AgentName, "run.retry_same_model",
-					fmt.Sprintf("🔁 Retry %d re-sampling %s (the previous response had malformed output)", attempt, modelForAttempt))
-			} else {
-				_ = rt.store.AppendRoomNotice(room.ID, task.AgentName, "run.model_escalate",
-					fmt.Sprintf("🔁 Retry %d using model %s", attempt, modelForAttempt))
+			prevStage, prevKey, prevModel := rot.current()
+			switch classifyKeyFailure(lastErr) {
+			case failureCredential:
+				// The provider rejected this key: retire it permanently.
+				rot.killCurrent()
+				if rot.allKeysRejected() {
+					// Every account is gone: further attempts can only fail, so
+					// stop now with a message the user can act on.
+					if len(plan.Stages) > 1 {
+						lastErr = errAllProviderKeysRejected(plan.keyCount())
+					} else {
+						lastErr = errAllKeysRejected(prevStage.Provider.Name, plan.keyCount())
+					}
+					_ = rt.store.AppendRoomNotice(room.ID, task.AgentName, "run.keys_exhausted", "🔑 "+lastErr.Error())
+					break attemptLoop
+				}
+				if !rot.nextKeyInStage() && !rot.nextStage() {
+					break attemptLoop
+				}
+				keySwitched = true
+				stage, key, _ := rot.current()
+				if stage.Provider.ID != prevStage.Provider.ID {
+					_ = rt.store.AppendRoomNotice(room.ID, task.AgentName, "run.provider_switch",
+						fmt.Sprintf("🔀 Account %q was rejected — falling back to %s", accountLabel(prevKey), stage.Provider.Name))
+				} else {
+					_ = rt.store.AppendRoomNotice(room.ID, task.AgentName, "run.key_switch",
+						fmt.Sprintf("🔑 Account %q was rejected — switching to %q (model stays %s)",
+							accountLabel(prevKey), accountLabel(key), prevModel))
+				}
+			case failureQuota:
+				// Quota/rate limit is per account: try another account, but keep
+				// this one available in case it recovers. With no second account
+				// the model axis takes over, because a different model may have
+				// its own quota on the same endpoint.
+				if rot.nextKeyInStage() {
+					keySwitched = true
+					_, key, _ := rot.current()
+					_ = rt.store.AppendRoomNotice(room.ID, task.AgentName, "run.key_switch",
+						fmt.Sprintf("🔑 Account %q is rate-limited — switching to %q", accountLabel(prevKey), accountLabel(key)))
+				}
+			}
+			if !keySwitched {
+				// Model axis. A malformed response re-samples the same model
+				// once before rotating, because the model itself is fine — but
+				// only while an attempt remains to rotate afterwards.
+				if isTransientModelError(lastErr) && attempt+1 < attemptsAllowed && rot.resample() {
+					_ = rt.store.AppendRoomNotice(room.ID, task.AgentName, "run.retry_same_model",
+						fmt.Sprintf("🔁 Retry %d re-sampling %s (the previous response had malformed output)", attempt, prevModel))
+				} else {
+					if !rot.nextModel() {
+						break attemptLoop
+					}
+					stage, _, model := rot.current()
+					if stage.Provider.ID != prevStage.Provider.ID {
+						_ = rt.store.AppendRoomNotice(room.ID, task.AgentName, "run.provider_switch",
+							fmt.Sprintf("🔀 %s could not serve the run — falling back to %s (%s)",
+								prevStage.Provider.Name, stage.Provider.Name, model))
+					} else {
+						_ = rt.store.AppendRoomNotice(room.ID, task.AgentName, "run.model_escalate",
+							fmt.Sprintf("🔁 Retry %d using model %s", attempt, model))
+					}
+				}
 			}
 		}
 
+		stage, key, modelForAttempt, ok := rot.position()
+		if !ok {
+			break
+		}
 		req := EngineRequest{
 			Workspace:            snapshot.ProjectPath,
 			RoomID:               room.ID,
@@ -489,11 +576,10 @@ func (rt *Runtime) execute(ctx context.Context, control *RunControl, run AgentRu
 			TriageTier:           room.TriageTier,
 			StepTimeout:          60,
 			Prompt:               prompt,
-			Protocol:             config.Protocol,
-			BaseURL:              config.BaseURL,
-			APIKey:               secret,
+			Protocol:             stage.Provider.Protocol,
+			BaseURL:              stage.Provider.BaseURL,
+			APIKey:               key.Secret,
 			Model:                modelForAttempt,
-			FallbackModels:       fallbackModels,
 			Tools:                ResolveEngineTools(agentToolIDs, settings.AllowProjectCommands),
 			AllowedTools:         agentToolIDs,
 			PersistenceDir:       filepath.Join(snapshot.ProjectPath, ".foreman", "agent-conversations"),
@@ -515,7 +601,7 @@ func (rt *Runtime) execute(ctx context.Context, control *RunControl, run AgentRu
 			if msg == "" {
 				msg = ev.Type
 			}
-			_ = rt.store.AppendRunEvent(run.ID, ev.Type, safeRuntimeError(errors.New(msg), secret))
+			_ = rt.store.AppendRunEvent(run.ID, ev.Type, safeRuntimeErrorMulti(errors.New(msg), secrets))
 		}, control)
 		attemptsUsed = attempt + 1
 
@@ -1166,14 +1252,31 @@ func humanizeFinalFailure(status string, err error, task Task, settings Settings
 }
 
 func safeRuntimeError(err error, secret string) string {
+	return safeRuntimeErrorMulti(err, []string{secret})
+}
+
+// safeRuntimeErrorMulti redacts every credential a run may have used. With key
+// rotation a single run can touch several secrets, and the error that ends the
+// run may quote any of them.
+func safeRuntimeErrorMulti(err error, secrets []string) string {
 	if err == nil {
 		return ""
 	}
 	text := err.Error()
-	if secret != "" {
-		text = strings.ReplaceAll(text, secret, "[REDACTED]")
+	for _, secret := range secrets {
+		if secret != "" {
+			text = strings.ReplaceAll(text, secret, "[REDACTED]")
+		}
 	}
 	return text
+}
+
+// accountLabel is the human name of a credential in run notices.
+func accountLabel(k RunKey) string {
+	if k.Name == "" {
+		return "Default"
+	}
+	return k.Name
 }
 
 func resolveModelChain(config ProviderConfig, team *Team, task Task) (string, []string) {
