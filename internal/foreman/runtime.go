@@ -359,7 +359,7 @@ func (rt *Runtime) execute(ctx context.Context, control *RunControl, run AgentRu
 	}
 	coordinatorCapped := false
 	maxIterations, readOnlyBudget, coordinatorCapped = applyRoleBudget(maxIterations, readOnlyBudget, coordinatorReadCapFor(settings.CoordinatorReadBudget), runRole, hasTeammates)
-	prompt := buildRunPrompt(room, task, team, skillsContext(team, task, rt.store.Snapshot().Skills), agentToolIDs)
+	prompt := buildRunPrompt(room, task, team, skillsContext(team, task, rt.store.Snapshot().Skills), agentToolIDs, settings.AllowProjectCommands)
 	prompt += fmt.Sprintf("\n\n## Exploration budget\nYou may spend up to %d read-only tool rounds (view/grep/search/repo_map/list) before you must act on what you found. Do not re-read the same file or region — if a search or view already answered the question, act on it. Before the budget runs out, choose one: create_plan, spawn_agent / create_task, make the code change, ask_human, or finish_task. Once the budget is spent, further read-only tools are blocked automatically; if that happens, reply with a concise summary of findings and your recommendation instead of retrying reads.", readOnlyBudget)
 	if coordinatorCapped {
 		prompt += "\n\n" + coordinatorMandateSection
@@ -817,7 +817,7 @@ func stripQuestionBlocks(message string) string {
 	}
 }
 
-func buildRunPrompt(room Room, task Task, team *Team, skills string, allowedTools []string) string {
+func buildRunPrompt(room Room, task Task, team *Team, skills string, allowedTools []string, allowCommands bool) string {
 	tier := room.TriageTier
 	if tier == "" {
 		tier = "standard"
@@ -892,7 +892,7 @@ func buildRunPrompt(room Room, task Task, team *Team, skills string, allowedTool
 
 	sections = append(sections,
 		triageGuidance,
-		advertisedToolsSection(allowedTools),
+		advertisedToolsSection(allowedTools, allowCommands),
 		"Work only on this task. Keep changes within the active project workspace. Report what changed and what you verified.",
 		`## Agent contract (summary; full reference in AGENT_CONTRACT.md)
 - Language: reply in the same language as the user's latest message.
@@ -1608,8 +1608,8 @@ var autonomousToolDocs = []struct{ name, doc string }{
 
 // advertisedToolsSection renders the "Available Autonomous Tools" list from the
 // tools that are actually registered for this run (see allowedADKToolNames).
-func advertisedToolsSection(allowedTools []string) string {
-	registered := allowedADKToolNames(allowedTools)
+func advertisedToolsSection(allowedTools []string, allowCommands bool) string {
+	registered := allowedADKToolNames(allowedTools, allowCommands)
 	var b strings.Builder
 	b.WriteString("## Available Autonomous Tools (exact names, only the ones listed here are wired up):\n")
 	any := false

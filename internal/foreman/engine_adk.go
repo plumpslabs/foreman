@@ -55,7 +55,14 @@ type ADKEngine struct {
 	sessLock map[string]*sync.Mutex
 }
 
-func allowedADKToolNames(allowed []string) map[string]bool {
+// allowedADKToolNames is the single source of truth for which tools a run can
+// actually call. It must agree with what makeADKTools registers, including the
+// project-command gate: run_checks and diagnose are only registered when
+// ctx.AllowCmds is true. The prompt advertises tools from this set, so listing a
+// gated tool here told the agent about a capability it did not have — which is
+// exactly how a coordinator ended up writing "I'm not sure run_checks is
+// available" mid-run.
+func allowedADKToolNames(allowed []string, allowCommands bool) map[string]bool {
 	if len(allowed) == 0 {
 		return nil
 	}
@@ -74,7 +81,11 @@ func allowedADKToolNames(allowed []string) map[string]bool {
 		case "grep", "glob", "search":
 			add("grep_files", "glob_files", "search_index", "view_file", "related", "symbol_map")
 		case "terminal", "run_tests", "run_commands":
-			add("run_checks", "diagnose")
+			// Project commands are opt-in: without the setting these tools are
+			// not registered at all, so advertising them would be a lie.
+			if allowCommands {
+				add("run_checks", "diagnose")
+			}
 		case "task_tracker", "delegate", "subagents", "synthesize":
 			add("create_task", "update_task", "claim_task", "spawn_agent", "delete_task", "delete_artifact", "create_plan", "delete_plan")
 		case "apply_patch", "diff_audit":
@@ -400,7 +411,7 @@ func (e *ADKEngine) RunControlled(ctx context.Context, req EngineRequest, emit f
 	}
 	defer toolCtx.signals.finalize(e.store)
 	adkTools := makeADKTools(toolCtx)
-	allowed := allowedADKToolNames(req.AllowedTools)
+	allowed := allowedADKToolNames(req.AllowedTools, req.AllowProjectCommands)
 	var tools []tool.Tool
 	for _, t := range adkTools {
 		tt, ok := t.(tool.Tool)

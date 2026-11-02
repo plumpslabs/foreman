@@ -138,7 +138,7 @@ func TestRunPromptStatesReplyLanguageEarly(t *testing.T) {
 		Title:       "perbaiki seed status",
 		Description: "tolong cek kenapa status open tidak ada dan perbaiki seed-nya ya",
 	}
-	prompt := buildRunPrompt(room, task, nil, "", []string{"file_editor", "grep"})
+	prompt := buildRunPrompt(room, task, nil, "", []string{"file_editor", "grep"}, false)
 	if !strings.Contains(prompt, "Reply language (enforced)") {
 		t.Fatalf("prompt missing enforced language section:\n%s", prompt)
 	}
@@ -176,7 +176,7 @@ func TestCoordinatorGetsDelegationTools(t *testing.T) {
 		t.Fatalf("role = %q, want coordinator", role)
 	}
 	ids := withDelegationTools(agentToolIDs(&team, task))
-	allowed := allowedADKToolNames(ids)
+	allowed := allowedADKToolNames(ids, true)
 	for _, want := range []string{"spawn_agent", "create_task", "list_tasks", "update_task", "claim_task"} {
 		if !allowed[want] {
 			t.Errorf("coordinator is missing %q even though the prompt tells it to delegate", want)
@@ -200,7 +200,7 @@ func TestSpecialistDoesNotGainDelegationTools(t *testing.T) {
 			{Name: "Worker", Role: "Worker · implements", Tools: []string{"file_editor", "grep"}},
 		},
 	}, Task{AgentName: "Worker"})
-	allowed := allowedADKToolNames(ids)
+	allowed := allowedADKToolNames(ids, true)
 	if allowed["spawn_agent"] {
 		t.Error("a specialist should not be granted spawn_agent by default")
 	}
@@ -215,7 +215,7 @@ func TestSymbolMapIsAlwaysReachable(t *testing.T) {
 		{"grep"},
 		{"file_editor", "grep", "terminal"},
 	} {
-		if !allowedADKToolNames(tools)["symbol_map"] {
+		if !allowedADKToolNames(tools, false)["symbol_map"] {
 			t.Errorf("symbol_map unreachable for tools %v", tools)
 		}
 	}
@@ -224,7 +224,7 @@ func TestSymbolMapIsAlwaysReachable(t *testing.T) {
 func TestAdvertisedToolsOnlyListsWiredTools(t *testing.T) {
 	// Anything the prompt advertises must be permitted, or the model burns a
 	// turn calling a tool that does not exist.
-	allowed := allowedADKToolNames([]string{"file_editor", "grep"})
+	allowed := allowedADKToolNames([]string{"file_editor", "grep"}, false)
 	for _, doc := range autonomousToolDocs {
 		if allowed[doc.name] {
 			continue

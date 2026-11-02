@@ -234,7 +234,7 @@ func TestCoordinatorRunReceivesDelegationTools(t *testing.T) {
 	if resolveRoleType(*team, task.AgentName, runAgent) != "coordinator" {
 		t.Fatalf("expected a coordinator run")
 	}
-	allowed := allowedADKToolNames(withDelegationTools(agentToolIDs(team, task)))
+	allowed := allowedADKToolNames(withDelegationTools(agentToolIDs(team, task)), true)
 	for _, want := range []string{"spawn_agent", "create_task", "list_tasks"} {
 		if !allowed[want] {
 			t.Errorf("coordinator run is missing %q", want)

@@ -278,7 +278,7 @@ func TestCreateTaskInheritsAgentEffort(t *testing.T) {
 func TestBuildRunPromptCarriesEffort(t *testing.T) {
 	room := Room{Name: "Room", Goal: "goal"}
 	task := Task{Title: "T", Description: "D", Effort: "high"}
-	prompt := buildRunPrompt(room, task, nil, "", nil)
+	prompt := buildRunPrompt(room, task, nil, "", nil, false)
 	if !strings.Contains(prompt, "Effort: high") {
 		t.Errorf("prompt missing the high-effort directive:\n%s", prompt)
 	}
