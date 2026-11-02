@@ -357,6 +357,19 @@ func (s *Server) shouldLightReply(content string) bool {
 	if !settings.RouteIntentsWithModel {
 		return fallback
 	}
+	// The model router is a nicety, not a gate. It used to run on EVERY message
+	// with a 12s timeout before the HTTP response was written, so sending a real
+	// task looked frozen for up to twelve seconds — the "slash command delay".
+	// Two cheap guards keep it useful and invisible:
+	//
+	//   - only messages the heuristic already considers short get a model
+	//     second opinion; a long request is never small talk, so classifying it
+	//     would only add latency to the common case;
+	//   - the call gets a short deadline and falls back to the heuristic, so a
+	//     slow provider can never stall the composer.
+	if !fallback || len(strings.Fields(content)) > maxIntentRouterWords {
+		return fallback
+	}
 	cfg, secret, ok := s.store.FirstEnabledProviderSecret()
 	if !ok {
 		return fallback
@@ -367,6 +380,10 @@ func (s *Server) shouldLightReply(content string) bool {
 	}
 	return kind == chatLight
 }
+
+// maxIntentRouterWords bounds which messages are worth a model round-trip. The
+// heuristic already treats anything longer as an agent request.
+const maxIntentRouterWords = 6
 
 func (s *Server) resetGlobal(w http.ResponseWriter, r *http.Request) {
 	if err := s.verifyProject(r.URL.Query().Get("project")); err != nil {
@@ -428,10 +445,40 @@ func (s *Server) appendRoomMessage(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusUnprocessableEntity, err.Error())
 		return
 	}
+	// Slash commands are directives, not prose. They are recognised here, before
+	// any run starts, so the model receives a concrete instruction instead of
+	// the literal "/journal" token — which it could only narrate back ("The user
+	// sent /journal…") because a bare verb is not a task.
+	runContent := req.Content
+	var cmd slashCommand
+	isCommand := false
+	if req.Role == "user" {
+		cmd, isCommand = parseSlashCommand(req.Content)
+		if isCommand {
+			name := s.store.RoomMainAgentName(r.PathValue("roomID"))
+			if name == "" {
+				name = "Foreman"
+			}
+			if reply, native := s.slashNativeReply(cmd); native {
+				_ = s.store.AppendAgentReply(r.PathValue("roomID"), name, reply)
+				writeJSON(w, http.StatusCreated, map[string]any{
+					"message": message,
+					"run":     nil,
+					"warning": "",
+					"replied": "command",
+				})
+				return
+			}
+			if rewritten := slashInstruction(cmd); rewritten != "" {
+				runContent = rewritten
+			}
+		}
+	}
 	// Short small talk is answered locally so a simple "halo" does not start an
 	// expensive OpenHands run. Can be disabled in Settings (disableQuickReplies);
 	// optional model-backed routing (routeIntentsWithModel) refines the decision.
-	if req.Role == "user" && s.shouldLightReply(req.Content) {
+	// A command is never small talk: it was already resolved above.
+	if req.Role == "user" && !isCommand && s.shouldLightReply(req.Content) {
 		name := s.store.RoomMainAgentName(r.PathValue("roomID"))
 		if name == "" {
 			name = "Foreman"
@@ -453,7 +500,7 @@ func (s *Server) appendRoomMessage(w http.ResponseWriter, r *http.Request) {
 	var run *AgentRun
 	var warning string
 	if req.Role == "user" {
-		started, runErr := s.runtime.StartChatRun(context.WithoutCancel(r.Context()), r.PathValue("roomID"), req.Content)
+		started, runErr := s.runtime.StartChatRun(context.WithoutCancel(r.Context()), r.PathValue("roomID"), runContent)
 		if runErr != nil {
 			warning = runErr.Error()
 			// Attribute the failure to the room's lead: a notice with an empty

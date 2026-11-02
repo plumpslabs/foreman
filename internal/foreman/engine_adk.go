@@ -66,13 +66,13 @@ func allowedADKToolNames(allowed []string) map[string]bool {
 		}
 	}
 	// core tools always available
-	add("finish_task", "list_tasks", "send_message", "ask_human", "escalate", "memory", "repo_map", "request_spawn", "related", "init", "confirm")
+	add("finish_task", "list_tasks", "send_message", "ask_human", "escalate", "memory", "repo_map", "request_spawn", "related", "init", "confirm", "symbol_map")
 	for _, raw := range allowed {
 		switch raw {
 		case "file_editor", "read", "edit", "write_tests":
-			add("view_file", "create_file", "replace_string", "insert_lines", "edit_file")
+			add("view_file", "create_file", "replace_string", "insert_lines", "edit_file", "symbol_map")
 		case "grep", "glob", "search":
-			add("grep_files", "glob_files", "search_index", "view_file", "related")
+			add("grep_files", "glob_files", "search_index", "view_file", "related", "symbol_map")
 		case "terminal", "run_tests", "run_commands":
 			add("run_checks", "diagnose")
 		case "task_tracker", "delegate", "subagents", "synthesize":
@@ -88,6 +88,21 @@ func allowedADKToolNames(allowed []string) map[string]bool {
 		}
 	}
 	return set
+}
+
+// answerText returns the user-facing text of one content part.
+//
+// Reasoning-capable providers stream their private scratchpad as text parts with
+// Thought=true ("Let me start by understanding the situation…", "I've used 7
+// rounds"). Those are not the answer. The engine used to concatenate every part
+// blindly, which is why room transcripts filled with the model's inner monologue
+// instead of a reply. Keeping the filter in one named place makes the rule
+// explicit and testable.
+func answerText(p *genai.Part) string {
+	if p == nil || p.Text == "" || p.Thought {
+		return ""
+	}
+	return p.Text
 }
 
 func NewADKEngine(store *Store) *ADKEngine {
@@ -534,13 +549,19 @@ func (e *ADKEngine) RunControlled(ctx context.Context, req EngineRequest, emit f
 			continue
 		}
 		// collect text
+		//
+		// Thought parts are the model's private reasoning, not its answer (see
+		// answerText). Reasoning-capable providers stream them with
+		// Thought=true, and the engine used to concatenate every part blindly —
+		// which is why room transcripts filled up with "Let me start by
+		// understanding the situation… I've used 7 rounds" instead of a reply.
 		var eventText strings.Builder
 		var toolNames []string
 		if ev.Content != nil {
 			for _, p := range ev.Content.Parts {
-				if p.Text != "" {
-					finalText.WriteString(p.Text)
-					eventText.WriteString(p.Text)
+				if text := answerText(p); text != "" {
+					finalText.WriteString(text)
+					eventText.WriteString(text)
 				}
 				if p.FunctionCall != nil {
 					toolNames = append(toolNames, p.FunctionCall.Name)

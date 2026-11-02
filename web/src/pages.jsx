@@ -432,13 +432,23 @@ export function RoomDetailHost({ room, state, notify, setModal, runTask, refresh
       const body = String(m.content || '');
       const sevClass = body.includes('🛑')
         ? 'sev-blocker'
-        : (/escalat|blocked|rework|failed/.test(at) ? 'sev-warning' : '');
+        : (/escalat|blocked|rework|failed|timed_out/.test(at) ? 'sev-warning' : '');
+      // Notices are rendered through the markdown renderer, not plain(). A
+      // notice is often the ONLY explanation of why a run stopped — it carries
+      // backticks, paths, and numbered causes. Flattening it to a plain span
+      // turned those into unreadable white text on one line, which is exactly
+      // how "blocked after N attempts: <long Go error>" became a wall.
+      const multiline = body.includes('\n') || body.length > 160;
       return (
-        <div class="notice-row" key={m.id}>
-          <span class={`notice-chip ${sevClass}`}>
-            {who ? <b>{plain(who)}</b> : null}{' '}
-            {plain(m.content)}
-            <span class="notice-time"> · {timeAgo(m.createdAt)}</span>
+        <div class={`notice-row ${multiline ? 'notice-block' : ''}`} key={m.id}>
+          <div class={`notice-chip ${sevClass}`}>
+            <div class="notice-head">
+              {who ? <b class="notice-who">{plain(who)}</b> : null}
+              <span class="notice-time">{timeAgo(m.createdAt)}</span>
+            </div>
+            <div class="notice-body">
+              <Markdown text={body} />
+            </div>
             {/* Only notices that actually CREATED an inbox record link to it.
                 Must be an exact match: run.model_escalate (model rotation on
                 a failed attempt) contains "escalat" and used to show an
@@ -449,7 +459,7 @@ export function RoomDetailHost({ room, state, notify, setModal, runTask, refresh
                 Open Approvals
               </button>
             ) : null}
-          </span>
+          </div>
         </div>
       );
     }

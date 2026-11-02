@@ -1750,6 +1750,58 @@ select.mini-select { appearance: none; -webkit-appearance: none; padding-right: 
 }
 .notice-chip b, .notice-chip strong { color: var(--text); font-weight: 600; }
 
+/* Short notices stay a single centred pill: the header row is only needed once
+   the notice becomes a card (see .notice-block below). */
+.notice-row:not(.notice-block) .notice-chip {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 5px;
+  white-space: normal;
+}
+.notice-row:not(.notice-block) .notice-head { margin: 0; gap: 5px; }
+.notice-row:not(.notice-block) .notice-body { display: inline; }
+.notice-row:not(.notice-block) .notice-body .md { display: inline; }
+.notice-row:not(.notice-block) .notice-body .md-p { display: inline; margin: 0; }
+
+/* Long notices (a blocked run, a timeout, a model error) are explanations, not
+   one-line chips. They get a card layout, left-aligned prose, and real markdown
+   so paths, backticks, and numbered causes stay readable. */
+.notice-row.notice-block { justify-content: stretch; }
+.notice-block .notice-chip {
+  display: block;
+  width: 100%;
+  max-width: 100%;
+  border-radius: 10px;
+  padding: 9px 13px;
+  text-align: left;
+  background: color-mix(in srgb, var(--panel) 92%, transparent);
+}
+.notice-head {
+  display: flex;
+  align-items: baseline;
+  gap: 7px;
+  margin-bottom: 3px;
+}
+.notice-head .notice-who { font-size: 11.5px; color: var(--text); }
+.notice-head .notice-time { font-size: 10.5px; margin-left: auto; opacity: .7; }
+.notice-body { font-size: 12.5px; line-height: 1.62; color: var(--text-dim, var(--muted)); }
+.notice-body .md { font-size: inherit; }
+.notice-body .md > *:first-child { margin-top: 0; }
+.notice-body .md > *:last-child { margin-bottom: 0; }
+.notice-body .md-p { margin: 0 0 6px; white-space: pre-line; }
+.notice-body .md-p:last-child { margin-bottom: 0; }
+.notice-body .md-ul, .notice-body .md-ol { margin: 3px 0 6px; padding-left: 18px; }
+.notice-body .md-li, .notice-body li { margin: 1px 0; }
+.notice-body .md-code {
+  background: #14181c;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  padding: 1px 4px;
+  font-size: 11.5px;
+}
+.notice-body .md-h { font-size: 12.5px; margin: 6px 0 3px; }
+.notice-block .notice-link { margin-top: 7px; }
+
 /* GitHub/Bitbucket-style changes review layout */
 .changes-layout {
   display: flex;

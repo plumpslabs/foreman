@@ -16,7 +16,11 @@ const intentRouterSystem = "Classify the user's message. Reply with exactly one 
 // is light small talk or real agent work. Any failure (network, provider, bad
 // protocol) returns an error so the caller falls back to the heuristic.
 func classifyWithModel(ctx context.Context, config ProviderConfig, secret, content string) (chatKind, error) {
-	ctx, cancel := context.WithTimeout(ctx, 12*time.Second)
+	// Short deadline: this runs on the request path before the HTTP response, so
+	// a slow provider must degrade to the heuristic quickly instead of freezing
+	// the composer. The answer is a single token; anything slower is not worth
+	// waiting for.
+	ctx, cancel := context.WithTimeout(ctx, 3*time.Second)
 	defer cancel()
 	if config.Protocol == "anthropic" {
 		return classifyWithAnthropic(ctx, config, secret, content)

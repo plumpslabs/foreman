@@ -347,6 +347,16 @@ func (rt *Runtime) execute(ctx context.Context, control *RunControl, run AgentRu
 	if team != nil {
 		runRole = resolveRoleType(*team, task.AgentName, runAgent)
 	}
+	// A coordinator whose prompt says "delegate with spawn_agent / create_task"
+	// must actually HAVE those tools. The shipped Quick Fix profile lists only
+	// file_editor+grep+terminal, so the coordinator was told to delegate in a
+	// long prompt while the tool filter silently removed every delegation tool —
+	// it then did the work itself, hit the tightened read cap, and asked the
+	// human to "respawn with more budget". Grant the board/delegation toolset
+	// whenever the role is coordinator, without editing the user's tool list.
+	if runRole == "coordinator" {
+		agentToolIDs = withDelegationTools(agentToolIDs)
+	}
 	coordinatorCapped := false
 	maxIterations, readOnlyBudget, coordinatorCapped = applyRoleBudget(maxIterations, readOnlyBudget, coordinatorReadCapFor(settings.CoordinatorReadBudget), runRole, hasTeammates)
 	prompt := buildRunPrompt(room, task, team, skillsContext(team, task, rt.store.Snapshot().Skills), agentToolIDs)
@@ -823,6 +833,11 @@ func buildRunPrompt(room Room, task Task, team *Team, skills string, allowedTool
 		fmt.Sprintf("Task: %s", task.Title),
 		fmt.Sprintf("Description: %s", task.Description),
 	}
+	// The user's own words decide the reply language. State it early and
+	// concretely: a lone contract bullet lost to English tool output.
+	if lang := detectReplyLanguage(task.Description + "\n" + room.Goal); lang != "" {
+		sections = append(sections, replyLanguageDirective(lang))
+	}
 	if effort := strings.TrimSpace(task.Effort); effort != "" {
 		sections = append(sections, effortDirective(effort))
 	}
@@ -1155,6 +1170,32 @@ func effectiveBudgets(agent *Agent, settings Settings) (maxIterations, readOnlyB
 // not a law: Settings.CoordinatorReadBudget overrides it globally, and a
 // per-agent ReadOnlyBudget profile always wins when it is already tighter.
 const defaultCoordinatorReadCap = 10
+
+// withDelegationTools guarantees a coordinator can reach the board and its
+// teammates. The prompt promises spawn_agent/create_task/list_tasks; a tool
+// filter that strips them turns the coordinator into a confused specialist that
+// burns its read budget and then asks the human for more budget.
+//
+// The user's configured tools are preserved and extended, never replaced: a
+// coordinator that was given only file_editor+grep keeps both and gains the
+// delegation surface.
+func withDelegationTools(tools []string) []string {
+	required := []string{"task_tracker", "subagents"}
+	out := append([]string(nil), tools...)
+	for _, id := range required {
+		found := false
+		for _, have := range out {
+			if have == id {
+				found = true
+				break
+			}
+		}
+		if !found {
+			out = append(out, id)
+		}
+	}
+	return out
+}
 
 // coordinatorReadCapFor resolves the active coordinator cap: an explicit
 // settings value wins; 0/unknown falls back to the native default. A negative
@@ -1558,6 +1599,10 @@ var autonomousToolDocs = []struct{ name, doc string }{
 	{"repo_map", "get a compact repository topology before exploring unfamiliar code."},
 	{"related", "given a file path, return what this project's runs learned: files touched/edited together (co-usage) and retained memory facts mentioning it. Call BEFORE greping/globbing around a file — usually answers 'where does this connect' in one call."},
 	{"search_index", "full-text search across indexed source files."},
+	{"symbol_map", "locate a declaration (function/method/type) with its exact line range; then read only that body with view_file(start_line, end_line)."},
+	{"view_file", "read a file, or a precise line range of it."},
+	{"grep_files", "regex search across workspace files."},
+	{"glob_files", "list files matching a glob."},
 	{"register_panel", "register custom UI panels (table, markdown, chart, kanban, diagram)."},
 }
 
