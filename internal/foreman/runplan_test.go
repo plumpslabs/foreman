@@ -198,7 +198,12 @@ func TestRunKeysLockedSkipsDisabledAndEmpty(t *testing.T) {
 	if err := st.SaveProviderKey("zro", "two", "secret-two", false); err != nil {
 		t.Fatal(err)
 	}
-	if err := st.SaveProviderKey("zro", "three", "", true); err != nil {
+	// A key whose stored credential vanished (credentials.json edited by hand,
+	// or an old provider record) must be skipped rather than attempted blank.
+	if err := st.SaveProviderKey("zro", "three", "secret-three", true); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.saveProviderKey(st.Snapshot().ProjectPath, "zro", "three", ""); err != nil {
 		t.Fatal(err)
 	}
 	if err := st.SaveProviderKey("zro", "four", "secret-four", true); err != nil {

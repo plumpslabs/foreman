@@ -342,7 +342,19 @@ func (s *Store) SaveProviderKey(providerID, keyName, secret string, enabled bool
 	if secret != "" && (len(secret) > 4096 || strings.ContainsAny(secret, "\r\n")) {
 		return errors.New("provider API key must be a single line under 4096 characters")
 	}
-	if err := s.saveProviderKey(s.Snapshot().ProjectPath, providerID, keyName, secret); err != nil {
+	// A blank secret means "leave the stored credential alone". The UI sends an
+	// empty apiKey when it only toggles an account on or off, and writing the
+	// empty string here used to DELETE the credential — the account silently
+	// lost its key the moment it was switched off and on again.
+	if secret == "" {
+		stored, err := s.loadProviderKey(s.Snapshot().ProjectPath, providerID, keyName)
+		if err != nil {
+			return err
+		}
+		if stored == "" {
+			return errors.New("an API key is required to add a new account")
+		}
+	} else if err := s.saveProviderKey(s.Snapshot().ProjectPath, providerID, keyName, secret); err != nil {
 		return err
 	}
 	s.mu.Lock()

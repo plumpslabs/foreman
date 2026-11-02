@@ -263,3 +263,52 @@ func TestProviderKeyPreviewAndMask(t *testing.T) {
 		t.Fatalf("named preview wrong: %+v", list[0].Keys)
 	}
 }
+
+// Toggling an account on or off must never touch its stored secret. The UI
+// sends an empty apiKey when it only flips the switch, and that empty string
+// used to delete the credential — the account silently lost its key.
+func TestProviderKeyToggleKeepsSecret(t *testing.T) {
+	store, err := openStoreForTest(t, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := ProviderConfig{
+		ID: "zro", Name: "Zro", Protocol: "openai-compatible",
+		BaseURL: "https://zro.moonmath.ai/v1", DefaultModel: "deepseek-v4.1-flash", Enabled: true,
+	}
+	if _, err := store.SaveProvider(cfg, ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SaveProviderKey("zro", "Zro 1", "secret-one", true); err != nil {
+		t.Fatal(err)
+	}
+
+	// Off, then back on, both times with an empty apiKey (what the toggle sends).
+	if err := store.SaveProviderKey("zro", "Zro 1", "", false); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := store.loadProviderKey(store.Snapshot().ProjectPath, "zro", "Zro 1"); got != "secret-one" {
+		t.Fatalf("switching an account off must keep its key, got %q", got)
+	}
+	if err := store.SaveProviderKey("zro", "Zro 1", "", true); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := store.loadProviderKey(store.Snapshot().ProjectPath, "zro", "Zro 1"); got != "secret-one" {
+		t.Fatalf("switching an account back on must keep its key, got %q", got)
+	}
+
+	// The account still carries a masked preview, so the UI can show it.
+	reloaded := store.ProvidersForAPI()
+	if len(reloaded) != 1 || len(reloaded[0].Keys) != 1 {
+		t.Fatalf("expected the account to survive the toggle, got %+v", reloaded)
+	}
+	if reloaded[0].Keys[0].Preview == "" {
+		t.Fatal("the account lost its masked preview after toggling")
+	}
+
+	// Adding a brand-new account without a secret must be rejected instead of
+	// creating a key row that can never run.
+	if err := store.SaveProviderKey("zro", "Zro 2", "", true); err == nil {
+		t.Fatal("adding an account without an API key should fail")
+	}
+}

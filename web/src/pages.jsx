@@ -2142,14 +2142,24 @@ function ProviderModal({ initial, isNew, existingIds = [], onClose, notify, refr
                       const invalid = chk && chk.state === 'error';
                       const testing = chk && chk.state === 'running';
                       return (
-                        <div class={`key-row ${invalid ? 'invalid' : ''}`} key={k.name}>
-                          <label class="key-toggle" title={k.enabled ? 'Enabled — used for runs' : 'Disabled — skipped'}>
-                            <input type="checkbox" checked={k.enabled}
-                              onChange={(e) => toggleKey(k.name, e.currentTarget.checked)} />
-                            <span class={`tag ${k.enabled ? 'blue' : 'grey'}`}>{k.enabled ? 'On' : 'Off'}</span>
-                          </label>
-                          <span class="key-order" title="Attempt order">{index + 1}.</span>
-                          <span class="key-name" title={plain(k.name)}>{plain(k.name)}</span>
+                        <div class={`key-row ${invalid ? 'invalid' : ''} ${k.enabled ? '' : 'off'}`} key={k.name}>
+                          <div class="key-row-head">
+                            <span class="key-order" title="Attempt order">{index + 1}</span>
+                            <span class="key-name" title={plain(k.name)}>{plain(k.name)}</span>
+                            <button
+                              type="button"
+                              class={`switch ${k.enabled ? 'on' : ''}`}
+                              role="switch"
+                              aria-checked={k.enabled ? 'true' : 'false'}
+                              aria-label={`${k.enabled ? 'Disable' : 'Enable'} account ${k.name}`}
+                              title={k.enabled ? 'On — used for runs' : 'Off — skipped'}
+                              disabled={keyBusy}
+                              onClick={() => toggleKey(k.name, !k.enabled)}
+                            >
+                              <span class="switch-track"><span class="switch-thumb" /></span>
+                              <span class="switch-label">{k.enabled ? 'On' : 'Off'}</span>
+                            </button>
+                          </div>
                           <div class="key-field key-field-compact">
                             <input type={revealed[k.name] ? 'text' : 'password'} readonly
                               spellcheck={false} value={revealed[k.name] || k.preview || '••••'} />

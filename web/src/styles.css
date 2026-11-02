@@ -613,9 +613,20 @@ img { max-width: 100%; display: block; }
 .activity-time { font-size: 10px; color: var(--muted); }
 
 /* ---------- Modal ---------- */
-.modal-backdrop { position: fixed; inset: 0; background: #000b; display: none; place-items: center; padding: 16px; z-index: 50; }
+/* minmax(0, 1fr) keeps the single track pinned to the viewport: with a bare
+   auto track the modal resolved its width against max-content and grew wider
+   than the screen on narrow windows. */
+.modal-backdrop {
+  position: fixed; inset: 0; background: #000b; display: none;
+  grid-template-columns: minmax(0, 1fr); place-items: center;
+  padding: 16px; z-index: 50;
+}
 .modal-backdrop.open { display: grid; }
-.modal { width: min(560px, 100%); background: #12161b; border: 1px solid #353c47; border-radius: 13px; box-shadow: 0 24px 90px #000a; }
+.modal {
+  width: min(560px, 100%); max-width: 100%; min-width: 0;
+  background: #12161b; border: 1px solid #353c47; border-radius: 13px;
+  box-shadow: 0 24px 90px #000a;
+}
 .modal-head, .modal-foot { padding: 15px 18px; border-bottom: 1px solid var(--line); display: flex; justify-content: space-between; align-items: center; }
 .modal-foot { border: 0; border-top: 1px solid var(--line); justify-content: flex-end; gap: 8px; }
 .modal-head h3 { font-size: 14px; margin: 0; }
@@ -744,32 +755,66 @@ select { cursor: pointer; }
 .key-icon:disabled { opacity: .45; cursor: default; }
 .key-icon .spin { animation: spin 1s linear infinite; }
 
-/* Key rows: name + toggle on the left, an inline secret field with icon
-   actions on the right, and a validation line underneath when needed. */
+/* Key rows: the account title sits top-left with its attempt number, the
+   on/off switch sits top-right, and the secret field spans the full width
+   underneath. Two stacked rows instead of a 3-column grid keeps long account
+   names from colliding with the switch. */
 .key-list { display: flex; flex-direction: column; gap: 8px; margin-bottom: 10px; }
 .key-row {
-  display: grid; grid-template-columns: auto auto minmax(0, 1fr); align-items: center;
-  gap: 6px 10px; padding: 9px 11px; border: 1px solid var(--line);
+  display: flex; flex-direction: column; gap: 8px;
+  padding: 9px 11px; border: 1px solid var(--line);
   border-radius: 8px; background: #15181e;
+  transition: border-color .12s ease, background .12s ease, opacity .12s ease;
 }
 .key-row.invalid { border-color: #523030; background: #1c1618; }
-.key-toggle { display: flex; align-items: center; gap: 7px; cursor: pointer; }
-.key-toggle .tag { font-size: 9.5px; }
+.key-row-head {
+  display: flex; align-items: center; gap: 8px; min-width: 0;
+}
 /* Attempt order: accounts are tried top to bottom, so the number is part of
    the meaning, not decoration. */
 .key-order {
-  font-size: 10px; font-weight: 700; color: var(--muted);
+  flex-shrink: 0; display: inline-grid; place-content: center;
+  min-width: 18px; height: 18px; padding: 0 4px;
+  font-size: 10px; font-weight: 700; color: #aeb6c2;
   font-variant-numeric: tabular-nums;
+  background: #1b202a; border: 1px solid #2c333e; border-radius: 5px;
 }
 .key-name {
-  font-size: 12px; font-weight: 600; min-width: 0;
+  flex: 1; min-width: 0;
+  font-size: 12px; font-weight: 600;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
-.key-row .key-field { grid-column: 1 / -1; }
-.key-check {
-  grid-column: 1 / -1; display: flex; align-items: center; gap: 5px;
-  font-size: 10.5px; line-height: 1.4;
+/* A switched-off account stays fully readable — it is just not in the
+   rotation. Only the label dims; the key preview must stay visible. */
+.key-row.off .key-name { color: var(--muted); }
+.key-row.off .key-order { color: var(--muted); }
+.key-row .key-field { width: 100%; }
+.key-check { display: flex; align-items: center; gap: 5px; font-size: 10.5px; line-height: 1.4; }
+
+/* Switch: a real toggle (role="switch"), not a checkbox. */
+.switch {
+  flex-shrink: 0; display: inline-flex; align-items: center; gap: 7px;
+  padding: 2px 4px 2px 2px; margin: -2px -4px -2px -2px;
+  background: transparent; border: 0; border-radius: 99px;
+  color: var(--muted); font-family: inherit;
 }
+.switch-track {
+  display: block; position: relative; width: 34px; height: 19px;
+  background: #2a323f; border: 1px solid #343b46; border-radius: 99px;
+  transition: background .15s ease, border-color .15s ease;
+}
+.switch-thumb {
+  display: block; position: absolute; top: 2px; left: 2px;
+  width: 13px; height: 13px; border-radius: 50%; background: #586a3c;
+  transition: left .15s ease, background .15s ease;
+}
+.switch-label { font-size: 10px; font-weight: 600; letter-spacing: .2px; }
+.switch.on { color: #c5e89b; }
+.switch.on .switch-track { background: #192116; border-color: #33432a; }
+.switch.on .switch-thumb { left: 17px; background: var(--accent); }
+.switch:hover:not(:disabled) .switch-track { border-color: #4a5464; }
+.switch.on:hover:not(:disabled) .switch-track { border-color: #3f5533; }
+.switch:disabled { opacity: .5; cursor: default; }
 .key-check.ok { color: #c5e89b; }
 .key-check.error { color: #ffadad; }
 
@@ -780,6 +825,14 @@ select { cursor: pointer; }
 }
 .key-add > input:focus { border-color: var(--accent); outline: none; }
 .key-add .key-field { padding-right: 2px; }
+/* Narrow windows: stack the add-account row so the name field and the secret
+   field stay usable instead of collapsing into slivers. */
+@media (max-width: 620px) {
+  .key-add { grid-template-columns: minmax(0, 1fr); }
+  .key-add > button { justify-self: stretch; }
+  .form-grid { grid-template-columns: minmax(0, 1fr); }
+  .modal-body { padding: 14px; }
+}
 .tool-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 6px; }
 .tool-check {
   display: flex; align-items: center; gap: 7px; padding: 7px 9px;
