@@ -43,11 +43,22 @@ export function AgentAvatar({ agent, name, tone = '', size, radius, className = 
 }
 
 // findAgent resolves an agent object by name from the workspace state so
-// name-only render sites can still show a generated avatar.
+// name-only render sites can still show a generated avatar. The library pool is
+// searched first because it is the canonical profile; roster copies inherit the
+// same id (reconcileRosterFromLibrary) so either source yields the same avatar.
 export function findAgent(state, name) {
   if (!name) return null;
-  const pool = [...(state?.agents || [])];
-  for (const t of state?.teams || []) pool.push(...(t.agents || []));
-  for (const tpl of state?.templates || []) pool.push(...(tpl.agents || []));
-  return pool.find((a) => a.name === name) || null;
+  const wanted = String(name).trim().toLowerCase();
+  const match = (list) => (list || []).find((a) => String(a?.name || '').trim().toLowerCase() === wanted);
+  const fromLibrary = match(state?.agents);
+  if (fromLibrary) return fromLibrary;
+  for (const t of state?.teams || []) {
+    const found = match(t.agents);
+    if (found) return found;
+  }
+  for (const tpl of state?.templates || []) {
+    const found = match(tpl.agents);
+    if (found) return found;
+  }
+  return null;
 }

@@ -248,6 +248,9 @@ func (s *Store) ShuffleAgentAvatar(agentID string) (Agent, error) {
 		if s.state.Agents[i].ID == agentID {
 			s.state.Agents[i].AvatarSeed = randomAvatarSeed()
 			s.state.Agents[i].AvatarStyle = randomAvatarStyle()
+			// Push the new seed into every team roster copy so the avatar changes
+			// everywhere at once, not only on the library page.
+			s.reconcileAgentsFromLibraryLocked()
 			if err := s.save(); err != nil {
 				return Agent{}, err
 			}

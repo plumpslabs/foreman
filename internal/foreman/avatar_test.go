@@ -171,3 +171,38 @@ func TestEnsureAgentAvatarsBackfillsTemplates(t *testing.T) {
 		t.Fatal("expected default templates to contain agents")
 	}
 }
+
+// TestShufflePropagatesToTeamRoster guards that shuffling an avatar updates the
+// team roster copies too, so the team page never shows a stale avatar.
+func TestShufflePropagatesToTeamRoster(t *testing.T) {
+	store, err := openStoreForTest(t, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	lib, err := store.SaveAgent(Agent{Name: "Orion", Role: "Coordinator", AvatarSeed: "seed-a", AvatarStyle: "bottts"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	team, err := store.ImportTeam("quick-fix", "Focused")
+	if err != nil {
+		t.Fatal(err)
+	}
+	team.Agents = append(team.Agents, Agent{Name: "Orion", Role: "Coordinator", AvatarSeed: "seed-a", AvatarStyle: "bottts"})
+	if _, err := store.UpdateTeam(team); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.ShuffleAgentAvatar(lib.ID); err != nil {
+		t.Fatal(err)
+	}
+	var rosterSeed string
+	for _, t2 := range store.Snapshot().Teams {
+		for _, a := range t2.Agents {
+			if a.Name == "Orion" {
+				rosterSeed = a.AvatarSeed
+			}
+		}
+	}
+	if rosterSeed == "" || rosterSeed == "seed-a" {
+		t.Fatalf("roster seed = %q, want the shuffled seed", rosterSeed)
+	}
+}

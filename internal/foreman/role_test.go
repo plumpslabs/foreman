@@ -99,3 +99,29 @@ func TestCoordinatorReadCapFor(t *testing.T) {
 		t.Errorf("negative = %d, want 0 (disabled)", got)
 	}
 }
+
+// TestResolveRoleTypeFromRoleTitle guards that behaviour follows the free-text
+// role title, so the agent profile needs no second "role type" selector.
+func TestResolveRoleTypeFromRoleTitle(t *testing.T) {
+	team := Team{MainAgent: "Lead", Agents: []Agent{
+		{Name: "Lead", Role: "Coordinator"},
+		{Name: "Verifier", Role: "Main agent · Coordinator & verifier"},
+		{Name: "Gate", Role: "Code reviewer"},
+		{Name: "Auditor", Role: "Security auditor"},
+		{Name: "Debugger", Role: "Code debugger"},
+		{Name: "Planner", Role: "Planner & scoper"},
+	}}
+	cases := map[string]string{
+		"Lead":     "coordinator", // main agent
+		"Verifier": "coordinator", // title mentions Coordinator
+		"Gate":     "reviewer",    // title mentions reviewer
+		"Auditor":  "reviewer",    // title mentions auditor
+		"Debugger": "specialist",
+		"Planner":  "coordinator", // planner orchestrates
+	}
+	for name, want := range cases {
+		if got := resolveRoleType(team, name, teamAgentByName(team, name)); got != want {
+			t.Errorf("resolveRoleType(%s) = %q, want %q", name, got, want)
+		}
+	}
+}

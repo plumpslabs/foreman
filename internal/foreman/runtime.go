@@ -969,9 +969,13 @@ func teamAgentByName(team Team, name string) *Agent {
 	return nil
 }
 
-// resolveRoleType resolves an agent's role: an explicit RoleType wins; otherwise
-// the team's main agent is a coordinator, a role/description mentioning
-// "review" is a reviewer, and everyone else is a specialist.
+// resolveRoleType resolves an agent's role. An explicit RoleType always wins.
+// Otherwise the team's main agent is the coordinator, and the free-text role
+// title (plus description) decides the rest: titles mentioning review/audit act
+// as reviewers, titles mentioning coordinator/lead/orchestration act as
+// coordinators, everyone else is a specialist. Role titles are the single
+// source of truth in the UI, so this keeps behaviour predictable without a
+// second, overlapping "role type" selector in the agent profile.
 func resolveRoleType(team Team, name string, agent *Agent) string {
 	if agent != nil && agent.RoleType != "" {
 		return agent.RoleType
@@ -981,11 +985,24 @@ func resolveRoleType(team Team, name string, agent *Agent) string {
 	}
 	if agent != nil {
 		hay := strings.ToLower(agent.Role + " " + agent.Description)
-		if strings.Contains(hay, "review") {
+		if containsAny(hay, "review", "audit") {
 			return "reviewer"
+		}
+		if containsAny(hay, "coordinator", "coordinat", "orchestrat", "team lead", "lead agent", "planner") {
+			return "coordinator"
 		}
 	}
 	return "specialist"
+}
+
+// containsAny reports whether hay contains at least one of the needles.
+func containsAny(hay string, needles ...string) bool {
+	for _, n := range needles {
+		if strings.Contains(hay, n) {
+			return true
+		}
+	}
+	return false
 }
 
 // activeTeamAgent resolves the agent that will act for this task, falling back

@@ -6,15 +6,6 @@ import { AgentAvatar, findAgent } from './avatar.jsx';
 
 const plain = (s) => String(s ?? '');
 
-// Preset role labels used when a role is picked from the dropdown. Kept in
-// sync with roleTypeLabel in the Go store.
-const ROLE_LABELS = {
-  coordinator: 'Coordinator',
-  specialist: 'Specialist',
-  reviewer: 'Reviewer',
-  custom: 'Custom agent',
-};
-
 /* Complete OpenHands tool catalog (researched from openhands-tools).
    `wired` marks tools Foreman's bridge actually loads today. */
 export const TOOL_CATALOG = [
@@ -289,16 +280,23 @@ export function AgentDetailPage({ agentId, state, notify, refresh, onBack }) {
     ? form[field].filter((x) => x !== value)
     : [...form[field], value]);
 
-  // Choosing a role keeps the descriptive title in sync: it is filled in when
-  // empty or still equal to a preset label, but a hand-written title is kept.
-  const setRoleType = (value) => setForm((prev) => {
-    const next = { ...prev, roleType: value };
-    const presetLabels = Object.values(ROLE_LABELS);
-    if (!prev.role || presetLabels.includes(prev.role)) {
-      next.role = value ? ROLE_LABELS[value] : '';
-    }
-    return next;
-  });
+  // Behavior follows the role title (see resolveRoleType in the Go runtime):
+  // the team's main agent is the coordinator, titles mentioning review/audit
+  // act as reviewers, titles mentioning coordinator/lead/planner orchestrate,
+  // and everything else is a specialist. The team page owns "main agent", so
+  // the profile does not need a second, overlapping role selector.
+  const derivedRole = (() => {
+    if (form.roleType) return form.roleType;
+    const hay = `${form.role} ${form.description}`.toLowerCase();
+    if (/review|audit/.test(hay)) return 'reviewer';
+    if (/coordinator|orchestrat|team lead|lead agent|planner/.test(hay)) return 'coordinator';
+    return 'specialist';
+  })();
+  const ROLE_BEHAVIOR = {
+    coordinator: 'Coordinates: may delegate and spawn teammates, and keeps the board moving.',
+    specialist: 'Stays on task: does the assigned work, does not reassign or spawn.',
+    reviewer: 'Reviews independently: never self-approves; sends work back with findings.',
+  };
 
   const shuffleAvatar = async () => {
     if (!form.id) return;
@@ -316,8 +314,7 @@ export function AgentDetailPage({ agentId, state, notify, refresh, onBack }) {
   const save = async () => {
     setBusy(true);
     try {
-      const roleTitle = form.role.trim() || (form.roleType ? ROLE_LABELS[form.roleType] : '') || 'Agent';
-      const body = JSON.stringify({ ...form, name: form.name.trim(), role: roleTitle });
+      const body = JSON.stringify({ ...form, name: form.name.trim(), role: form.role.trim() });
       if (editing) await api(`/api/agents/${encodeURIComponent(form.id)}`, { method: 'PUT', body });
       else await api('/api/agents', { method: 'POST', body });
       await refresh();
@@ -393,22 +390,15 @@ export function AgentDetailPage({ agentId, state, notify, refresh, onBack }) {
             <input maxlength="80" placeholder="e.g. Sentinel" value={form.name}
               onInput={(e) => set('name', e.currentTarget.value)} />
           </div>
-          <div class="field">
-            <label>Role</label>
-            <select value={form.roleType} onChange={(e) => setRoleType(e.currentTarget.value)}>
-              <option value="">Auto (main agent = coordinator)</option>
-              <option value="coordinator">Coordinator</option>
-              <option value="specialist">Specialist</option>
-              <option value="reviewer">Reviewer</option>
-              <option value="custom">Custom…</option>
-            </select>
-            <div class="meta-text">Pick the agent's role, or choose Custom to write your own. Coordinators may delegate (and can still do small tasks themselves); specialists stay on task; reviewers check independently.</div>
-          </div>
-          <div class="field">
-            <label>Role title{form.roleType === 'custom' ? '' : ' (optional)'}</label>
-            <input maxlength="160" placeholder="e.g. Security reviewer" value={form.role}
+          <div class="field" style="grid-column:1/-1">
+            <label>Role title</label>
+            <input maxlength="160" placeholder="e.g. Security reviewer, Backend engineer, Coordinator" value={form.role}
               onInput={(e) => set('role', e.currentTarget.value)} />
-            <div class="meta-text">Shown in team rosters. Leave blank to use the role name above.</div>
+            <div class="meta-text">
+              Shown in team rosters. Behaviour follows this title — nothing else to pick:
+              {' '}<strong>{ROLE_BEHAVIOR[derivedRole]}</strong>
+              {' '}The team page's “Main agent” decides who leads that team.
+            </div>
           </div>
           <div class="field" style="grid-column:1/-1">
             <label>Short description</label>
@@ -688,10 +678,16 @@ export function TeamDetailPage({ teamId, state, notify, refresh, onBack, onOpenA
               <Icon name="plus" size={13} />Add agent
             </button>
           </div>
-          {form.agents.map((agent) => (
+          {form.agents.map((agent) => {
+            // Always render the canonical library profile when one exists by
+            // name: the roster entry is a copy, so its avatar seed can lag
+            // behind a shuffle. Falling back to the copy keeps unsaved
+            // library-less agents working.
+            const canonical = findAgent(state, agent.name) || agent;
+            return (
             <div class="team-agent">
               <div class="team-agent-head">
-                <AgentAvatar agent={agent.id ? agent : (findAgent(state, agent.name) || agent)} name={agent.name} tone="green" radius={6} />
+                <AgentAvatar agent={canonical} name={agent.name} tone="green" radius={6} />
                 <div style="flex:1;min-width:0">
                   <div class="tool-name">
                     <span class="agent-name-trunc" title={plain(agent.name)}>{plain(agent.name)}</span>
@@ -721,7 +717,8 @@ export function TeamDetailPage({ teamId, state, notify, refresh, onBack, onOpenA
                 {(agent.skills || []).map((s) => <span class="chip" title={plain(skillName(s))}>{plain(skillName(s))}</span>)}
               </div>
             </div>
-          ))}
+            );
+          })}
 
           {pickOpen && (
             <div class="modal-backdrop open" onClick={(e) => { if (e.target === e.currentTarget) setPickOpen(false); }}>
