@@ -696,8 +696,14 @@ func (s *Server) testProvider(w http.ResponseWriter, r *http.Request) {
 	}
 	secret := req.APIKey
 	if strings.TrimSpace(secret) == "" && req.KeyName != "" {
-		// Test one named account (the UI's per-key "Test" button).
-		secret, _ = s.store.loadProviderKey(s.root, req.Config.ID, req.KeyName)
+		// Test one named account (the UI's per-key "Test" button). The literal
+		// name "default" addresses the legacy/default credential stored under the
+		// provider id alone, so the default key row can be tested too.
+		keyName := req.KeyName
+		if keyName == "default" {
+			keyName = ""
+		}
+		secret, _ = s.store.loadProviderKey(s.root, req.Config.ID, keyName)
 	} else {
 		secret = s.resolveProviderSecret(req.Config.ID, req.APIKey)
 	}

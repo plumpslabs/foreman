@@ -897,3 +897,46 @@ func TestRosterAgentInheritsLibraryID(t *testing.T) {
 		t.Fatalf("roster id = %q, want library id %q", roster.ID, lib.ID)
 	}
 }
+
+// TestProviderTestDefaultKeyName guards that the default (legacy) key row can be
+// tested: keyName "default" must resolve to the credential stored under the
+// provider id, not to a literal key named "default".
+func TestProviderTestDefaultKeyName(t *testing.T) {
+	server, project := newTestServer(t)
+	handler := server.Handler()
+	base := "?project=" + url.QueryEscape(project)
+
+	// A loopback stub that accepts any bearer token and answers /models.
+	var gotAuth string
+	stub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"data":[{"id":"m1"}]}`))
+	}))
+	defer stub.Close()
+
+	cfg := `{"config":{"id":"tok","name":"TokenHarbor","protocol":"openai-compatible","baseUrl":"` +
+		stub.URL + `/v1","models":["m1"],"defaultModel":"m1","enabled":true},"apiKey":"thk_default_secret"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/providers"+base, bytes.NewBufferString(cfg))
+	req.Header.Set("Content-Type", "application/json")
+	req.RemoteAddr, req.Host = "127.0.0.1:1234", "127.0.0.1:8080"
+	res := httptest.NewRecorder()
+	handler.ServeHTTP(res, req)
+	if res.Code != http.StatusCreated {
+		t.Fatalf("create = %d: %s", res.Code, res.Body.String())
+	}
+
+	body := `{"config":{"id":"tok","name":"TokenHarbor","protocol":"openai-compatible","baseUrl":"` +
+		stub.URL + `/v1","models":["m1"],"defaultModel":"m1","enabled":true},"keyName":"default"}`
+	tr := httptest.NewRequest(http.MethodPost, "/api/providers/test"+base, bytes.NewBufferString(body))
+	tr.Header.Set("Content-Type", "application/json")
+	tr.RemoteAddr, tr.Host = "127.0.0.1:1234", "127.0.0.1:8080"
+	tres := httptest.NewRecorder()
+	handler.ServeHTTP(tres, tr)
+	if tres.Code != http.StatusOK {
+		t.Fatalf("test default = %d: %s", tres.Code, tres.Body.String())
+	}
+	if !strings.Contains(gotAuth, "thk_default_secret") {
+		t.Fatalf("default key was not used, Authorization = %q", gotAuth)
+	}
+}

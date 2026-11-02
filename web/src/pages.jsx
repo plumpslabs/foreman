@@ -1875,16 +1875,29 @@ function ProviderModal({ initial, isNew, existingIds = [], onClose, notify, refr
       notify(error.message || 'Could not copy — reveal it and copy manually');
     }
   };
-  const testKey = async (name) => {
-    setKeyChecks((prev) => ({ ...prev, [name]: { state: 'running', message: 'Testing…' } }));
+  const testKey = async (name, alias) => {
+    const slot = alias || name;
+    setKeyChecks((prev) => ({ ...prev, [slot]: { state: 'running', message: 'Testing…' } }));
     try {
       await api('/api/providers/test', {
         method: 'POST',
         body: JSON.stringify({ config: config(), keyName: name }),
       });
-      setKeyChecks((prev) => ({ ...prev, [name]: { state: 'ok', message: 'Valid' } }));
+      setKeyChecks((prev) => ({ ...prev, [slot]: { state: 'ok', message: 'Valid' } }));
     } catch (error) {
-      setKeyChecks((prev) => ({ ...prev, [name]: { state: 'error', message: error.message } }));
+      setKeyChecks((prev) => ({ ...prev, [slot]: { state: 'error', message: error.message } }));
+    }
+  };
+
+  // Test every enabled account in one go, so a provider with several keys can
+  // be validated without clicking each row.
+  const testAllKeys = async () => {
+    const targets = [];
+    if (initial?.hasApiKey) targets.push({ name: 'default', slot: '__default' });
+    for (const k of keys) targets.push({ name: k.name, slot: k.name });
+    if (!targets.length) { notify('No saved keys to test'); return; }
+    for (const t of targets) {
+      await testKey(t.name, t.slot);
     }
   };
 
@@ -2035,6 +2048,13 @@ function ProviderModal({ initial, isNew, existingIds = [], onClose, notify, refr
                 <code class="key-value" title={revealed.__default ? 'Full key shown' : 'Masked — click Show to reveal'}>
                   {revealed.__default ? revealed.__default : (initial.defaultKeyPreview || '••••')}
                 </code>
+                <span class="tag blue">Default</span>
+                {keyChecks.__default && keyChecks.__default.state !== 'running' ? (
+                  <span class={`tag ${keyChecks.__default.state === 'ok' ? 'green' : 'orange'}`}
+                    title={plain(keyChecks.__default.message)}>
+                    {keyChecks.__default.state === 'ok' ? '✓ valid' : '✗ invalid'}
+                  </span>
+                ) : null}
                 <button type="button" class="btn small" onClick={() => toggleReveal('default', '__default')}
                   title={revealed.__default ? 'Hide key' : 'Show key'}>
                   <Icon name="eye" size={13} />{revealed.__default ? 'Hide' : 'Show'}
@@ -2042,14 +2062,27 @@ function ProviderModal({ initial, isNew, existingIds = [], onClose, notify, refr
                 <button type="button" class="btn small" onClick={() => copyKey('default', '__default')} title="Copy key">
                   <Icon name="copy" size={13} />Copy
                 </button>
+                <button type="button" class="btn small" disabled={keyBusy || (keyChecks.__default && keyChecks.__default.state === 'running')}
+                  onClick={() => testKey('default', '__default')} title="Check whether this key is still valid">
+                  <Icon name="activity" size={13} />{keyChecks.__default && keyChecks.__default.state === 'running' ? 'Testing…' : 'Test'}
+                </button>
               </div>
             ) : null}
             <input type="password" autocomplete="new-password" placeholder={initial?.hasApiKey ? 'Leave blank to keep the saved key, or paste a new one' : 'sk-…'}
               value={apiKey} onInput={(e) => setApiKey(e.currentTarget.value)} />
-            <div class="md-hint">This is the default key. Add more accounts below to connect several keys (e.g. two Zro/MoonMath accounts) under one provider. At run time Foreman uses the first enabled key; the agent profile handles fallback between keys — there is no auto-rotate in Foreman itself.</div>
+            <div class="md-hint">This is the provider's default key. Add named accounts below to connect several keys under the same provider. <strong>Foreman rotates models, not keys:</strong> each run uses the first enabled key, and the retry chain walks the model list — never the key list.</div>
           </div>
           <div class="field">
-            <label>Accounts (named API keys)</label>
+            <div class="field-label-row">
+              <label>Accounts (named API keys)</label>
+              {!isNew ? (
+                <button type="button" class="btn small" onClick={testAllKeys}
+                  disabled={keyBusy || !keys.length && !initial?.hasApiKey}
+                  title="Test every saved key in this provider">
+                  <Icon name="activity" size={13} />Test all keys
+                </button>
+              ) : null}
+            </div>
             {isNew ? (
               <div class="md-hint">Save this provider first, then reopen it to add extra named accounts (each with its own key + ON/OFF + Test).</div>
             ) : (
@@ -2097,13 +2130,19 @@ function ProviderModal({ initial, isNew, existingIds = [], onClose, notify, refr
               <div class="md-hint">No extra accounts yet. Add one below to connect a second key.</div>
             )}
             <div class="key-add">
-              <input style="flex:1" maxlength="80" placeholder="Account name (e.g. Key 1)" value={newKeyName}
+              <input style="flex:1" maxlength="80" placeholder="Account name (auto: “TokenHarbor 1”)" value={newKeyName}
                 onInput={(e) => setNewKeyName(e.currentTarget.value)} />
               <input style="flex:2" type="password" autocomplete="new-password" placeholder="sk-…" value={newKeySecret}
                 onInput={(e) => setNewKeySecret(e.currentTarget.value)} />
               <button type="button" class="btn small primary" disabled={keyBusy} onClick={addKey}>
                 <Icon name="plus" size={13} />Add account
               </button>
+            </div>
+            <div class="md-hint">
+              <strong>How retries work:</strong> Foreman does not rotate keys. Each run picks the first
+              enabled key, and on failure it rotates through the <em>models</em> in the agent's fallback
+              chain (each model keeps that same provider + key). Keys are only a manual switch — turn one
+              OFF to make the next enabled one the active key.
             </div>
               </>
             )}
