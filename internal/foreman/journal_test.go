@@ -176,7 +176,12 @@ func TestJournalForRoomScoping(t *testing.T) {
 	}
 	defer st.Close()
 
-	must := func(e JournalEntry, err error) { t.Helper(); if err != nil { t.Fatal(err) } }
+	must := func(e JournalEntry, err error) {
+		t.Helper()
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
 	// Room A and B both touch auth.go; room A also touches db.go.
 	must(st.SaveJournal("room-a", "alice", "auth.go", "GenerateToken", "switched JWT to RS256", ""))
 	must(st.SaveJournal("room-a", "alice", "db.go", "", "added busy_timeout", ""))
@@ -212,7 +217,12 @@ func TestJournalTTLPrune(t *testing.T) {
 	}
 	defer st.Close()
 
-	must := func(e JournalEntry, err error) { t.Helper(); if err != nil { t.Fatal(err) } }
+	must := func(e JournalEntry, err error) {
+		t.Helper()
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
 	// Two old entries on the same file, plus one recent.
 	old1, _ := st.SaveJournal("room-a", "alice", "auth.go", "GenerateToken", "first attempt", "")
 	old2, _ := st.SaveJournal("room-a", "alice", "auth.go", "GenerateToken", "second attempt", "")
@@ -236,4 +246,3 @@ func TestJournalTTLPrune(t *testing.T) {
 		t.Fatalf("after prune: %d rows, want 2 (%+v)", len(remaining), remaining)
 	}
 }
-

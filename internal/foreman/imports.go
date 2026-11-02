@@ -39,6 +39,35 @@ var importLinePatterns = []*regexp.Regexp{
 
 // iteration order matters little; each file is scanned independently.
 
+// importSource extracts the raw import specifiers of one source file. The
+// default implementation scans lines, which is dependency-free but blind to
+// import statements that wrap across lines. Builds with `-tags ts_symbols`
+// swap in a tree-sitter extractor (see imports_treesitter.go) that reads the
+// syntax tree instead.
+type importSource interface {
+	// Specifiers returns the specifiers found in src. The bool reports
+	// whether the implementation understood this file at all; false means
+	// "no grammar for this extension, or the file did not parse", and the
+	// caller falls back to the line scanner.
+	Specifiers(rel string, src []byte) ([]string, bool)
+}
+
+// lineImports is the default, dependency-free extractor.
+type lineImports struct{}
+
+func (lineImports) Specifiers(_ string, src []byte) ([]string, bool) {
+	return lineImportSpecifiers(string(src)), true
+}
+
+// fileImports is the configured extractor. Default builds scan lines; the
+// ts_symbols build replaces it via init().
+var fileImports importSource = lineImports{}
+
+// importsUseTreeSitter reports whether the opt-in syntax-tree extractor is
+// compiled in. Tests use it to decide how strong an assertion to make about
+// the configured extractor.
+var importsUseTreeSitter bool
+
 // tsImportExts lists the extensions tried, in order, when resolving a
 // relative TypeScript/JavaScript specifier.
 var tsImportExts = []string{".ts", ".tsx", ".mts", ".cts", ".js", ".jsx", ".mjs", ".cjs",
@@ -68,7 +97,13 @@ func extractImports(root, rel, module string, byRel map[string]bool) []string {
 	case ".go":
 		spans = goImportSpecifiers(string(data))
 	default:
-		spans = lineImportSpecifiers(string(data))
+		specs, ok := fileImports.Specifiers(rel, data)
+		if !ok {
+			// The configured extractor has no grammar for this file or could
+			// not parse it; the line scanner is always available.
+			specs = lineImportSpecifiers(string(data))
+		}
+		spans = specs
 	}
 	dir := filepath.Dir(rel)
 	seen := map[string]bool{}
@@ -162,6 +197,24 @@ func resolveImportSpecifier(rel, dir, spec, module string, byRel map[string]bool
 		return matchBySuffix(strings.ReplaceAll(spec, "::", "/"), byRel)
 	case strings.HasPrefix(spec, "crate_"):
 		return ""
+	case strings.HasPrefix(spec, ".") && !strings.Contains(spec, "/"):
+		// python relative import: one dot is the current package, each extra
+		// dot walks up one directory. from .models import X in
+		// app/routes/users.py → app/routes/models.py.
+		dots := 0
+		for dots < len(spec) && spec[dots] == '.' {
+			dots++
+		}
+		base := dir
+		for i := 1; i < dots; i++ {
+			base = filepath.Dir(base)
+		}
+		rest := strings.ReplaceAll(strings.TrimPrefix(spec[dots:], "/"), ".", "/")
+		cand := filepath.ToSlash(filepath.Clean(filepath.Join(base, rest)))
+		if dst := expandCandidate(cand, byRel); dst != "" {
+			return dst
+		}
+		return matchBySuffix(cand, byRel)
 	default:
 		clean := strings.ReplaceAll(spec, ".", "/")
 		// A bare single token is a package name, not a file; do not guess.

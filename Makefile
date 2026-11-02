@@ -11,13 +11,19 @@ LDFLAGS := -s -w -X github.com/plumpslabs/foreman/internal/version.Version=$(VER
 BINARY := bin/foreman
 BINDIR ?= $(shell $(GO) env GOPATH)/bin
 
-.PHONY: all build web test race vet fmt fmt-check lint tidy check run install uninstall clean help
+.PHONY: all build build-ts web test test-ts race vet fmt fmt-check lint tidy check run install uninstall clean help
 
 all: check build
 
 ## build: compile binary for current platform (builds web UI first if missing)
 build: web
 	CGO_ENABLED=0 $(GO) build -trimpath -ldflags "$(LDFLAGS)" -o $(BINARY) ./cmd/foreman
+
+## build-ts: opt-in build with tree-sitter syntax trees (symbols + imports)
+## Adds ~12 MB to the binary and ~25 pure-Go grammar modules; still CGO-free.
+## Default builds stay heuristic so the dependency footprint stays minimal.
+build-ts: web
+	CGO_ENABLED=0 $(GO) build -tags ts_symbols -trimpath -ldflags "$(LDFLAGS)" -o $(BINARY) ./cmd/foreman
 
 ## web: build the embedded Preact dashboard into internal/foreman/web/dist
 web:
@@ -35,6 +41,10 @@ run:
 ## test: run unit tests
 test:
 	$(GO) test ./...
+
+## test-ts: run unit tests with the tree-sitter extractors compiled in
+test-ts:
+	$(GO) test -tags ts_symbols ./...
 
 ## race: run tests with race detector
 race:

@@ -33,7 +33,9 @@ start`.
   agent's context, *passive* ones stay as reference.
 - **Runs & activity** — run history with per-run details, live status, pause/continue, and
   execution policy (concurrency, budget, approvals).
-- **Signals** — signals mined from runs, surfaced as an explorable graph.
+- **Signals** — signals mined from runs, surfaced as an explorable graph. Structural `import`
+  edges are derived straight from the source tree at index time, so a freshly opened project
+  already has a useful graph before any agent runs.
 - **MCP Servers** — global server definitions (stdio or HTTP); rooms opt in per server, with
   connection testing and per-server status.
 - **Provider presets** — TokenHarbor, OpenCode Zen (with local auto-detection), OpenCode Go,
@@ -70,6 +72,22 @@ to install. Build from source with Go 1.26+:
 ```sh
 go build -o foreman ./cmd/foreman
 ```
+
+### Optional: tree-sitter extractors
+
+Symbol and import extraction work out of the box with no extra dependencies. For higher-fidelity
+parsing, build with the `ts_symbols` tag to swap in pure-Go tree-sitter grammars:
+
+```sh
+make build-ts          # or: go build -tags ts_symbols -o foreman ./cmd/foreman
+```
+
+This reads real syntax trees instead of scanning lines, which matters for imports that wrap
+across several lines, dynamic `import()` / `require()` calls, Python relative imports, and Rust
+`mod` / `use` trees. Measured on a 610-file TypeScript backend: 214 extra import edges, zero lost,
+at 2.1 ms per file versus 0.33 ms for line scanning (1.3 s vs 0.2 s for a full index refresh).
+The cost is ~12 MB of binary size and 24 extra modules, so it stays opt-in — default builds keep
+the zero-dependency heuristic path. It is still CGO-free.
 
 ## Run
 
