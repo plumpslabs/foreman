@@ -206,3 +206,37 @@ func TestShufflePropagatesToTeamRoster(t *testing.T) {
 		t.Fatalf("roster seed = %q, want the shuffled seed", rosterSeed)
 	}
 }
+
+// TestTemplateAgentInheritsLibraryAvatar guards that a template card shows the
+// same avatar as the library profile once that agent has been imported —
+// otherwise the same agent appears with two different pictures.
+func TestTemplateAgentInheritsLibraryAvatar(t *testing.T) {
+	store, err := openStoreForTest(t, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	lib, err := store.SaveAgent(Agent{Name: "Orion", Role: "Coordinator", AvatarSeed: "library-seed", AvatarStyle: "bottts"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A template that ships a different seed for the same agent name.
+	store.state.Templates = append(store.state.Templates, TeamTemplate{
+		ID: "tpl", Name: "Everyday Ops", MainAgent: "Orion",
+		Agents: []Agent{{Name: "Orion", Role: "Coordinator", AvatarSeed: "template-seed", AvatarStyle: "adventurer"}},
+	})
+	store.mu.Lock()
+	store.reconcileAgentsFromLibraryLocked()
+	store.mu.Unlock()
+
+	for _, tpl := range store.Snapshot().Templates {
+		for _, a := range tpl.Agents {
+			if a.Name != "Orion" {
+				continue
+			}
+			if a.AvatarSeed != "library-seed" || a.ID != lib.ID {
+				t.Fatalf("template agent = seed %q id %q, want library seed %q id %q",
+					a.AvatarSeed, a.ID, "library-seed", lib.ID)
+			}
+		}
+	}
+}

@@ -162,12 +162,19 @@ function TemplateCard({ template, onUse, state }) {
         Main agent: <b>{plain(template.mainAgent)}</b>
       </div>
       <div class="template-agents">
-        {(template.agents || []).map((a) => (
-          <span class="template-agent" key={a.name} title={plain(a.role || a.name)}>
-            <AgentAvatar agent={a} name={a.name} tone={a.name === template.mainAgent ? 'green' : 'blue'} size={22} radius={5} style="font-size:9px" />
-            <span class="template-agent-name">{plain(a.name)}</span>
-          </span>
-        ))}
+        {(template.agents || []).map((a) => {
+          // Prefer the canonical library profile when this agent has already
+          // been imported: the template ships its own seed, so without this the
+          // template card and the imported team would show different avatars
+          // for the same agent name.
+          const canonical = findAgent(state, a.name) || a;
+          return (
+            <span class="template-agent" key={a.name} title={plain(a.role || a.name)}>
+              <AgentAvatar agent={canonical} name={a.name} tone={a.name === template.mainAgent ? 'green' : 'blue'} size={22} radius={5} style="font-size:9px" />
+              <span class="template-agent-name">{plain(a.name)}</span>
+            </span>
+          );
+        })}
       </div>
       <button class="btn" style="width:100%;margin-top:auto" disabled={busy || alreadyImported}
         onClick={async () => {
@@ -1816,6 +1823,10 @@ function ProviderModal({ initial, isNew, existingIds = [], onClose, notify, refr
   const [newKeyName, setNewKeyName] = useState('');
   const [newKeySecret, setNewKeySecret] = useState('');
   const [keyBusy, setKeyBusy] = useState(false);
+  // Per-key validity results and revealed secrets, keyed by slot name (the
+  // default key uses the "__default" slot).
+  const [keyChecks, setKeyChecks] = useState({});
+  const [revealed, setRevealed] = useState({});
 
   const set = (field, value) => setForm((prev) => ({ ...prev, [field]: value }));
   const models = modelsText.split(/[\n,]+/).map((m) => m.trim()).filter(Boolean);
@@ -1845,11 +1856,9 @@ function ProviderModal({ initial, isNew, existingIds = [], onClose, notify, refr
 
   const toggleKey = (name, enabled) => saveKey(name, '', enabled);
 
-  // Per-key validity check. A key can be enabled but expired/invalid — this
-  // probes the provider with that specific account so the user knows which
-  // one actually works, instead of only seeing ON/OFF.
-  const [keyChecks, setKeyChecks] = useState({});
-  const [revealed, setRevealed] = useState({});
+  // Show/Hide, Copy, and Test act on one stored key. `name` is the key's name
+  // in storage ("default" for the legacy credential) and `alias` is the UI slot
+  // (the default key renders as "__default").
   const toggleReveal = async (name, alias) => {
     const slot = alias || name;
     if (revealed[slot]) {
@@ -1884,21 +1893,33 @@ function ProviderModal({ initial, isNew, existingIds = [], onClose, notify, refr
         body: JSON.stringify({ config: config(), keyName: name }),
       });
       setKeyChecks((prev) => ({ ...prev, [slot]: { state: 'ok', message: 'Valid' } }));
+      return 'ok';
     } catch (error) {
       setKeyChecks((prev) => ({ ...prev, [slot]: { state: 'error', message: error.message } }));
+      return 'error';
     }
   };
 
-  // Test every enabled account in one go, so a provider with several keys can
-  // be validated without clicking each row.
+  // Test the default key plus every additional account in one pass. Each row
+  // updates independently, so a failing key turns red on its own and the
+  // summary names exactly which accounts need attention.
   const testAllKeys = async () => {
     const targets = [];
-    if (initial?.hasApiKey) targets.push({ name: 'default', slot: '__default' });
-    for (const k of keys) targets.push({ name: k.name, slot: k.name });
+    if (initial?.hasApiKey) targets.push({ name: 'default', slot: '__default', label: 'Default key' });
+    for (const k of keys) targets.push({ name: k.name, slot: k.name, label: k.name });
     if (!targets.length) { notify('No saved keys to test'); return; }
-    for (const t of targets) {
-      await testKey(t.name, t.slot);
+    setKeyBusy(true);
+    const failed = [];
+    try {
+      for (const t of targets) {
+        if (await testKey(t.name, t.slot) === 'error') failed.push(t.label);
+      }
+    } finally {
+      setKeyBusy(false);
     }
+    notify(failed.length
+      ? `${failed.length} of ${targets.length} keys failed: ${failed.join(', ')}`
+      : `All ${targets.length} keys are valid`);
   };
 
   const deleteKey = async (name) => {
@@ -1919,12 +1940,13 @@ function ProviderModal({ initial, isNew, existingIds = [], onClose, notify, refr
   };
 
   const addKey = async () => {
-    // Auto-name when left blank: "<Provider> 1", "<Provider> 2", … so the list
-    // reads clearly (e.g. "TokenHarbor 1") without the user inventing names.
+    // Auto-name when left blank: "<Provider> 1", "<Provider> 2", … The default
+    // key already occupies slot 1, so named accounts start at 2 to avoid two
+    // different keys both looking like the "first" one.
     let name = newKeyName.trim();
     if (!name) {
       const base = (form.name || form.id || 'Key').trim();
-      let n = 1;
+      let n = initial?.hasApiKey ? 2 : 1;
       while (keys.some((k) => k.name === `${base} ${n}`)) n += 1;
       name = `${base} ${n}`;
     }
@@ -1953,6 +1975,20 @@ function ProviderModal({ initial, isNew, existingIds = [], onClose, notify, refr
     defaultModel,
     enabled: form.enabled,
   });
+
+  // Display value for the default-key field, mirroring a standard edit form:
+  // the saved key stays visible in the field as dots and typing (or pasting)
+  // replaces it. Only `apiKey` is submitted, so leaving the field untouched
+  // keeps the stored key. Focusing selects the whole mask so a paste never
+  // appends to it.
+  const savedKeyDisplay = revealed.__default
+    ? revealed.__default
+    : (initial?.defaultKeyPreview
+      ? '•'.repeat(Math.min(28, Math.max(10, initial.defaultKeyPreview.length + 6)))
+      : '');
+  const defaultKeyValue = apiKey || savedKeyDisplay;
+  const defaultKeyTesting = keyChecks.__default?.state === 'running';
+  const defaultKeyInvalid = keyChecks.__default?.state === 'error';
 
   const runTest = async () => {
     if (!models.length) { setTest({ state: 'error', message: 'Add at least one model first' }); return; }
@@ -2042,108 +2078,126 @@ function ProviderModal({ initial, isNew, existingIds = [], onClose, notify, refr
           </div>
 
           <div class="field">
-            <label>API key {initial?.hasApiKey ? '(saved — leave blank to keep)' : ''}</label>
-            {initial?.hasApiKey && !apiKey ? (
-              <div class="key-row" style="margin-bottom:6px">
-                <code class="key-value" title={revealed.__default ? 'Full key shown' : 'Masked — click Show to reveal'}>
-                  {revealed.__default ? revealed.__default : (initial.defaultKeyPreview || '••••')}
-                </code>
-                <span class="tag blue">Default</span>
-                {keyChecks.__default && keyChecks.__default.state !== 'running' ? (
-                  <span class={`tag ${keyChecks.__default.state === 'ok' ? 'green' : 'orange'}`}
-                    title={plain(keyChecks.__default.message)}>
-                    {keyChecks.__default.state === 'ok' ? '✓ valid' : '✗ invalid'}
-                  </span>
-                ) : null}
-                <button type="button" class="btn small" onClick={() => toggleReveal('default', '__default')}
-                  title={revealed.__default ? 'Hide key' : 'Show key'}>
-                  <Icon name="eye" size={13} />{revealed.__default ? 'Hide' : 'Show'}
-                </button>
-                <button type="button" class="btn small" onClick={() => copyKey('default', '__default')} title="Copy key">
-                  <Icon name="copy" size={13} />Copy
-                </button>
-                <button type="button" class="btn small" disabled={keyBusy || (keyChecks.__default && keyChecks.__default.state === 'running')}
-                  onClick={() => testKey('default', '__default')} title="Check whether this key is still valid">
-                  <Icon name="activity" size={13} />{keyChecks.__default && keyChecks.__default.state === 'running' ? 'Testing…' : 'Test'}
-                </button>
+            <div class="field-label-row">
+              <label>Default API key</label>
+              {initial?.hasApiKey ? <span class="tag blue">Saved</span> : null}
+            </div>
+            <div class={`key-field ${defaultKeyInvalid ? 'invalid' : ''}`}>
+              <input
+                type={revealed.__default ? 'text' : 'password'}
+                autocomplete="new-password"
+                spellcheck={false}
+                placeholder={initial?.hasApiKey ? 'Paste a new key to replace the saved one' : 'sk-…'}
+                value={defaultKeyValue}
+                onFocus={(e) => { if (!apiKey && savedKeyDisplay) e.currentTarget.select(); }}
+                onInput={(e) => setApiKey(e.currentTarget.value)}
+              />
+              <button type="button" class="key-icon" onClick={() => toggleReveal('default', '__default')}
+                title={revealed.__default ? 'Hide key' : 'Show key'} aria-label={revealed.__default ? 'Hide key' : 'Show key'}>
+                <Icon name={revealed.__default ? 'eye-off' : 'eye'} size={14} />
+              </button>
+              <button type="button" class="key-icon" onClick={() => copyKey('default', '__default')}
+                title="Copy key" aria-label="Copy key" disabled={!initial?.hasApiKey && !apiKey}>
+                <Icon name="copy" size={14} />
+              </button>
+              <button type="button" class="key-icon" onClick={() => testKey('default', '__default')}
+                title="Test this key" aria-label="Test this key"
+                disabled={keyBusy || defaultKeyTesting || (!initial?.hasApiKey && !apiKey)}>
+                <Icon name={defaultKeyTesting ? 'refresh' : 'activity'} size={14} class={defaultKeyTesting ? 'spin' : ''} />
+              </button>
+            </div>
+            <div class="field-note">
+              <span class="field-note-lead">Used for every run</span>
+              — Foreman sends the first enabled key and retries by switching <em>models</em>, never keys.
+            </div>
+            {keyChecks.__default && keyChecks.__default.state !== 'running' ? (
+              <div class={`key-check ${keyChecks.__default.state}`}>
+                <Icon name={keyChecks.__default.state === 'ok' ? 'check-circle' : 'alert-triangle'} size={13} />
+                <span>{keyChecks.__default.state === 'ok' ? 'Key is valid' : plain(keyChecks.__default.message)}</span>
               </div>
             ) : null}
-            <input type="password" autocomplete="new-password" placeholder={initial?.hasApiKey ? 'Leave blank to keep the saved key, or paste a new one' : 'sk-…'}
-              value={apiKey} onInput={(e) => setApiKey(e.currentTarget.value)} />
-            <div class="md-hint">This is the provider's default key. Add named accounts below to connect several keys under the same provider. <strong>Foreman rotates models, not keys:</strong> each run uses the first enabled key, and the retry chain walks the model list — never the key list.</div>
           </div>
           <div class="field">
             <div class="field-label-row">
-              <label>Accounts (named API keys)</label>
+              <label>Additional accounts</label>
               {!isNew ? (
                 <button type="button" class="btn small" onClick={testAllKeys}
-                  disabled={keyBusy || !keys.length && !initial?.hasApiKey}
-                  title="Test every saved key in this provider">
-                  <Icon name="activity" size={13} />Test all keys
+                  disabled={keyBusy || (!keys.length && !initial?.hasApiKey)}
+                  title="Test the default key and every additional account">
+                  <Icon name="activity" size={13} />Test all
                 </button>
               ) : null}
             </div>
             {isNew ? (
-              <div class="md-hint">Save this provider first, then reopen it to add extra named accounts (each with its own key + ON/OFF + Test).</div>
+              <div class="field-note">
+                Save this provider first, then reopen it to attach extra accounts to the same endpoint.
+              </div>
             ) : (
               <>
                 {keys.length > 0 ? (
-              <div class="key-list">
-                {keys.map((k) => {
-                  const chk = keyChecks[k.name];
-                  return (
-                    <div class="key-row" key={k.name}>
-                      <label class="check" style="margin:0">
-                        <input type="checkbox" checked={k.enabled}
-                          onChange={(e) => toggleKey(k.name, e.currentTarget.checked)} />
-                        <span>{k.name}</span>
-                      </label>
-                      <code class="key-value" title={revealed[k.name] ? 'Full key shown' : 'Masked — click Show to reveal'}>
-                        {revealed[k.name] ? revealed[k.name] : (k.preview || '••••')}
-                      </code>
-                      <span class={`tag ${k.enabled ? 'blue' : 'grey'}`}>{k.enabled ? 'On' : 'Off'}</span>
-                      {chk && chk.state !== 'running' ? (
-                        <span class={`tag ${chk.state === 'ok' ? 'green' : 'orange'}`}
-                          title={plain(chk.message)}>
-                          {chk.state === 'ok' ? '✓ valid' : '✗ invalid'}
-                        </span>
-                      ) : null}
-                      <button type="button" class="btn small" onClick={() => toggleReveal(k.name)}
-                        title={revealed[k.name] ? 'Hide key' : 'Show key'}>
-                        <Icon name="eye" size={13} />{revealed[k.name] ? 'Hide' : 'Show'}
-                      </button>
-                      <button type="button" class="btn small" onClick={() => copyKey(k.name)} title="Copy key">
-                        <Icon name="copy" size={13} />
-                      </button>
-                      <button type="button" class="btn small" disabled={keyBusy || (chk && chk.state === 'running')}
-                        onClick={() => testKey(k.name)} title="Check whether this key is still valid">
-                        <Icon name="activity" size={13} />{chk && chk.state === 'running' ? 'Testing…' : 'Test'}
-                      </button>
-                      <button type="button" class="btn small danger" disabled={keyBusy} onClick={() => deleteKey(k.name)}>
-                        <Icon name="trash" size={13} />
-                      </button>
-                    </div>
-                  );
-                })}
-              </div>
-            ) : (
-              <div class="md-hint">No extra accounts yet. Add one below to connect a second key.</div>
-            )}
-            <div class="key-add">
-              <input style="flex:1" maxlength="80" placeholder="Account name (auto: “TokenHarbor 1”)" value={newKeyName}
-                onInput={(e) => setNewKeyName(e.currentTarget.value)} />
-              <input style="flex:2" type="password" autocomplete="new-password" placeholder="sk-…" value={newKeySecret}
-                onInput={(e) => setNewKeySecret(e.currentTarget.value)} />
-              <button type="button" class="btn small primary" disabled={keyBusy} onClick={addKey}>
-                <Icon name="plus" size={13} />Add account
-              </button>
-            </div>
-            <div class="md-hint">
-              <strong>How retries work:</strong> Foreman does not rotate keys. Each run picks the first
-              enabled key, and on failure it rotates through the <em>models</em> in the agent's fallback
-              chain (each model keeps that same provider + key). Keys are only a manual switch — turn one
-              OFF to make the next enabled one the active key.
-            </div>
+                  <div class="key-list">
+                    {keys.map((k) => {
+                      const chk = keyChecks[k.name];
+                      const invalid = chk && chk.state === 'error';
+                      const testing = chk && chk.state === 'running';
+                      return (
+                        <div class={`key-row ${invalid ? 'invalid' : ''}`} key={k.name}>
+                          <label class="key-toggle" title={k.enabled ? 'Enabled — used for runs' : 'Disabled — skipped'}>
+                            <input type="checkbox" checked={k.enabled}
+                              onChange={(e) => toggleKey(k.name, e.currentTarget.checked)} />
+                            <span class={`tag ${k.enabled ? 'blue' : 'grey'}`}>{k.enabled ? 'On' : 'Off'}</span>
+                          </label>
+                          <span class="key-name" title={plain(k.name)}>{plain(k.name)}</span>
+                          <div class="key-field key-field-compact">
+                            <input type={revealed[k.name] ? 'text' : 'password'} readonly
+                              spellcheck={false} value={revealed[k.name] || k.preview || '••••'} />
+                            <button type="button" class="key-icon" onClick={() => toggleReveal(k.name)}
+                              title={revealed[k.name] ? 'Hide key' : 'Show key'}
+                              aria-label={revealed[k.name] ? 'Hide key' : 'Show key'}>
+                              <Icon name={revealed[k.name] ? 'eye-off' : 'eye'} size={14} />
+                            </button>
+                            <button type="button" class="key-icon" onClick={() => copyKey(k.name)}
+                              title="Copy key" aria-label="Copy key">
+                              <Icon name="copy" size={14} />
+                            </button>
+                            <button type="button" class="key-icon" disabled={keyBusy || testing}
+                              onClick={() => testKey(k.name)} title="Test this key" aria-label="Test this key">
+                              <Icon name={testing ? 'refresh' : 'activity'} size={14} class={testing ? 'spin' : ''} />
+                            </button>
+                            <button type="button" class="key-icon danger" disabled={keyBusy}
+                              onClick={() => deleteKey(k.name)} title="Remove account" aria-label="Remove account">
+                              <Icon name="trash" size={14} />
+                            </button>
+                          </div>
+                          {chk && chk.state !== 'running' ? (
+                            <div class={`key-check ${chk.state}`}>
+                              <Icon name={chk.state === 'ok' ? 'check-circle' : 'alert-triangle'} size={13} />
+                              <span>{chk.state === 'ok' ? 'Valid' : plain(chk.message)}</span>
+                            </div>
+                          ) : null}
+                        </div>
+                      );
+                    })}
+                  </div>
+                ) : (
+                  <div class="field-note">No extra accounts. Add one below if this provider has a second key.</div>
+                )}
+                <div class="key-add">
+                  <input maxlength="80" placeholder={`Account name (defaults to “${(form.name || form.id || 'Key').trim()} ${keys.length + 1}”)`} value={newKeyName}
+                    onInput={(e) => setNewKeyName(e.currentTarget.value)} />
+                  <div class="key-field">
+                    <input type="password" autocomplete="new-password" spellcheck={false} placeholder="sk-…"
+                      value={newKeySecret} onInput={(e) => setNewKeySecret(e.currentTarget.value)} />
+                  </div>
+                  <button type="button" class="btn small" disabled={keyBusy} onClick={addKey}>
+                    <Icon name="plus" size={13} />Add
+                  </button>
+                </div>
+                <div class="field-note">
+                  <span class="field-note-lead">One key per run</span>
+                  — Foreman uses the first enabled key and retries by switching models, never keys.
+                  Turn a key off to make the next one active.
+                </div>
               </>
             )}
           </div>

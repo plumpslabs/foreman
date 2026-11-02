@@ -713,17 +713,67 @@ select { cursor: pointer; }
 }
 .code-area:focus { border-color: var(--accent); outline: none; }
 .md-hint { display: flex; gap: 5px; align-items: center; font-size: 10px; color: var(--muted); margin-top: 4px; }
-.key-list { display: flex; flex-direction: column; gap: 6px; margin-bottom: 8px; }
-.key-row { display: flex; align-items: center; gap: 8px; padding: 7px 10px; border: 1px solid var(--line); border-radius: 7px; background: #15181e; flex-wrap: wrap; }
-.key-row .check span { font-size: 12px; font-weight: 600; }
-.key-row .tag { font-size: 10px; }
-.key-value {
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px;
-  color: var(--muted); background: #10131a; border: 1px solid var(--line);
-  border-radius: 5px; padding: 2px 7px; max-width: 220px; overflow: hidden;
-  text-overflow: ellipsis; white-space: nowrap;
+
+/* Field note: quiet helper text under an input, one line per sentence. */
+.field-note { font-size: 10.5px; color: var(--muted); line-height: 1.55; margin-top: 6px; }
+.field-note-lead { color: #aab3c0; font-weight: 600; }
+
+/* Key field: an input with inline icon actions on the right, so secrets are
+   edited in place instead of behind a separate read-only row. */
+.key-field {
+  display: flex; align-items: center; gap: 2px; width: 100%;
+  background: #0d1014; border: 1px solid #343b46; border-radius: 8px;
+  padding: 2px 4px 2px 0; transition: border-color .15s ease;
 }
-.key-add { display: flex; gap: 6px; align-items: center; }
+.key-field:focus-within { border-color: var(--accent); }
+.key-field.invalid { border-color: #523030; }
+.key-field input {
+  flex: 1; min-width: 0; border: 0; background: transparent; padding: 7px 10px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11.5px;
+  color: var(--text); letter-spacing: .02em;
+}
+.key-field input:focus { outline: none; }
+.key-field-compact input { font-size: 11px; }
+.key-icon {
+  display: grid; place-items: center; flex-shrink: 0; width: 26px; height: 26px;
+  border: 0; border-radius: 6px; background: transparent; color: var(--muted);
+  cursor: pointer; transition: background .12s ease, color .12s ease;
+}
+.key-icon:hover:not(:disabled) { background: #1b202a; color: var(--text); }
+.key-icon.danger:hover:not(:disabled) { background: #2a1719; color: #ffadad; }
+.key-icon:disabled { opacity: .45; cursor: default; }
+.key-icon .spin { animation: spin 1s linear infinite; }
+
+/* Key rows: name + toggle on the left, an inline secret field with icon
+   actions on the right, and a validation line underneath when needed. */
+.key-list { display: flex; flex-direction: column; gap: 8px; margin-bottom: 10px; }
+.key-row {
+  display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: center;
+  gap: 6px 10px; padding: 9px 11px; border: 1px solid var(--line);
+  border-radius: 8px; background: #15181e;
+}
+.key-row.invalid { border-color: #523030; background: #1c1618; }
+.key-toggle { display: flex; align-items: center; gap: 7px; cursor: pointer; }
+.key-toggle .tag { font-size: 9.5px; }
+.key-name {
+  font-size: 12px; font-weight: 600; min-width: 0;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.key-row .key-field { grid-column: 1 / -1; }
+.key-check {
+  grid-column: 1 / -1; display: flex; align-items: center; gap: 5px;
+  font-size: 10.5px; line-height: 1.4;
+}
+.key-check.ok { color: #c5e89b; }
+.key-check.error { color: #ffadad; }
+
+.key-add { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.4fr) auto; gap: 8px; align-items: center; }
+.key-add > input {
+  width: 100%; background: #0d1014; border: 1px solid #343b46; border-radius: 8px;
+  color: var(--text); padding: 8px 10px; font-size: 11.5px;
+}
+.key-add > input:focus { border-color: var(--accent); outline: none; }
+.key-add .key-field { padding-right: 2px; }
 .tool-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 6px; }
 .tool-check {
   display: flex; align-items: center; gap: 7px; padding: 7px 9px;

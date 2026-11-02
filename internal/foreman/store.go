@@ -463,11 +463,17 @@ func (s *Store) reconcileRosterFromLibraryLocked(agents []Agent) []Agent {
 }
 
 // reconcileAgentsFromLibraryLocked pushes the library profiles into every
-// team roster. It runs at load time (fixing already-diverged data), on profile
-// saves, and on team saves.
+// team roster and template. It runs at load time (fixing already-diverged
+// data), on profile saves, and on team saves. Templates matter too: an agent
+// that has already been imported must show the same avatar in the template
+// card as it does in the library, otherwise the same agent appears with two
+// different pictures.
 func (s *Store) reconcileAgentsFromLibraryLocked() {
 	for i := range s.state.Teams {
 		s.state.Teams[i].Agents = s.reconcileRosterFromLibraryLocked(s.state.Teams[i].Agents)
+	}
+	for i := range s.state.Templates {
+		s.state.Templates[i].Agents = s.reconcileRosterFromLibraryLocked(s.state.Templates[i].Agents)
 	}
 }
 
