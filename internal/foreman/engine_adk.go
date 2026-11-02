@@ -285,8 +285,24 @@ func (e *ADKEngine) modelFor(req EngineRequest) (model.LLM, error) {
 	}
 }
 
-// costEstimate approximates USD from prompt/candidate token counts using
-// generic mid-range prices (input $3 / 1M, output $15 / 1M). Used only as a
+// newPromptAgent builds the runner agent for one engine call. The dynamically
+// composed prompt contains literal braces (JSON examples, `{word}` output
+// templates, webhook paths like /{roomID}). ADK treats `{identifier}` in a
+// plain Instruction as a session-state placeholder and fails the call with
+// "state key does not exist" when no such key exists — an InstructionProvider
+// bypasses state templating entirely, so the prompt reaches the model verbatim.
+func newPromptAgent(prompt string, m model.LLM, tools []tool.Tool) (agent.Agent, error) {
+	return llmagent.New(llmagent.Config{
+		Name:  "foreman_agent",
+		Model: m,
+		InstructionProvider: func(_ agent.ReadonlyContext) (string, error) {
+			return prompt, nil
+		},
+		Tools: tools,
+	})
+}
+
+// costEstimate approximates USD from prompt/candidate token counts using// generic mid-range prices (input $3 / 1M, output $15 / 1M). Used only as a
 // guard; real billing comes from the provider.
 func costEstimate(prompt, cand int64) float64 {
 	const inPer1e6 = 3.0
@@ -419,12 +435,7 @@ func (e *ADKEngine) RunControlled(ctx context.Context, req EngineRequest, emit f
 		}
 	}()
 
-	a, err := llmagent.New(llmagent.Config{
-		Name:        "foreman_agent",
-		Model:       m,
-		Instruction: req.Prompt,
-		Tools:       tools,
-	})
+	a, err := newPromptAgent(req.Prompt, m, tools)
 	if err != nil {
 		return EngineResult{}, fmt.Errorf("create agent: %w", err)
 	}
