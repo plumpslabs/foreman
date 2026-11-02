@@ -725,6 +725,11 @@ select { cursor: pointer; }
 .code-area:focus { border-color: var(--accent); outline: none; }
 .md-hint { display: flex; gap: 5px; align-items: center; font-size: 10px; color: var(--muted); margin-top: 4px; }
 
+/* Multi-line hint: `.md-hint` is a flex row for a single sentence, so several
+   spans used to land side by side in columns. Stack them instead. */
+.md-hint-stack { display: block; }
+.md-hint-stack > span { display: block; margin-top: 2px; }
+
 /* Field note: quiet helper text under an input, one line per sentence. */
 .field-note { font-size: 10.5px; color: var(--muted); line-height: 1.55; margin-top: 6px; }
 .field-note-lead { color: #aab3c0; font-weight: 600; }

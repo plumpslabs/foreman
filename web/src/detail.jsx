@@ -241,7 +241,7 @@ function ProviderModelField({ providerId, providers, model, onChange, onProvider
           </div>
         )}
       </div>
-      <div class="md-hint" style="margin-top:6px">
+      <div class="md-hint md-hint-stack" style="margin-top:6px">
         {chain.length === 0
           ? <span class="meta-text">Auto — workspace/provider default model, with automatic rotation across the provider's models on failure.</span>
           : <span class="meta-text"><strong>Fallback chain:</strong> {chain.map(plain).join(' → ')} — tried in order; each model gets at least one attempt, and each account of that model's provider gets one too, whatever Max retries is set to.</span>}
