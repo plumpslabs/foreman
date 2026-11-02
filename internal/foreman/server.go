@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"net/url"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -84,6 +85,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/rooms/{roomID}/panels", s.registerRoomPanel)
 	mux.HandleFunc("GET /api/rooms/{roomID}/memory", s.getRoomMemory)
 	mux.HandleFunc("POST /api/rooms/{roomID}/memory", s.setRoomMemory)
+	mux.HandleFunc("GET /api/rooms/{roomID}/journal", s.listRoomJournal)
 	mux.HandleFunc("GET /api/mcp", s.listMCP)
 	mux.HandleFunc("GET /api/signals", s.getSignals)
 	mux.HandleFunc("GET /api/contract", s.getContract)
@@ -1227,6 +1229,30 @@ func (s *Server) setRoomMemory(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+// listRoomJournal returns the room-scoped session journal (the per-room history
+// of what changed and why). The journal is shared workspace-wide, so the room
+// view is the natural place to surface it; entries from other rooms stay
+// visible because they carry their room_id and remain relevant context.
+func (s *Server) listRoomJournal(w http.ResponseWriter, r *http.Request) {
+	roomID := r.PathValue("roomID")
+	limit := 200
+	if q := r.URL.Query().Get("limit"); q != "" {
+		if n, err := strconv.Atoi(q); err == nil && n > 0 && n <= 500 {
+			limit = n
+		}
+	}
+	entries, err := s.store.JournalForRoom(roomID, limit)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"room_id": roomID,
+		"count":   len(entries),
+		"entries": entries,
+	})
 }
 
 /* ---------- MCP Servers (global) ---------- */

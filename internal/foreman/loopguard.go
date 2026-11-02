@@ -28,6 +28,18 @@ var readOnlyTools = map[string]bool{
 	"diagnose":     true,
 }
 
+// editTools are the native tools that change workspace files. They reset the
+// read-only budget and feed the rework tripwire (an edit followed by a still
+// failing diagnose counts as one failed fix attempt).
+var editTools = map[string]bool{
+	"edit_file":      true,
+	"replace_string": true,
+	"insert_lines":   true,
+	"create_file":    true,
+}
+
+func isEditTool(name string) bool { return editTools[name] }
+
 // isReadOnlyTool reports whether a tool only reads state. MCP tools are treated
 // as read-only only for known context servers (kuma/context7) so an unknown MCP
 // server with side-effecting tools is never blocked.
@@ -63,6 +75,16 @@ type loopGuard struct {
 	// "delegate, do not explore"); appended to block messages so native
 	// enforcement speaks the same language as the prompt.
 	roleDirective string
+
+	// Rework tripwire: after maxRework consecutive edit→still-failing
+	// diagnose cycles the governor forces a stop and points at rollback or a
+	// human decision instead of letting the agent burn tokens re-fixing the
+	// same file in place.
+	maxRework        int
+	reworkAttempts   int
+	editedSinceCheck bool
+	reworkForced     bool
+	reworkReason     string
 }
 
 func newLoopGuard(readBudget, hardRounds int, roleDirective ...string) *loopGuard {
@@ -72,7 +94,12 @@ func newLoopGuard(readBudget, hardRounds int, roleDirective ...string) *loopGuar
 	if hardRounds <= 0 {
 		hardRounds = 60
 	}
-	return &loopGuard{readBudget: readBudget, hardRounds: hardRounds, toolCounts: map[string]int{}, nudged: map[int]bool{}, roleDirective: strings.Join(roleDirective, " ")}
+	return &loopGuard{
+		readBudget: readBudget, hardRounds: hardRounds,
+		toolCounts: map[string]int{}, nudged: map[int]bool{},
+		roleDirective: strings.Join(roleDirective, " "),
+		maxRework:     3,
+	}
 }
 
 // decide is the pure state machine: given the next tool name it reports whether
@@ -82,7 +109,7 @@ func (g *loopGuard) decide(toolName string) (bool, string) {
 	g.toolRounds++
 	g.toolCounts[toolName]++
 
-	if g.forced {
+	if g.forced || g.reworkForced {
 		// Once the budget is spent the model should answer; keep blocking tools
 		// so it cannot silently resume churning.
 		return true, g.blockMessage(toolName)
@@ -105,6 +132,11 @@ func (g *loopGuard) decide(toolName string) (bool, string) {
 }
 
 func (g *loopGuard) blockMessage(toolName string) string {
+	if g.reworkForced {
+		return fmt.Sprintf(
+			"Blocked %q: %s Stop fixing in place. Roll back your latest changes with git_ops (status/diff) or ask the human — do not keep retrying the same fix. Then finish with finish_task (summary of what failed) or ask_human.",
+			toolName, g.reworkReason)
+	}
 	msg := fmt.Sprintf(
 		"Blocked %q: %s Stop reading. Now choose one: create a plan (create_plan), delegate (spawn_agent / create_task), make the change, ask the human (ask_human / escalate), or finish with finish_task — or reply with a summary of what you found and what you recommend.",
 		toolName, g.reasonOrDefault())
@@ -115,10 +147,63 @@ func (g *loopGuard) blockMessage(toolName string) string {
 }
 
 func (g *loopGuard) reasonOrDefault() string {
+	if g.reworkForced {
+		return g.reworkReason
+	}
 	if g.reason != "" {
 		return g.reason
 	}
 	return "The loop governor stopped further read-only exploration."
+}
+
+// observeTool feeds the rework tripwire from observed tool calls. It is a pure
+// state transition on (tool name, args, result) so it can be unit-tested
+// without ADK plumbing:
+//   - an edit tool marks that a fix was attempted since the last check;
+//   - a passing diagnose/run_checks resets the counter (progress made);
+//   - a failing one after an edit counts one failed fix attempt; maxRework of
+//     those in a row force a stop with a rollback-oriented message.
+func (g *loopGuard) observeTool(name string, args, result map[string]any) {
+	if isEditTool(name) {
+		g.editedSinceCheck = true
+		return
+	}
+	if name != "diagnose" && name != "run_checks" {
+		return
+	}
+	if toolCheckPassed(name, result) {
+		g.reworkAttempts = 0
+		return
+	}
+	if !g.editedSinceCheck {
+		return // failing baseline check before any edit is not a failed fix
+	}
+	g.editedSinceCheck = false
+	g.reworkAttempts++
+	if g.reworkAttempts >= g.maxRework {
+		g.reworkForced = true
+		g.reworkReason = fmt.Sprintf(
+			"Rework loop detected: %d consecutive edit→still-failing diagnose cycles (%s).",
+			g.reworkAttempts, g.stats())
+	}
+}
+
+// toolCheckPassed reports whether a diagnose/run_checks result means the
+// workspace checks passed. Defensive about result shapes from the JSON layer.
+func toolCheckPassed(name string, result map[string]any) bool {
+	if name == "run_checks" {
+		status, _ := result["status"].(string)
+		return status == "passed"
+	}
+	switch v := result["failed"].(type) {
+	case int:
+		return v == 0
+	case int64:
+		return v == 0
+	case float64:
+		return v == 0
+	}
+	return true // unknown shape: assume a pass so the guard never false-trips
 }
 
 // beforeTool adapts decide to the ADK BeforeToolCallback contract: a non-nil
@@ -144,14 +229,16 @@ func (g *loopGuard) beforeTool(_ agent.Context, t tool.Tool, _ map[string]any) (
 // of staying silent until the budget is blown, the guard appends a short note
 // to a read-only tool result once at 60% and once at 90% of the read budget —
 // course correction that costs context exactly twice, not every turn. The
-// underlying result is otherwise unmodified.
-func (g *loopGuard) afterTool(_ agent.Context, t tool.Tool, _ map[string]any, result map[string]any, _ error) (map[string]any, error) {
+// underlying result is otherwise unmodified. It also feeds the rework tripwire
+// from edit/diagnose results.
+func (g *loopGuard) afterTool(_ agent.Context, t tool.Tool, args map[string]any, result map[string]any, _ error) (map[string]any, error) {
 	if t == nil || result == nil {
 		return nil, nil
 	}
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	if g.forced || !isReadOnlyTool(t.Name()) {
+	g.observeTool(t.Name(), args, result)
+	if g.forced || g.reworkForced || !isReadOnlyTool(t.Name()) {
 		return nil, nil
 	}
 	const loopGuardNoteKey = "loop_guard_note"
@@ -230,18 +317,19 @@ func (g *loopGuard) stats() string {
 	return strings.Join(parts, ", ")
 }
 
-// hasForced reports whether the governor has spent its read-only budget.
+// hasForced reports whether the governor has stopped the run (read budget or
+// the rework tripwire).
 func (g *loopGuard) hasForced() bool {
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	return g.forced
+	return g.forced || g.reworkForced
 }
 
 // forcedReason returns the governor's stop reason, or "" if it never fired.
 func (g *loopGuard) forcedReason() string {
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	if !g.forced {
+	if !g.forced && !g.reworkForced {
 		return ""
 	}
 	return g.reasonOrDefault()

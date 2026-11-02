@@ -16,6 +16,11 @@ const CHAT_COMMANDS = [
   { id: 'fix', label: '/fix', hint: 'Diagnose and fix the latest failing check' },
   { id: 'confirm', label: '/confirm', hint: 'Drill down before an irreversible action' },
   { id: 'ask', label: '/ask', hint: 'Ask the human a clarifying question' },
+  // User-facing trigger: writing the session journal is an agent action, not a
+  // raw tool. Picking this sends an instruction the main agent understands, and
+  // it uses the journal tool under the hood — surfaced here because the user
+  // explicitly asked for a way to trigger journaling from chat.
+  { id: 'journal', label: '/journal', hint: 'Summarize this room\'s recent changes into the session journal' },
 ];
 // Priority is a canonical P0..P3 scale; legacy names are mapped so old cards
 // still render. Lower rank sorts first.
@@ -727,6 +732,15 @@ export function RoomDetailHost({ room, state, notify, setModal, runTask, refresh
   const roomArtifacts = (state.artifacts || []).filter((a) => a.roomId === room.id);
   const approvedPanels = (state.panels || []).filter((p) => p.roomId === room.id && p.status === 'approved');
 
+  // Room-scoped session journal: what changed and why, surfaced in its own tab.
+  const [roomJournal, setRoomJournal] = useState([]);
+  const loadJournal = async () => {
+    try {
+      const d = await api(`/api/rooms/${encodeURIComponent(room.id)}/journal?limit=200`);
+      setRoomJournal(Array.isArray(d?.entries) ? d.entries : []);
+    } catch { setRoomJournal([]); }
+  };
+
   const toggleInvite = (id) => setInvited((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
   const roomMcpNames = (state.mcpServers || []).filter((s) => (room.mcpServerIds || []).includes(s.id)).map((s) => s.name);
   const [contractFile, setContractFile] = useState('');
@@ -781,6 +795,9 @@ export function RoomDetailHost({ room, state, notify, setModal, runTask, refresh
             </button>
             <button class={`room-tab ${tab === 'artifacts' ? 'active' : ''}`} onClick={() => setTab('artifacts')}>
               <Icon name="file" />Artifacts{roomArtifacts.length ? <span class="tag" style="margin-left:4px">{roomArtifacts.length}</span> : null}
+            </button>
+            <button class={`room-tab ${tab === 'journal' ? 'active' : ''}`} onClick={() => { setTab('journal'); loadJournal(); }}>
+              <Icon name="book" />Journal{roomJournal.length ? <span class="tag" style="margin-left:4px">{roomJournal.length}</span> : null}
             </button>
             {approvedPanels.map((p) => (
               <button key={p.id} class={`room-tab ${tab === 'panel-' + p.id ? 'active' : ''}`} onClick={() => setTab('panel-' + p.id)}>
@@ -1146,6 +1163,40 @@ export function RoomDetailHost({ room, state, notify, setModal, runTask, refresh
                           Files: <code>{plain(art.path)}</code>
                         </div>
                       )}
+                    </article>
+                  ))}
+                </div>
+              </div>
+            </div>
+          )}
+
+          {tab === 'journal' && (
+            <div class="room-view active">
+              <div class="tab-scroll">
+                <div class="section-title">Session Journal</div>
+                <div class="section-note" style="margin-top:5px">
+                  What agents changed and why, written when tasks finish or via <code>/journal</code>.
+                  Shared across rooms — entries from other rooms are shown with their room id because they may still touch the same files.
+                </div>
+                <div style="display:flex;flex-direction:column;gap:12px;margin-top:16px">
+                  {roomJournal.length === 0 ? (
+                    <div class="empty">No journal entries yet. Finish a task or run <code>/journal</code> to record one.</div>
+                  ) : roomJournal.map((e) => (
+                    <article key={e.id} class="panel" style="padding:14px">
+                      <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap">
+                        <div style="display:flex;align-items:center;gap:8px">
+                          <Icon name="book" size={15} />
+                          <span class="tag blue">{plain(e.room_id)}</span>
+                          {e.file ? <code style="font-size:12px">{plain(e.file)}</code> : null}
+                          {e.func ? <span class="tag">{plain(e.func)}</span> : null}
+                        </div>
+                        <span class="meta-text">{new Date(e.created_at).toLocaleString()}</span>
+                      </div>
+                      <div style="margin-top:8px;font-size:13px;line-height:1.6">{plain(e.action)}</div>
+                      {e.dependency ? (
+                        <div class="meta-text" style="margin-top:6px">Dependency: {plain(e.dependency)}</div>
+                      ) : null}
+                      {e.agent ? <div class="meta-text" style="margin-top:4px">by {plain(e.agent)}</div> : null}
                     </article>
                   ))}
                 </div>

@@ -16,9 +16,10 @@ var srcExt = map[string]bool{
 }
 
 var (
-	reDefLine   = regexp.MustCompile(`^\s*(?:(?:pub|public|private|protected|export|default|async|static|inline|template|final|abstract)\s+)*(?:func|function|fn|fun|class|struct|enum|trait|interface|type|def|impl|const|let|var)\s+([A-Za-z_]\w*)`)
-	reGoMethod  = regexp.MustCompile(`^\s*func\s+\([^)]*\)\s+([A-Za-z_]\w*)`)
-	reCleanTail = regexp.MustCompile(`[\s{(\[=,:]+$`)
+	reDefLine       = regexp.MustCompile(`^\s*(?:(?:pub|public|private|protected|export|default|async|static|inline|template|final|abstract)\s+)*(?:func|function|fn|fun|class|struct|enum|trait|interface|type|def|impl|const|let|var)\s+([A-Za-z_]\w*)`)
+	reDefLineWithKw = regexp.MustCompile(`^\s*(?:(?:pub|public|private|protected|export|default|async|static|inline|template|final|abstract)\s+)*(func|function|fn|fun|class|struct|enum|trait|interface|type|def|impl|const|let|var)\s+([A-Za-z_]\w*)`)
+	reGoMethod      = regexp.MustCompile(`^\s*func\s+\([^)]*\)\s+([A-Za-z_]\w*)`)
+	reCleanTail     = regexp.MustCompile(`[\s{(\[=,:]+$`)
 )
 
 func symbolizeLine(line string) string {

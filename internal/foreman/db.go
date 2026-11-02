@@ -53,6 +53,17 @@ func OpenDB(projectPath string) (*DB, error) {
 		_ = db.Close()
 		return nil, fmt.Errorf("init memory index: %w", err)
 	}
+	// Symbol map: persisted declarations with line ranges so agents can locate
+	// functions/types without grepping the workspace first.
+	if err := d.initSymbols(); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("init symbol map: %w", err)
+	}
+	// Session journal: workspace-scoped facts about what changed and why.
+	if err := d.initJournal(); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("init journal: %w", err)
+	}
 	// Internal Signals: the learned co-usage graph every agent consumes.
 	if err := d.initSignals(); err != nil {
 		_ = db.Close()

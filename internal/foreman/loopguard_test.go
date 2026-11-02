@@ -184,3 +184,108 @@ func TestEffectiveBudgets(t *testing.T) {
 		t.Fatalf("expected built-in fallback (30,40), got (%d,%d)", mi, rb)
 	}
 }
+
+// failCheck is a failing diagnose result; passCheck a passing one.
+func failCheck() map[string]any { return map[string]any{"failed": 1} }
+func passCheck() map[string]any { return map[string]any{"failed": 0} }
+
+func TestReworkTripwireFiresAfterThreeFailedFixes(t *testing.T) {
+	g := newLoopGuard(40, 60)
+	// A failing baseline check before any edit must not count.
+	g.observeTool("diagnose", nil, failCheck())
+	if g.reworkAttempts != 0 || g.reworkForced {
+		t.Fatalf("baseline failure counted as a failed fix: attempts=%d forced=%v", g.reworkAttempts, g.reworkForced)
+	}
+	// Three edit→still-failing cycles trip the guardrail.
+	for i := 0; i < 3; i++ {
+		g.observeTool("edit_file", map[string]any{"path": "auth.go"}, nil)
+		g.observeTool("diagnose", nil, failCheck())
+	}
+	if g.reworkAttempts != 3 {
+		t.Fatalf("expected 3 rework attempts, got %d", g.reworkAttempts)
+	}
+	if !g.reworkForced {
+		t.Fatal("expected the rework tripwire to fire after 3 failed fixes")
+	}
+	if !g.hasForced() {
+		t.Fatal("rework tripwire must count as forced")
+	}
+	if g.forcedReason() == "" || !strings.Contains(g.forcedReason(), "Rework loop") {
+		t.Fatalf("expected a rework reason, got %q", g.forcedReason())
+	}
+	// Once tripped, every tool is blocked with the rollback message.
+	blocked, msg := g.decide("view_file")
+	if !blocked {
+		t.Fatal("expected tools blocked after the rework tripwire fired")
+	}
+	if !strings.Contains(msg, "Roll back") {
+		t.Fatalf("expected a rollback-oriented block message, got %q", msg)
+	}
+}
+
+func TestReworkTripwireResetsOnProgress(t *testing.T) {
+	g := newLoopGuard(40, 60)
+	g.observeTool("edit_file", nil, nil)
+	g.observeTool("diagnose", nil, failCheck()) // 1
+	g.observeTool("edit_file", nil, nil)
+	g.observeTool("diagnose", nil, passCheck()) // progress → reset
+	if g.reworkAttempts != 0 {
+		t.Fatalf("expected reset after a passing diagnose, got %d", g.reworkAttempts)
+	}
+	// Back to one failed fix — not tripped.
+	g.observeTool("edit_file", nil, nil)
+	g.observeTool("diagnose", nil, failCheck())
+	if g.reworkAttempts != 1 || g.reworkForced {
+		t.Fatalf("expected 1 attempt, not forced; got attempts=%d forced=%v", g.reworkAttempts, g.reworkForced)
+	}
+}
+
+func TestReworkTripwireIgnoresBaselineFailures(t *testing.T) {
+	g := newLoopGuard(40, 60)
+	for i := 0; i < 6; i++ {
+		g.observeTool("diagnose", nil, failCheck())
+	}
+	if g.reworkForced || g.reworkAttempts != 0 {
+		t.Fatalf("repeated baseline failures without edits must not trip: attempts=%d forced=%v", g.reworkAttempts, g.reworkForced)
+	}
+}
+
+func TestReworkTripwireRunChecks(t *testing.T) {
+	g := newLoopGuard(40, 60)
+	for i := 0; i < 3; i++ {
+		g.observeTool("replace_string", nil, nil)
+		g.observeTool("run_checks", nil, map[string]any{"status": "failed"})
+	}
+	if !g.reworkForced {
+		t.Fatal("run_checks failures after edits must trip the guardrail too")
+	}
+	// A passing run_checks resets before the trip.
+	g2 := newLoopGuard(40, 60)
+	g2.observeTool("edit_file", nil, nil)
+	g2.observeTool("run_checks", nil, map[string]any{"status": "passed"})
+	if g2.reworkAttempts != 0 {
+		t.Fatalf("expected reset on passed run_checks, got %d", g2.reworkAttempts)
+	}
+}
+
+func TestToolCheckPassedShapes(t *testing.T) {
+	if !toolCheckPassed("diagnose", map[string]any{"failed": 0}) {
+		t.Fatal("diagnose failed:0 must pass")
+	}
+	if !toolCheckPassed("diagnose", map[string]any{"failed": float64(0)}) {
+		t.Fatal("diagnose failed:0.0 must pass")
+	}
+	if toolCheckPassed("diagnose", map[string]any{"failed": 1}) {
+		t.Fatal("diagnose failed:1 must fail")
+	}
+	if toolCheckPassed("run_checks", map[string]any{"status": "failed"}) {
+		t.Fatal("run_checks status:failed must fail")
+	}
+	if !toolCheckPassed("run_checks", map[string]any{"status": "passed"}) {
+		t.Fatal("run_checks status:passed must pass")
+	}
+	// Unknown shape: assume pass so the guard never false-trips.
+	if !toolCheckPassed("diagnose", map[string]any{}) {
+		t.Fatal("unknown diagnose shape must be treated as a pass")
+	}
+}

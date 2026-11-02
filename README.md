@@ -40,6 +40,17 @@ start`.
   DeepSeek, MiniMax, Zro, Anthropic (Claude), Mercury, OpenAI (GPT), or a custom endpoint.
 - **Code search** — repository-wide search backed by SQLite FTS5, with ripgrep as a fast backend
   when available.
+- **Symbol map** — every indexed file's declarations (functions, methods, types) with exact line
+  ranges, persisted in SQLite and rebuilt incrementally; Go files use the stdlib AST for exact
+  positions. The `symbol_map` tool locates a definition instantly, so an agent reads only the
+  precise `view_file` line range instead of grepping around.
+- **Session journal** — structured, workspace-wide facts about what changed and why
+  (`file`/`func`/`action`/`dependency`), written by the `memory` journal tool, the `/journal`
+  slash command, or automatically when a task finishes. Surfaced in a room **Journal** tab and
+  injected into every new run as a consolidated per-file digest — no cold-start re-exploration.
+- **Rework guardrail** — after three consecutive edit→still-failing diagnose cycles, the loop
+  governor stops the run and points at rollback or a human decision instead of burning tokens on
+  the same fix.
 - **Markdown everywhere** — instructions, plans, and chat render formatted markdown, not raw text.
 - **Hash routing** — `#/rooms/:id` keeps your place across a refresh.
 
@@ -143,7 +154,7 @@ API. An agent can pin its own provider and model; otherwise runs use the first e
 | What | Where |
 | --- | --- |
 | Global profile (team templates, agent library, teams, skills, providers, MCP servers, settings) | `~/.foreman/global.json` (or `$FOREMAN_GLOBAL_PATH`) |
-| Per-project state (rooms, tasks, runs, approvals, artifacts, messages, memory, signals) | `<project>/.foreman/foreman.db` — SQLite, WAL mode, incl. an FTS5 code-search index |
+| Per-project state (rooms, tasks, runs, approvals, artifacts, messages, memory, signals) | `<project>/.foreman/foreman.db` — SQLite, WAL mode, incl. an FTS5 code-search index, a line-precise symbol map, and the session journal |
 | Conversation threads (per room + agent, survives restarts) | `<project>/.foreman/sessions.db` |
 | Provider API keys | `<project>/.foreman/credentials.json` (0600) |
 | Project metadata | `<project>/.foreman/workspace.json` (atomic writes) |

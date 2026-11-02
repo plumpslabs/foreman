@@ -120,7 +120,7 @@ type gitOpsArgs struct {
 }
 
 type memoryArgs struct {
-	Action string `json:"action"` // set|get|remember|recall|forget
+	Action string `json:"action"` // set|get|remember|recall|forget|journal|recent
 	Key    string `json:"key,omitempty"`
 	Value  string `json:"value,omitempty"`
 	// remember/recall extras: kind is fact|lesson, query the search text,
@@ -129,6 +129,10 @@ type memoryArgs struct {
 	Query string `json:"query,omitempty"`
 	Limit int    `json:"limit,omitempty"`
 	ID    string `json:"id,omitempty"`
+	// journal extras: structured fact fields (file, func, action, dependency).
+	File       string `json:"file,omitempty"`
+	Func       string `json:"func,omitempty"`
+	Dependency string `json:"dependency,omitempty"`
 }
 
 type askHumanArgs struct {
@@ -196,6 +200,12 @@ type relatedArgs struct {
 
 type searchIndexArgs struct {
 	Query string `json:"query"`
+	Limit int    `json:"limit,omitempty"`
+}
+
+type symbolMapArgs struct {
+	Query string `json:"query,omitempty"`
+	File  string `json:"file,omitempty"`
 	Limit int    `json:"limit,omitempty"`
 }
 
@@ -530,6 +540,26 @@ func makeADKTools(ctx adkToolContext) []tool.Tool {
 			}
 		}
 
+		// Auto-journal: record per changed file why the task finished, so later
+		// sessions across rooms start with this context. Identical facts within
+		// 24h collapse, so repeated retries read as one ongoing change.
+		if strings.TrimSpace(args.Summary) != "" && len(args.ChangedFiles) > 0 {
+			files := args.ChangedFiles
+			if len(files) > 6 {
+				files = files[:6]
+			}
+			note := clipForMemory(args.Summary)
+			journaled := false
+			for _, f := range files {
+				if _, jerr := ctx.Store.DB().SaveJournal(ctx.RoomID, ctx.AgentName, f, "", note, ""); jerr == nil {
+					journaled = true
+				}
+			}
+			if journaled {
+				_ = ctx.Store.RecordActivity(ctx.RoomID, ctx.AgentName, "journal.retained", "Recorded session journal facts from the finished task", nil)
+			}
+		}
+
 		// Reviewer requested changes (review task finished as "blocked"):
 		// reopen the original implementer task for rework, bounded by retries.
 		if status == "blocked" && parentID != "" {
@@ -733,10 +763,11 @@ func makeADKTools(ctx adkToolContext) []tool.Tool {
 	}))
 
 	// memory — key/value notes plus a free-text fact/lesson bank with
-	// full-text recall across runs (the remember/recall pattern).
+	// full-text recall across runs (the remember/recall pattern), and the
+	// structured workspace journal for session-to-session handoff.
 	add(functiontool.New[memoryArgs, map[string]any](functiontool.Config{
 		Name:        "memory",
-		Description: "Shared cross-agent memory. action:set/get for exact key/value notes. action:remember stores a durable note (kind: fact for workspace state, lesson for what worked/failed); action:recall full-text searches the bank (query; limit; empty query = recent) and returns ids you can invalidate with action:forget. Retain decisions and setup knowledge others will need; recall at the start of a task.",
+		Description: "Shared memory. action:set/get for exact key/value notes. action:remember stores a durable note (kind: fact for workspace state, lesson for what worked/failed); action:recall full-text searches the bank (query; limit; empty query = recent) and returns ids you can invalidate with action:forget. action:journal writes one structured fact to the workspace session journal (fields: file, func, action, dependency — action is required, keep it to one short sentence) so later sessions across rooms start with your context; action:recent returns the newest journal entries plus a per-file consolidated digest. Recall at the start of a task; journal at the end.",
 	}, func(ac agent.Context, args memoryArgs) (map[string]any, error) {
 		if ctx.Store == nil {
 			return nil, fmt.Errorf("store unavailable")
@@ -772,6 +803,22 @@ func makeADKTools(ctx adkToolContext) []tool.Tool {
 				return nil, err
 			}
 			return map[string]any{"forgotten": ok}, nil
+		case "journal":
+			entry, err := db.SaveJournal(ctx.RoomID, ctx.AgentName, args.File, args.Func, args.Action, args.Dependency)
+			if err != nil {
+				return nil, err
+			}
+			return map[string]any{"status": "saved", "id": entry.ID, "note": "identical facts within 24h collapse onto the existing entry"}, nil
+		case "recent":
+			recent, err := db.RecentJournal("", args.Limit)
+			if err != nil {
+				return nil, err
+			}
+			return map[string]any{
+				"count":        len(recent),
+				"recent":       recent,
+				"consolidated": db.JournalConsolidated(200, 900),
+			}, nil
 		default:
 			val, err := db.GetMemory(ctx.RoomID, args.Key)
 			if err != nil {
@@ -1216,6 +1263,42 @@ func makeADKTools(ctx adkToolContext) []tool.Tool {
 				"indexed":    indexed,
 				"removed":    removed,
 			}, nil
+		}))
+
+		// symbol_map — the persisted declaration map. Unlike search_index (full
+		// text), this answers "where is X declared and which lines cover it",
+		// so an agent can go straight to a precise view_file range instead of
+		// grepping around. Built incrementally in the same pass as the index.
+		add(functiontool.New[symbolMapArgs, map[string]any](functiontool.Config{
+			Name:        "symbol_map",
+			Description: "Locate declarations (functions, methods, types) with exact line ranges in the indexed workspace. Pass query for a case-insensitive name search, or file for every declaration in one file. Returns path, kind, name, line, end_line, signature. After locating a symbol, read its body precisely with view_file (start_line, end_line). Preferred over grep/search_index when you need to know where a symbol is defined.",
+		}, func(ac agent.Context, args symbolMapArgs) (map[string]any, error) {
+			root := ctx.Workspace
+			if root == "" {
+				return nil, fmt.Errorf("no workspace")
+			}
+			ctx.Store.IndexWorkspace(root) // best-effort refresh keeps the map fresh
+			var syms []Symbol
+			var err error
+			switch {
+			case strings.TrimSpace(args.File) != "":
+				syms, err = ctx.Store.SymbolsForFile(args.File)
+			case strings.TrimSpace(args.Query) != "":
+				syms, err = ctx.Store.SearchSymbols(args.Query, args.Limit)
+			default:
+				return nil, fmt.Errorf("provide query (name search) or file")
+			}
+			if err != nil {
+				return nil, err
+			}
+			out := make([]map[string]any, 0, len(syms))
+			for _, s := range syms {
+				out = append(out, map[string]any{
+					"path": s.Path, "kind": s.Kind, "name": s.Name,
+					"line": s.Line, "end_line": s.EndLine, "signature": s.Signature,
+				})
+			}
+			return map[string]any{"count": len(out), "symbols": out}, nil
 		}))
 	}
 

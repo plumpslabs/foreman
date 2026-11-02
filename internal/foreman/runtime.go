@@ -370,6 +370,31 @@ func (rt *Runtime) execute(ctx context.Context, control *RunControl, run AgentRu
 		b.WriteString("\nTrust these notes but spot-check anything that looks stale; use the memory tool (remember/recall/forget) to keep them current.")
 		prompt += b.String()
 	}
+	// Session journal: workspace-scoped facts about what changed and why, so a
+	// new run starts from where earlier sessions left off. Injected as a compact
+	// consolidated digest plus the newest entries (bounded). Best-effort.
+	if recent, jerr := rt.store.RecentJournal("", 5); jerr == nil && len(recent) > 0 {
+		var b strings.Builder
+		b.WriteString("\n\n## Session journal (recent workspace activity)\n")
+		if cons := rt.store.JournalConsolidated(200, 800); len(cons) > 0 {
+			b.WriteString("Consolidated:\n" + strings.Join(cons, "\n") + "\n")
+		}
+		for _, e := range recent {
+			where := e.File
+			if e.Func != "" {
+				if where != "" {
+					where += " "
+				}
+				where += e.Func
+			}
+			if where == "" {
+				where = "(workspace)"
+			}
+			fmt.Fprintf(&b, "- %s: %s\n", where, clipForMemory(e.Action))
+		}
+		b.WriteString("\nUse the memory tool (action:recent / action:journal) to see more or add facts; do not re-explore what the journal already records.")
+		prompt += b.String()
+	}
 	// Learned hot files: the per-project co-usage graph ranks files this
 	// workspace's runs actually touched and edited. Injecting the top of that
 	// ranking (when it has data) lets a cold start begin from "files that
@@ -758,6 +783,8 @@ func buildRunPrompt(room Room, task Task, team *Team, skills string, allowedTool
 - Language: reply in the same language as the user's latest message.
 - Tasks: concise title (verb + object, ≤10 words); description includes context + acceptance criteria.
 - Navigation: call repo_map once on unfamiliar codebases before grepping/reading many files. For any specific file, call the 'related' tool first — it returns co-usage neighbors and retained memory in one shot instead of blind grep/glob.
+- Symbol map: symbol_map locates a declaration (function/method/type) with its exact line range — then view_file (start_line/end_line) reads only that body. Use it before grepping when you need to find where something is defined.
+- Journal: record durable facts with memory action:journal (file, func, action, dependency — action required, one short sentence). Recent workspace activity is auto-injected at the start of every run; finish_task journals your changed files automatically. Do not re-explore what the journal already records.
 - Loop Governor (enforced in code): hard limits (steps/tokens/cost/wall time); repeated tool+args or short cycles stop with a visible reason; no progress → stop and report; always finish with finish_task(result) including summary, changed files, evidence; if stuck, escalate or ask the human.
 - Search: prefer repo_map first, then targeted grep/glob; grep uses RE2; results are capped with a truncated flag — refine the query rather than repeat the same call.
 - Diagnostics: run the diagnose tool (vet/build/test/lint for the detected language) to find bugs and to gather evidence before finishing; it is read-only and needs project-command permission.
