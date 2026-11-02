@@ -3067,9 +3067,11 @@ export function SignalsPage() {
           <div class="eyebrow">Learned per-project graph</div>
           <h1 class="page-title">Internal Signals</h1>
           <div class="page-sub">
-            Foreman learns which files this workspace's runs actually read and edit, and keeps the graph
-            current with decay. Every agent consumes it as hot-files and via the <code>related</code> tool —
-            so cold starts begin from what mattered last time instead of re-exploring.
+            Two layers in one graph. <b>Structure</b> comes from the source itself — each import that
+            resolves to another workspace file is an edge, so a fresh project already has a map. <b>Usage</b>
+            is learned from what this workspace's runs actually read, edit, and surface in search, and it
+            decays so the graph tracks what matters now. Every agent consumes both as hot files and via the
+            <code>related</code> tool — cold starts begin from what mattered last time instead of re-exploring.
           </div>
         </div>
       </div>
@@ -3101,9 +3103,9 @@ export function SignalsPage() {
           </div>
 
           <div class="settings-card">
-            <h3 class="card-title">Hot files (most touched / edited)</h3>
+            <h3 class="card-title">Hot files (most touched / edited / imported)</h3>
             {!report.top_paths || report.top_paths.length === 0
-              ? <div class="empty">No learned files yet.</div>
+              ? <div class="empty">No learned files yet — run a task, or let an index refresh map the imports.</div>
               : (
                 <table class="tbl">
                   <thead><tr><th>Path</th><th>Weight</th><th>Touches</th></tr></thead>
@@ -3119,6 +3121,21 @@ export function SignalsPage() {
                 </table>
               )}
           </div>
+
+          {report.kinds && Object.keys(report.kinds).length > 0 && (
+            <div class="settings-card">
+              <h3 class="card-title">Edge kinds</h3>
+              <div class="tag-row" style="display:flex;gap:8px;flex-wrap:wrap">
+                {Object.entries(report.kinds).map(([kind, n]) => (
+                  <span key={kind} class="tag blue">{kind} · {n}</span>
+                ))}
+              </div>
+              <div class="meta-text" style="margin-top:8px">
+                <b>import</b> is structural (from source, rebuilt on index refresh). <b>co_touch</b>, <b>edit</b>,
+                and <b>search</b> are learned from runs — search edges are deliberately weak.
+              </div>
+            </div>
+          )}
         </>
       )}
     </>

@@ -1092,7 +1092,11 @@ func makeADKTools(ctx adkToolContext) []tool.Tool {
 		// Prefer ripgrep when available (fast, respects .gitignore), except
 		// when context lines are requested (Go fallback handles those).
 		if rgAvailable() && before == 0 && after == 0 {
-			return rgGrep(root, args)
+			res, rerr := rgGrep(root, args)
+			if rerr == nil {
+				ctx.signals.mentionMatches(resultMatches(res))
+			}
+			return res, rerr
 		}
 		var matches []map[string]any
 		var scanned int
@@ -1126,6 +1130,7 @@ func makeADKTools(ctx adkToolContext) []tool.Tool {
 			}
 			return nil
 		})
+		ctx.signals.mentionMatches(matches)
 		return map[string]any{"matches": matches, "count": len(matches), "files_scanned": scanned}, nil
 	}))
 
@@ -1256,6 +1261,7 @@ func makeADKTools(ctx adkToolContext) []tool.Tool {
 			for _, h := range hits {
 				out = append(out, map[string]any{"file": h.Path, "line": h.Line, "text": h.Text})
 			}
+			ctx.signals.mentionMatches(out)
 			return map[string]any{
 				"matches":    out,
 				"count":      len(out),

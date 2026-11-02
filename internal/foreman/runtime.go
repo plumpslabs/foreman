@@ -415,7 +415,7 @@ func (rt *Runtime) execute(ctx context.Context, control *RunControl, run AgentRu
 	// workspace's runs actually touched and edited. Injecting the top of that
 	// ranking (when it has data) lets a cold start begin from "files that
 	// mattered last time" instead of re-discovering the codebase. Best effort.
-	if hot, herr := rt.store.DB().SignalsTopPaths(6, "co_touch", "edit"); herr == nil {
+	if hot, herr := rt.store.DB().SignalsTopPaths(6, "co_touch", "edit", "search"); herr == nil {
 		var b strings.Builder
 		ranked := 0
 		for _, h := range hot {

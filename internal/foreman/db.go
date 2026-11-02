@@ -22,6 +22,9 @@ type DB struct {
 	mu   sync.RWMutex
 	// fts5 reports whether the code search index (FTS5) is available.
 	fts5 bool
+	// decayLast throttles decay passes triggered at run ends; guarded by mu
+	// (it mutates under the write lock in the decay methods).
+	decayLast time.Time
 }
 
 // OpenDB opens or creates the SQLite database in the project's .foreman directory.

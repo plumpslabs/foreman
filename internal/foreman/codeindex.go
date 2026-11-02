@@ -300,7 +300,11 @@ func (s *Store) IndexWorkspace(root string) (int, int, error) {
 	if _, err := s.db.JournalTTLPrune(90 * 24 * time.Hour); err != nil {
 		slog.Warn("journal prune failed", "err", err)
 	}
-	return s.db.IndexWorkspace(root)
+	indexed, removed, err := s.db.IndexWorkspace(root)
+	// Structural import edges rebuild opportunistically with the index; they
+	// give the graph a warm start without waiting for agent runs.
+	s.refreshSignalImports(root)
+	return indexed, removed, err
 }
 
 // SearchWorkspace delegates to the underlying database.

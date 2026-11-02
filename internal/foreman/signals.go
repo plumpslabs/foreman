@@ -3,6 +3,7 @@ package foreman
 import (
 	"database/sql"
 	"fmt"
+	"log/slog"
 	"strings"
 	"sync"
 	"time"
@@ -29,17 +30,46 @@ const (
 	signalWeightCoTouch = 1.0
 	// signalWeightEdit marks an actual modification.
 	signalWeightEdit = 3.0
+	// signalWeightSearch marks a file the agent surfaced via search/grep. It is
+	// deliberately weak: being matched by a pattern is not the same as being
+	// read, let alone edited.
+	signalWeightSearch = 0.5
+	// signalWeightImport marks a structural dependency discovered from source
+	// imports during an index refresh. Directional: src imports dst.
+	signalWeightImport = 2.0
+	// signalRepeatViewBonus accrues when the agent returns to a file within the
+	// same run — repeated reads mean the file is being studied, not passed by.
+	signalRepeatViewBonus = 0.5
 	// signalMaxWeight caps a single edge so one repetitive run cannot drown the graph.
 	signalMaxWeight = 50.0
 	// signalMaxRunFiles caps the per-run file set; pairwise edges stay bounded.
 	signalMaxRunFiles = 12
 	// signalPairCap bounds emitted pairs per run (12 files => 66 pairs max).
 	signalPairCap = 66
+	// signalMaxMentions caps search-surfaced files per run.
+	signalMaxMentions = 50
+	// signalsMaxImportFiles caps how many source files an index refresh will
+	// scan for import statements.
+	signalsMaxImportFiles = 2000
+	// signalMaxImportEdges bounds import edges per refresh so a huge repo
+	// cannot balloon the table in one pass.
+	signalMaxImportEdges = 5000
+	// signalDecayInterval is the minimum gap between decay passes triggered
+	// from run ends (search_index still decays immediately).
+	signalDecayInterval = 12 * time.Hour
+	// Per-run scores. A file opened once scores signalScoreView; repeats and
+	// edits raise it. A stdin boundary number so pair strength stays explainable.
+	signalScoreView = 1.0
+	signalScoreEdit = signalWeightEdit
 )
 
 // signalSymmetricKinds canonicalize their (src, dst) pair so touching A,B and
 // B,A writes the same edge.
 var signalSymmetricKinds = map[string]bool{"co_touch": true, "edit": true}
+
+// signalSelfEdgeKinds are edge kinds allowed with src == dst ("A affects A"):
+// edits record modified files, searches record files that surfaced in results.
+var signalSelfEdgeKinds = map[string]bool{"edit": true, "search": true}
 
 // initSignals creates the edges + daily activity tables. Deterministic schema,
 // no FTS dependency — signals are aggregation, not text search.
@@ -78,7 +108,7 @@ func normalizeSignalPair(kind, src, dst string) (string, string) {
 func (d *DB) SignalTouch(kind, src, dst string, weight float64) error {
 	kind = strings.TrimSpace(kind)
 	src, dst = normalizeSignalPair(kind, strings.TrimSpace(src), strings.TrimSpace(dst))
-	if kind == "" || src == "" || dst == "" || (src == dst && kind != "edit") {
+	if kind == "" || src == "" || dst == "" || (src == dst && !signalSelfEdgeKinds[kind]) {
 		return fmt.Errorf("invalid signal edge (kind=%q src=%q dst=%q)", kind, src, dst)
 	}
 	if weight <= 0 {
@@ -100,6 +130,66 @@ func (d *DB) SignalTouch(kind, src, dst string, weight float64) error {
 	_, err := d.db.Exec(`INSERT INTO signals_activity (day, touches) VALUES(?, 1)
 		ON CONFLICT(day) DO UPDATE SET touches = touches + 1`, day)
 	return err
+}
+
+// SignalEdgeDelta is one upsert in a batch flush.
+type SignalEdgeDelta struct {
+	Kind   string
+	Src    string
+	Dst    string
+	Weight float64
+}
+
+// SignalTouchBatch upserts many edges in ONE transaction: either the whole run
+// flush lands or none of it does. That turns the tracker's best-effort writes
+// into at-least-once semantics for paired edges. The daily activity counter is
+// bumped once for the batch.
+func (d *DB) SignalTouchBatch(deltas []SignalEdgeDelta) error {
+	normalized := make([]SignalEdgeDelta, 0, len(deltas))
+	for _, delta := range deltas {
+		kind := strings.TrimSpace(delta.Kind)
+		src, dst := normalizeSignalPair(kind, strings.TrimSpace(delta.Src), strings.TrimSpace(delta.Dst))
+		if kind == "" || src == "" || dst == "" || (src == dst && !signalSelfEdgeKinds[kind]) {
+			return fmt.Errorf("invalid signal edge (kind=%q src=%q dst=%q)", kind, src, dst)
+		}
+		w := delta.Weight
+		if w <= 0 {
+			w = signalWeightCoTouch
+		}
+		normalized = append(normalized, SignalEdgeDelta{Kind: kind, Src: src, Dst: dst, Weight: w})
+	}
+	if len(normalized) == 0 {
+		return nil
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	tx, err := d.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	now := time.Now().UTC()
+	stmt, err := tx.Prepare(`INSERT INTO signals_edges (kind, src, dst, weight, hits, last_seen)
+		VALUES(?, ?, ?, ?, 1, ?)
+		ON CONFLICT(kind, src, dst) DO UPDATE SET
+			weight = MIN(? + weight * 0.5, ?),
+			hits = hits + 1,
+			last_seen = ?`)
+	if err != nil {
+		return err
+	}
+	defer stmt.Close()
+	for _, delta := range normalized {
+		if _, err := stmt.Exec(delta.Kind, delta.Src, delta.Dst, delta.Weight, now,
+			delta.Weight, signalMaxWeight, now); err != nil {
+			return err
+		}
+	}
+	if _, err := tx.Exec(`INSERT INTO signals_activity (day, touches) VALUES(?, 1)
+		ON CONFLICT(day) DO UPDATE SET touches = touches + 1`, now.Format("2006-01-02")); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 // SignalEdge is one row of the learned graph, for tool results and the API.
@@ -222,6 +312,9 @@ type SignalsReport struct {
 	Touches  int              `json:"touches"`
 	TopPaths []SignalEdge     `json:"top_paths"`
 	Activity []SignalActivity `json:"activity"`
+	// Kinds counts edges per kind (co_touch, edit, search, import) so the
+	// dashboard can show the structure/usage split without extra queries.
+	Kinds map[string]int `json:"kinds,omitempty"`
 }
 
 // SignalActivity is one day's usage total for the growth chart.
@@ -246,6 +339,9 @@ func (d *DB) SignalsReport(topN int) (SignalsReport, error) {
 	if r.TopPaths, err = d.SignalsTopPaths(topN); err != nil {
 		return r, err
 	}
+	if r.Kinds, err = d.SignalKindCounts(); err != nil {
+		return r, err
+	}
 	d.mu.RLock()
 	rows, rerr := d.db.Query(`SELECT day, touches FROM signals_activity ORDER BY day DESC LIMIT 30`)
 	if rerr == nil {
@@ -265,12 +361,61 @@ func (d *DB) SignalsReport(topN int) (SignalsReport, error) {
 	return r, nil
 }
 
+// SignalKindCounts returns how many edges exist per kind, for the dashboard's
+// structure/usage split.
+func (d *DB) SignalKindCounts() (map[string]int, error) {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+	rows, err := d.db.Query(`SELECT kind, COUNT(*) FROM signals_edges GROUP BY kind`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[string]int{}
+	for rows.Next() {
+		var kind string
+		var n int
+		if err := rows.Scan(&kind, &n); err != nil {
+			return nil, err
+		}
+		out[kind] = n
+	}
+	return out, rows.Err()
+}
+
 // SignalsDecay halves weights for edges not touched recently and removes
 // stale, low-weight edges so the graph tracks what matters NOW. Called
-// opportunistically (index refresh), so there is no background job to babysit.
+// opportunistically (index refresh, run ends), so there is no background job
+// to babysit.
 func (d *DB) SignalsDecay() error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
+	if err := decayLocked(d); err != nil {
+		return err
+	}
+	d.decayLast = time.Now().UTC()
+	return nil
+}
+
+// SignalsDecayIfStale runs decay only when at least minInterval has passed
+// since the last pass. Run ends call this so the graph also ages in projects
+// where agents never invoke search_index (the only caller of the eager decay).
+// Returns true when a pass actually ran.
+func (d *DB) SignalsDecayIfStale(minInterval time.Duration) (bool, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if !d.decayLast.IsZero() && time.Since(d.decayLast) < minInterval {
+		return false, nil
+	}
+	if err := decayLocked(d); err != nil {
+		return false, err
+	}
+	d.decayLast = time.Now().UTC()
+	return true, nil
+}
+
+// decayLocked does the expiry work; callers must hold d.mu.
+func decayLocked(d *DB) error {
 	old := time.Now().UTC().Add(-14 * 24 * time.Hour)
 	stale := time.Now().UTC().Add(-30 * 24 * time.Hour)
 	if _, err := d.db.Exec(`UPDATE signals_edges SET weight = weight * 0.5 WHERE last_seen < ?`, old); err != nil {
@@ -280,22 +425,33 @@ func (d *DB) SignalsDecay() error {
 	return err
 }
 
-// signalTracker learns the co-usage of ONE run: which files the agent actually
-// opened (view) and which it actually changed (edit). finalize emits pairwise
-// co_touch edges plus per-file edit self-edges. Instrumented at the tool
-// layer, so agents power the graph without ever being asked to.
+// signalTracker learns the co-usage of ONE run. Three strengths feed it, all
+// instrumented at the tool layer so agents power the graph without ever being
+// asked to:
+//
+//   - view (view_file): weight 1.0; repeated reads within the run accrue
+//     +0.5 each — a file the agent returns to is being studied.
+//   - edit (write tools): weight 3.0, overriding any view score.
+//   - search mentions (grep/search_index result files): weak self-edge, 0.5.
+//
+// finalize emits pairwise co_touch edges whose per-run weight is the weaker
+// side's score (a hint-glanced file cannot drag a whole pair to "hot"), the
+// edit/search self-edges, and flushes everything in a single transaction.
 type signalTracker struct {
-	mu     sync.Mutex
-	room   string
-	paths  []string // insertion ordered
-	edited map[string]bool
+	mu        sync.Mutex
+	room      string
+	paths     []string // insertion ordered
+	scores    map[string]float64
+	edited    map[string]bool
+	mentioned []string
 }
 
 func newSignalTracker(room string) *signalTracker {
-	return &signalTracker{room: room, edited: map[string]bool{}}
+	return &signalTracker{room: room, scores: map[string]float64{}, edited: map[string]bool{}}
 }
 
-// touch records one file interaction. edited=true marks a real modification.
+// touch records one file interaction. edited=true marks a real modification
+// and dominates the file's score for the run.
 func (t *signalTracker) touch(rel string, edited bool) {
 	if t == nil || strings.TrimSpace(rel) == "" {
 		return
@@ -305,40 +461,120 @@ func (t *signalTracker) touch(rel string, edited bool) {
 	if edited {
 		t.edited[rel] = true
 	}
-	for _, p := range t.paths {
-		if p == rel {
+	score, seen := t.scores[rel]
+	if !seen {
+		// Files beyond the per-run path cap still contribute self-edges
+		// (edit/search) but never join pairwise co_touch, so the pair count
+		// stays bounded.
+		if len(t.paths) < signalMaxRunFiles {
+			t.paths = append(t.paths, rel)
+		}
+		score = signalScoreView
+	} else {
+		score += signalRepeatViewBonus
+	}
+	if edited {
+		score = signalScoreEdit
+	} else if score > signalScoreEdit {
+		score = signalScoreEdit
+	}
+	t.scores[rel] = score
+}
+
+// mention records files surfaced by search/grep results. Mentions become weak
+// self-edges only — they must not create co_touch pairs, or a lucky regex poll
+// would fabricate relationships.
+func (t *signalTracker) mention(rels ...string) {
+	if t == nil {
+		return
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	seen := map[string]bool{}
+	for _, m := range t.mentioned {
+		seen[m] = true
+	}
+	for _, rel := range rels {
+		rel = strings.TrimSpace(rel)
+		if rel == "" || seen[rel] {
+			continue
+		}
+		if len(t.mentioned) >= signalMaxMentions {
 			return
 		}
-	}
-	if len(t.paths) < signalMaxRunFiles {
-		t.paths = append(t.paths, rel)
+		seen[rel] = true
+		t.mentioned = append(t.mentioned, rel)
 	}
 }
 
-// finalize flushes the run's learned edges into the store (best effort).
+// mentionMatches extracts file paths from tool-result match maps and mentions
+// them. Best effort: maps without a "file" key are skipped.
+func (t *signalTracker) mentionMatches(matches []map[string]any) {
+	if t == nil {
+		return
+	}
+	rels := make([]string, 0, len(matches))
+	for _, m := range matches {
+		if f, ok := m["file"].(string); ok {
+			rels = append(rels, f)
+		}
+	}
+	t.mention(rels...)
+}
+
+// resultMatches is a type-narrow helper for tool result payloads carrying a
+// "matches" key.
+func resultMatches(result map[string]any) []map[string]any {
+	ms, _ := result["matches"].([]map[string]any)
+	return ms
+}
+
+// finalize flushes the run's learned edges into the store. The flush is one
+// transaction (at-least-once); decay runs afterwards on a throttle.
 func (t *signalTracker) finalize(store *Store) {
 	if t == nil || store == nil || store.DB() == nil {
 		return
 	}
 	t.mu.Lock()
 	paths := append([]string(nil), t.paths...)
+	scores := make(map[string]float64, len(t.scores))
+	for k, v := range t.scores {
+		scores[k] = v
+	}
 	edited := make([]string, 0, len(t.edited))
 	for p, e := range t.edited {
 		if e {
 			edited = append(edited, p)
 		}
 	}
+	mentioned := append([]string(nil), t.mentioned...)
 	t.mu.Unlock()
 	db := store.DB()
-	pairs := 0
-	for i := 0; i < len(paths) && pairs < signalPairCap; i++ {
-		for j := i + 1; j < len(paths) && pairs < signalPairCap; j++ {
-			if err := db.SignalTouch("co_touch", paths[i], paths[j], signalWeightCoTouch); err == nil {
-				pairs++
+	deltas := make([]SignalEdgeDelta, 0, len(paths)+len(edited)+len(mentioned))
+	for i := 0; i < len(paths) && len(deltas) < signalPairCap; i++ {
+		for j := i + 1; j < len(paths) && len(deltas) < signalPairCap; j++ {
+			w := scores[paths[i]]
+			if b := scores[paths[j]]; b < w {
+				w = b
 			}
+			if w <= 0 {
+				w = signalWeightCoTouch
+			}
+			deltas = append(deltas, SignalEdgeDelta{Kind: "co_touch", Src: paths[i], Dst: paths[j], Weight: w})
 		}
 	}
 	for _, p := range edited {
-		_ = db.SignalTouch("edit", p, p, signalWeightEdit)
+		deltas = append(deltas, SignalEdgeDelta{Kind: "edit", Src: p, Dst: p, Weight: signalWeightEdit})
+	}
+	for _, p := range mentioned {
+		deltas = append(deltas, SignalEdgeDelta{Kind: "search", Src: p, Dst: p, Weight: signalWeightSearch})
+	}
+	if err := db.SignalTouchBatch(deltas); err != nil {
+		slog.Warn("signals flush failed", "room", t.room, "edges", len(deltas), "err", err)
+	}
+	// Age the graph after a run, throttled: projects where agents never run
+	// search_index (the only eager-decay caller) still get decay here.
+	if _, err := db.SignalsDecayIfStale(signalDecayInterval); err != nil {
+		slog.Warn("signals decay failed", "room", t.room, "err", err)
 	}
 }
