@@ -365,3 +365,20 @@ func errAllKeysRejected(providerName string, count int) error {
 func errAllProviderKeysRejected(count int) error {
 	return fmt.Errorf("all %d accounts across every provider in this chain rejected the API key — update a key in Settings → Providers", count)
 }
+
+// errQuotaExhausted explains a run that ran out of attempts on rate limits. The
+// keys are still valid — they are just out of credit or throttled — so the
+// message must not read like a rejected credential or a provider outage.
+func errQuotaExhausted(providerName, account string, total int) error {
+	if providerName == "" {
+		providerName = "the provider"
+	}
+	if account == "" {
+		account = "the account"
+	}
+	scope := fmt.Sprintf("account %q on %s", account, providerName)
+	if total > 1 {
+		scope = fmt.Sprintf("every account it could reach on %s (last tried: %q)", providerName, account)
+	}
+	return fmt.Errorf("%s is rate-limited or out of quota — the keys are still valid, so top up the account or wait for the limit to reset, then retry", scope)
+}

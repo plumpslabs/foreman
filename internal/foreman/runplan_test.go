@@ -814,3 +814,32 @@ func TestSaveAgentRejectsOverlongModelChain(t *testing.T) {
 		t.Fatalf("a chain of exactly %d models should be accepted: %v", MaxModelChain, err)
 	}
 }
+
+// A run that dies on rate limits must say so: the keys are valid, so telling
+// the user to "update a key" (or leaving the raw 429) sends them to the wrong
+// fix. This is the sibling of the all-accounts-rejected message.
+func TestErrQuotaExhaustedNamesTheAccount(t *testing.T) {
+	single := errQuotaExhausted("Mix Provider", "Quota", 1).Error()
+	for _, want := range []string{"Quota", "Mix Provider", "rate-limited", "still valid"} {
+		if !strings.Contains(single, want) {
+			t.Fatalf("single-account message %q missing %q", single, want)
+		}
+	}
+	if strings.Contains(single, "update a key") {
+		t.Fatalf("quota message must not tell the user to replace a valid key: %q", single)
+	}
+
+	multi := errQuotaExhausted("Mix Provider", "Quota", 3).Error()
+	if !strings.Contains(multi, "every account") || !strings.Contains(multi, `"Quota"`) {
+		t.Fatalf("multi-account message %q should name the scope and the last account", multi)
+	}
+	if !strings.Contains(multi, "Mix Provider") {
+		t.Fatalf("multi-account message %q should name the provider", multi)
+	}
+
+	// Missing names must not produce a malformed sentence.
+	blank := errQuotaExhausted("", "", 1).Error()
+	if strings.Contains(blank, "  ") || !strings.Contains(blank, "the provider") {
+		t.Fatalf("blank names produced %q", blank)
+	}
+}

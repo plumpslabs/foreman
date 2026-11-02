@@ -605,6 +605,20 @@ attemptLoop:
 		}, control)
 		attemptsUsed = attempt + 1
 
+		// A run that dies on quota exhaustion is not a mystery: the account it
+		// reached was rate-limited or out of credit, and the keys are still
+		// valid. The raw "429 Too Many Requests" would read like a provider
+		// outage and send the user to replace a key that is fine. Reword it here,
+		// while the current (stage, key) is still in scope — the post-loop block
+		// can no longer see lastErr because a blocked run is not treated as a
+		// hard error.
+		if lastErr != nil && classifyKeyFailure(lastErr) == failureQuota {
+			stage, key, _ := rot.current()
+			if name := stage.Provider.Name; name != "" {
+				lastErr = errQuotaExhausted(name, accountLabel(key), plan.keyCount())
+			}
+		}
+
 		// Break immediately when the whole-run budget/deadline is gone or the
 		// run was stopped: retrying can only fail again and burns time.
 		if lastErr == nil || ctx.Err() != nil || result.Status == "paused" || result.Status == "blocked" {
