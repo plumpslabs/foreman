@@ -72,6 +72,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("DELETE /api/providers/{providerID}", s.deleteProvider)
 	mux.HandleFunc("PUT /api/providers/{providerID}/keys", s.saveProviderKey)
 	mux.HandleFunc("DELETE /api/providers/{providerID}/keys/{keyName}", s.deleteProviderKey)
+	mux.HandleFunc("GET /api/providers/{providerID}/keys/{keyName}/reveal", s.revealProviderKey)
 	mux.HandleFunc("POST /api/global/reset", s.resetGlobal)
 	mux.HandleFunc("PUT /api/settings", s.updateSettings)
 	mux.HandleFunc("POST /api/skills", s.saveSkill)
@@ -797,6 +798,32 @@ func (s *Server) deleteProviderKey(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// revealProviderKey returns the full stored secret for one named key. It is a
+// deliberate, explicit user action (the Show/Copy button) — the workspace API
+// only ever exposes a masked preview. A keyName of "default" (or "") reveals the
+// legacy/default credential stored under the provider id.
+func (s *Server) revealProviderKey(w http.ResponseWriter, r *http.Request) {
+	if err := s.verifyProject(r.URL.Query().Get("project")); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	providerID, _ := url.PathUnescape(r.PathValue("providerID"))
+	keyName, _ := url.PathUnescape(r.PathValue("keyName"))
+	if keyName == "default" {
+		keyName = ""
+	}
+	secret, err := s.store.loadProviderKey(s.root, providerID, keyName)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if secret == "" {
+		writeError(w, http.StatusNotFound, "no key stored under that name")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"apiKey": secret})
 }
 
 func (s *Server) updateSettings(w http.ResponseWriter, r *http.Request) {

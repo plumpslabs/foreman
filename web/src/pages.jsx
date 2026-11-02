@@ -422,7 +422,7 @@ export function RoomDetailHost({ room, state, notify, setModal, runTask, refresh
       const who = m.agentName || '';
       const at = m.activityType || '';
       const body = String(m.content || '');
-      const sevClass = body.includes('ð')
+      const sevClass = body.includes('🛑')
         ? 'sev-blocker'
         : (/escalat|blocked|rework|failed/.test(at) ? 'sev-warning' : '');
       return (
@@ -1849,6 +1849,32 @@ function ProviderModal({ initial, isNew, existingIds = [], onClose, notify, refr
   // probes the provider with that specific account so the user knows which
   // one actually works, instead of only seeing ON/OFF.
   const [keyChecks, setKeyChecks] = useState({});
+  const [revealed, setRevealed] = useState({});
+  const toggleReveal = async (name, alias) => {
+    const slot = alias || name;
+    if (revealed[slot]) {
+      setRevealed((prev) => { const next = { ...prev }; delete next[slot]; return next; });
+      return;
+    }
+    try {
+      const r = await api(`/api/providers/${encodeURIComponent(config().id)}/keys/${encodeURIComponent(name)}/reveal`);
+      setRevealed((prev) => ({ ...prev, [slot]: r.apiKey || '' }));
+    } catch (error) {
+      notify(error.message);
+    }
+  };
+  const copyKey = async (name, alias) => {
+    const slot = alias || name;
+    try {
+      const r = revealed[slot]
+        ? { apiKey: revealed[slot] }
+        : await api(`/api/providers/${encodeURIComponent(config().id)}/keys/${encodeURIComponent(name)}/reveal`);
+      await navigator.clipboard.writeText(r.apiKey || '');
+      notify('API key copied');
+    } catch (error) {
+      notify(error.message || 'Could not copy — reveal it and copy manually');
+    }
+  };
   const testKey = async (name) => {
     setKeyChecks((prev) => ({ ...prev, [name]: { state: 'running', message: 'Testing…' } }));
     try {
@@ -1880,8 +1906,15 @@ function ProviderModal({ initial, isNew, existingIds = [], onClose, notify, refr
   };
 
   const addKey = async () => {
-    const name = newKeyName.trim();
-    if (!name) { notify('Give the account a name (e.g. Key 1)'); return; }
+    // Auto-name when left blank: "<Provider> 1", "<Provider> 2", … so the list
+    // reads clearly (e.g. "TokenHarbor 1") without the user inventing names.
+    let name = newKeyName.trim();
+    if (!name) {
+      const base = (form.name || form.id || 'Key').trim();
+      let n = 1;
+      while (keys.some((k) => k.name === `${base} ${n}`)) n += 1;
+      name = `${base} ${n}`;
+    }
     if (!newKeySecret.trim()) { notify('Paste the API key for this account'); return; }
     const ok = await saveKey(name, newKeySecret, true);
     if (ok) { setNewKeyName(''); setNewKeySecret(''); }
@@ -1997,11 +2030,24 @@ function ProviderModal({ initial, isNew, existingIds = [], onClose, notify, refr
 
           <div class="field">
             <label>API key {initial?.hasApiKey ? '(saved — leave blank to keep)' : ''}</label>
-            <input type="password" autocomplete="new-password" placeholder="sk-…"
+            {initial?.hasApiKey && !apiKey ? (
+              <div class="key-row" style="margin-bottom:6px">
+                <code class="key-value" title={revealed.__default ? 'Full key shown' : 'Masked — click Show to reveal'}>
+                  {revealed.__default ? revealed.__default : (initial.defaultKeyPreview || '••••')}
+                </code>
+                <button type="button" class="btn small" onClick={() => toggleReveal('default', '__default')}
+                  title={revealed.__default ? 'Hide key' : 'Show key'}>
+                  <Icon name="eye" size={13} />{revealed.__default ? 'Hide' : 'Show'}
+                </button>
+                <button type="button" class="btn small" onClick={() => copyKey('default', '__default')} title="Copy key">
+                  <Icon name="copy" size={13} />Copy
+                </button>
+              </div>
+            ) : null}
+            <input type="password" autocomplete="new-password" placeholder={initial?.hasApiKey ? 'Leave blank to keep the saved key, or paste a new one' : 'sk-…'}
               value={apiKey} onInput={(e) => setApiKey(e.currentTarget.value)} />
             <div class="md-hint">This is the default key. Add more accounts below to connect several keys (e.g. two Zro/MoonMath accounts) under one provider. At run time Foreman uses the first enabled key; the agent profile handles fallback between keys — there is no auto-rotate in Foreman itself.</div>
           </div>
-
           <div class="field">
             <label>Accounts (named API keys)</label>
             {isNew ? (
@@ -2019,6 +2065,9 @@ function ProviderModal({ initial, isNew, existingIds = [], onClose, notify, refr
                           onChange={(e) => toggleKey(k.name, e.currentTarget.checked)} />
                         <span>{k.name}</span>
                       </label>
+                      <code class="key-value" title={revealed[k.name] ? 'Full key shown' : 'Masked — click Show to reveal'}>
+                        {revealed[k.name] ? revealed[k.name] : (k.preview || '••••')}
+                      </code>
                       <span class={`tag ${k.enabled ? 'blue' : 'grey'}`}>{k.enabled ? 'On' : 'Off'}</span>
                       {chk && chk.state !== 'running' ? (
                         <span class={`tag ${chk.state === 'ok' ? 'green' : 'orange'}`}
@@ -2026,6 +2075,13 @@ function ProviderModal({ initial, isNew, existingIds = [], onClose, notify, refr
                           {chk.state === 'ok' ? '✓ valid' : '✗ invalid'}
                         </span>
                       ) : null}
+                      <button type="button" class="btn small" onClick={() => toggleReveal(k.name)}
+                        title={revealed[k.name] ? 'Hide key' : 'Show key'}>
+                        <Icon name="eye" size={13} />{revealed[k.name] ? 'Hide' : 'Show'}
+                      </button>
+                      <button type="button" class="btn small" onClick={() => copyKey(k.name)} title="Copy key">
+                        <Icon name="copy" size={13} />
+                      </button>
                       <button type="button" class="btn small" disabled={keyBusy || (chk && chk.state === 'running')}
                         onClick={() => testKey(k.name)} title="Check whether this key is still valid">
                         <Icon name="activity" size={13} />{chk && chk.state === 'running' ? 'Testing…' : 'Test'}

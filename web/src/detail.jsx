@@ -2,7 +2,7 @@ import { useState } from 'preact/hooks';
 import { api } from './api.js';
 import { Icon } from './icons.jsx';
 import { Markdown, MarkdownEditor, STARTER_INSTRUCTIONS } from './markdown.jsx';
-import { AgentAvatar } from './avatar.jsx';
+import { AgentAvatar, findAgent } from './avatar.jsx';
 
 const plain = (s) => String(s ?? '');
 
@@ -594,7 +594,9 @@ export function TeamDetailPage({ teamId, state, notify, refresh, onBack, onOpenA
   const libraryAgents = (state.agents || []).filter((a) => !form.agents.some((x) => x.name === a.name));
 
   const pickFromLibrary = (source) => {
-    set('agents', [...form.agents, { ...source, id: undefined }]);
+    // Keep the library agent's id so the team roster renders the same generated
+    // avatar as the library profile (the server reconciles by name anyway).
+    set('agents', [...form.agents, { ...source }]);
     setPickOpen(false);
     notify(`Added ${source.name} to the team`);
   };
@@ -689,7 +691,7 @@ export function TeamDetailPage({ teamId, state, notify, refresh, onBack, onOpenA
           {form.agents.map((agent) => (
             <div class="team-agent">
               <div class="team-agent-head">
-                <AgentAvatar agent={agent} name={agent.name} tone="green" radius={6} />
+                <AgentAvatar agent={agent.id ? agent : (findAgent(state, agent.name) || agent)} name={agent.name} tone="green" radius={6} />
                 <div style="flex:1;min-width:0">
                   <div class="tool-name">
                     <span class="agent-name-trunc" title={plain(agent.name)}>{plain(agent.name)}</span>

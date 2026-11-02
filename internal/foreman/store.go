@@ -419,6 +419,10 @@ func cloneTeamsWithAgents(teams []Team) []Team {
 // reads, or runs keep executing the snapshot taken when the agent joined the
 // team.
 func applyLibraryProfileFields(dst *Agent, src Agent) {
+	// Adopt the library profile's identity too, so team roster copies point at
+	// the same generated avatar as the library entry. Names are the join key;
+	// the id is shared deliberately (agentsFromTeams dedupes by name).
+	dst.ID = src.ID
 	dst.Role = src.Role
 	dst.Description = src.Description
 	dst.Instructions = src.Instructions

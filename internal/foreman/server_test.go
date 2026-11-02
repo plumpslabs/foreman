@@ -818,3 +818,82 @@ func TestProviderTestWithNamedKey(t *testing.T) {
 		t.Fatalf("invalid key should fail with 502, got %d", code)
 	}
 }
+
+func TestRevealProviderKey(t *testing.T) {
+	server, project := newTestServer(t)
+	handler := server.Handler()
+	base := "?project=" + url.QueryEscape(project)
+
+	cfg := `{"config":{"id":"tok","name":"TokenHarbor","protocol":"openai-compatible","baseUrl":"https://tokenharbor.ai/v1","models":["m"],"defaultModel":"m","enabled":true},"apiKey":"thk_default"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/providers"+base, bytes.NewBufferString(cfg))
+	req.Header.Set("Content-Type", "application/json")
+	req.RemoteAddr, req.Host = "127.0.0.1:1234", "127.0.0.1:8080"
+	res := httptest.NewRecorder()
+	handler.ServeHTTP(res, req)
+	if res.Code != http.StatusCreated {
+		t.Fatalf("create = %d: %s", res.Code, res.Body.String())
+	}
+	kr := httptest.NewRequest(http.MethodPut, "/api/providers/tok/keys"+base,
+		bytes.NewBufferString(`{"name":"TokenHarbor 1","apiKey":"thk_named","enabled":true}`))
+	kr.Header.Set("Content-Type", "application/json")
+	kr.RemoteAddr, kr.Host = "127.0.0.1:1234", "127.0.0.1:8080"
+	kres := httptest.NewRecorder()
+	handler.ServeHTTP(kres, kr)
+	if kres.Code != http.StatusOK {
+		t.Fatalf("save key = %d: %s", kres.Code, kres.Body.String())
+	}
+
+	reveal := func(name string) (int, string) {
+		rr := httptest.NewRequest(http.MethodGet, "/api/providers/tok/keys/"+name+"/reveal"+base, nil)
+		rr.RemoteAddr, rr.Host = "127.0.0.1:1234", "127.0.0.1:8080"
+		rres := httptest.NewRecorder()
+		handler.ServeHTTP(rres, rr)
+		var body map[string]string
+		_ = json.Unmarshal(rres.Body.Bytes(), &body)
+		return rres.Code, body["apiKey"]
+	}
+	if code, key := reveal("default"); code != http.StatusOK || key != "thk_default" {
+		t.Fatalf("reveal default = %d %q", code, key)
+	}
+	if code, key := reveal("TokenHarbor%201"); code != http.StatusOK || key != "thk_named" {
+		t.Fatalf("reveal named = %d %q", code, key)
+	}
+	if code, _ := reveal("missing"); code != http.StatusNotFound {
+		t.Fatalf("reveal missing = %d", code)
+	}
+}
+
+// TestRosterAgentInheritsLibraryID guards the avatar bug: a team roster copy
+// must share the library profile's id so it renders the same generated avatar.
+func TestRosterAgentInheritsLibraryID(t *testing.T) {
+	store, err := openStoreForTest(t, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	lib, err := store.SaveAgent(Agent{Name: "Orion", Role: "Coordinator", AvatarSeed: "seed-orion"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if lib.ID == "" {
+		t.Fatal("library agent has no id")
+	}
+	team, err := store.ImportTeam("quick-fix", "Focused")
+	if err != nil {
+		t.Fatal(err)
+	}
+	team.Agents = append(team.Agents, Agent{Name: "Orion", Role: "Coordinator"})
+	if _, err := store.UpdateTeam(team); err != nil {
+		t.Fatal(err)
+	}
+	var roster Agent
+	for _, t2 := range store.Snapshot().Teams {
+		for _, a := range t2.Agents {
+			if a.Name == "Orion" {
+				roster = a
+			}
+		}
+	}
+	if roster.ID != lib.ID {
+		t.Fatalf("roster id = %q, want library id %q", roster.ID, lib.ID)
+	}
+}

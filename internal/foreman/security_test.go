@@ -223,3 +223,43 @@ func TestSaveProviderPreservesNamedKeys(t *testing.T) {
 		t.Fatalf("expected first enabled key after save, got %q", secret)
 	}
 }
+
+func TestProviderKeyPreviewAndMask(t *testing.T) {
+	if got := maskSecret(""); got != "" {
+		t.Fatalf("empty secret mask = %q", got)
+	}
+	if got := maskSecret("short"); got != "••••" {
+		t.Fatalf("short secret mask = %q", got)
+	}
+	got := maskSecret("sk-abcdefgh1234")
+	if got != "sk-…1234" {
+		t.Fatalf("mask = %q", got)
+	}
+	// The mask must never contain the full secret.
+	if strings.Contains(got, "abcdefgh") {
+		t.Fatalf("mask leaked the secret: %q", got)
+	}
+
+	store, err := openStoreForTest(t, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := ProviderConfig{ID: "tok", Name: "TokenHarbor", Protocol: "openai-compatible",
+		BaseURL: "https://tokenharbor.ai/v1", DefaultModel: "m", Enabled: true}
+	if _, err := store.SaveProvider(cfg, "thk_default_secret"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SaveProviderKey("tok", "TokenHarbor 1", "thk_named_secret", true); err != nil {
+		t.Fatal(err)
+	}
+	list := store.ProvidersForAPI()
+	if len(list) != 1 {
+		t.Fatalf("providers = %d", len(list))
+	}
+	if list[0].DefaultKeyPreview == "" || strings.Contains(list[0].DefaultKeyPreview, "default_secret") {
+		t.Fatalf("default preview wrong: %q", list[0].DefaultKeyPreview)
+	}
+	if len(list[0].Keys) != 1 || list[0].Keys[0].Preview == "" || strings.Contains(list[0].Keys[0].Preview, "named_secret") {
+		t.Fatalf("named preview wrong: %+v", list[0].Keys)
+	}
+}

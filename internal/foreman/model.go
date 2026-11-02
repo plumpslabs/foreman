@@ -131,14 +131,21 @@ type ProviderConfig struct {
 	// never inline. Legacy single-secret providers keep working: when Keys is
 	// empty, the credential stored under the provider ID alone is used.
 	Keys []ProviderKey `json:"keys,omitempty"`
+	// DefaultKeyPreview is a masked hint of the legacy/default credential, so the
+	// UI can show which key is stored without exposing it. Computed on read.
+	DefaultKeyPreview string `json:"defaultKeyPreview,omitempty"`
 }
 
-// ProviderKey is one named credential for a provider. Secret is never serialized
-// here — it lives in credentials.json, keyed by "<providerID>|<name>" (or just
-// the provider ID for the default/legacy key).
+// ProviderKey is one named credential for a provider. The secret itself is never
+// serialized in workspace state — it lives in credentials.json, keyed by
+// "<providerID>|<name>" (or just the provider ID for the default/legacy key).
+// Preview is a masked hint (e.g. "sk-…4f2a") computed on read so the UI can show
+// which key is stored without exposing it; the full value is fetched on demand
+// via the reveal endpoint when the user clicks Show/Copy.
 type ProviderKey struct {
 	Name    string `json:"name"`
 	Enabled bool   `json:"enabled"`
+	Preview string `json:"preview,omitempty"`
 }
 
 type Skill struct {

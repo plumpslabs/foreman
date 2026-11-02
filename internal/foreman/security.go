@@ -299,8 +299,28 @@ func (s *Store) ProvidersForAPI() []ProviderConfig {
 	state := s.Snapshot()
 	for i := range state.Providers {
 		state.Providers[i].HasAPIKey = s.ProviderSecretForRun(state.ProjectPath, state.Providers[i]) != ""
+		if def, _ := s.loadProviderCredential(state.ProjectPath, state.Providers[i].ID); def != "" {
+			state.Providers[i].DefaultKeyPreview = maskSecret(def)
+		}
+		for j := range state.Providers[i].Keys {
+			secret, _ := s.loadProviderKey(state.ProjectPath, state.Providers[i].ID, state.Providers[i].Keys[j].Name)
+			state.Providers[i].Keys[j].Preview = maskSecret(secret)
+		}
 	}
 	return state.Providers
+}
+
+// maskSecret renders a short, non-reversible hint of a stored secret so the UI
+// can show which key is saved without exposing it (e.g. "sk-…4f2a").
+func maskSecret(secret string) string {
+	if secret == "" {
+		return ""
+	}
+	if len(secret) <= 8 {
+		return "••••"
+	}
+	prefix := secret[:3]
+	return prefix + "…" + secret[len(secret)-4:]
 }
 
 // SaveProviderKey adds or updates a named API key on a provider and stores the
