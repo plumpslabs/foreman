@@ -273,6 +273,11 @@ func testProvider(ctx context.Context, config ProviderConfig, secret string) err
 				return nil
 			}
 		}
+	} else if isAuthError(listErr) {
+		// Surface 401/403 directly so the user knows the key is the problem
+		// (e.g. an invalid or expired Zro/MoonMath key) rather than a vague
+		// "connection failed".
+		return listErr
 	}
 	// Some gateways do not expose /models. Fall back to a minimal chat request.
 	if pingErr := openAIChatPing(ctx, config, secret); pingErr != nil {
@@ -282,6 +287,17 @@ func testProvider(ctx context.Context, config ProviderConfig, secret string) err
 		return errors.New("provider connection failed; check the endpoint, network, and credentials")
 	}
 	return nil
+}
+
+// isAuthError reports whether an error came from a 401/403 provider response.
+func isAuthError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "401") || strings.Contains(msg, "403") ||
+		strings.Contains(msg, "Unauthorized") || strings.Contains(msg, "Forbidden") ||
+		strings.Contains(msg, "rejected the API key")
 }
 
 func anthropicPing(ctx context.Context, config ProviderConfig, secret string) error {
@@ -389,7 +405,12 @@ func fetchOpenAIModels(ctx context.Context, baseURL, apiKey string) ([]string, e
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("HTTP %d", resp.StatusCode)
+		switch resp.StatusCode {
+		case http.StatusUnauthorized, http.StatusForbidden:
+			return nil, fmt.Errorf("provider rejected the API key (HTTP %d) — check that the key is valid and not expired", resp.StatusCode)
+		default:
+			return nil, fmt.Errorf("HTTP %d", resp.StatusCode)
+		}
 	}
 	var payload struct {
 		Data []struct {

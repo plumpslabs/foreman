@@ -1,6 +1,12 @@
 package foreman
 
-import "testing"
+import (
+	"context"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+)
 
 func TestValidateProviderInputAllowsPrivateAndVPNSchemes(t *testing.T) {
 	valid := []string{
@@ -42,5 +48,31 @@ func TestIsLocalOrPrivateHost(t *testing.T) {
 		if isLocalOrPrivateHost(h) {
 			t.Errorf("expected %q to be public/unknown", h)
 		}
+	}
+}
+
+func TestProviderTestSurfacesAuthError(t *testing.T) {
+	// A provider that answers /models with 401 must surface a clear key error,
+	// not a generic "connection failed" — this is exactly the Zro/MoonMath
+	// case where an invalid or expired key returns 401.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+	}))
+	defer srv.Close()
+
+	cfg := ProviderConfig{
+		ID:            "zro-test",
+		Name:          "Zro (MoonMath)",
+		Protocol:      "openai-compatible",
+		BaseURL:       srv.URL,
+		DefaultModel:  "deepseek-v4.1-flash",
+	}
+	err := testProvider(context.Background(), cfg, "sk-invalid")
+	if err == nil {
+		t.Fatal("expected an error for a 401 provider response")
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, "401") && !strings.Contains(msg, "rejected the API key") {
+		t.Fatalf("expected a clear auth error, got %q", msg)
 	}
 }
