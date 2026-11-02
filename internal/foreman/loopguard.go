@@ -22,6 +22,7 @@ var readOnlyTools = map[string]bool{
 	"glob_files":   true,
 	"search_index": true,
 	"repo_map":     true,
+	"related":      true,
 	"list_tasks":   true,
 	"list_rooms":   true,
 	"diagnose":     true,
@@ -55,16 +56,23 @@ type loopGuard struct {
 	forced     bool
 	reason     string
 	toolCounts map[string]int
+	// nudged records which soft-injection thresholds already fired; each
+	// nudge costs context exactly once (time-travel rules, after oh-my-pi).
+	nudged map[int]bool
+	// roleDirective carries the run's role mandate (e.g. the coordinator's
+	// "delegate, do not explore"); appended to block messages so native
+	// enforcement speaks the same language as the prompt.
+	roleDirective string
 }
 
-func newLoopGuard(readBudget, hardRounds int) *loopGuard {
+func newLoopGuard(readBudget, hardRounds int, roleDirective ...string) *loopGuard {
 	if readBudget <= 0 {
 		readBudget = 40
 	}
 	if hardRounds <= 0 {
 		hardRounds = 60
 	}
-	return &loopGuard{readBudget: readBudget, hardRounds: hardRounds, toolCounts: map[string]int{}}
+	return &loopGuard{readBudget: readBudget, hardRounds: hardRounds, toolCounts: map[string]int{}, nudged: map[int]bool{}, roleDirective: strings.Join(roleDirective, " ")}
 }
 
 // decide is the pure state machine: given the next tool name it reports whether
@@ -97,9 +105,13 @@ func (g *loopGuard) decide(toolName string) (bool, string) {
 }
 
 func (g *loopGuard) blockMessage(toolName string) string {
-	return fmt.Sprintf(
+	msg := fmt.Sprintf(
 		"Blocked %q: %s Stop reading. Now choose one: create a plan (create_plan), delegate (spawn_agent / create_task), make the change, ask the human (ask_human / escalate), or finish with finish_task — or reply with a summary of what you found and what you recommend.",
 		toolName, g.reasonOrDefault())
+	if g.roleDirective != "" {
+		msg += "\n" + g.roleDirective
+	}
+	return msg
 }
 
 func (g *loopGuard) reasonOrDefault() string {
@@ -128,11 +140,52 @@ func (g *loopGuard) beforeTool(_ agent.Context, t tool.Tool, _ map[string]any) (
 	}, nil
 }
 
+// afterTool injects time-travel-style nudges (the oh-my-pi pattern): instead
+// of staying silent until the budget is blown, the guard appends a short note
+// to a read-only tool result once at 60% and once at 90% of the read budget —
+// course correction that costs context exactly twice, not every turn. The
+// underlying result is otherwise unmodified.
+func (g *loopGuard) afterTool(_ agent.Context, t tool.Tool, _ map[string]any, result map[string]any, _ error) (map[string]any, error) {
+	if t == nil || result == nil {
+		return nil, nil
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.forced || !isReadOnlyTool(t.Name()) {
+		return nil, nil
+	}
+	const loopGuardNoteKey = "loop_guard_note"
+	thresholds := []struct {
+		pct int
+		msg string
+	}{
+		{60, fmt.Sprintf("Loop guard: %d of %d read-only rounds used. Wrap up gathering evidence soon — move to create_plan, an edit, spawn_agent/create_task, or ask_human.", g.readRounds, g.readBudget)},
+		{90, fmt.Sprintf("Loop guard: %d of %d read-only rounds — further read-only calls will soon be blocked. Decide and act now.", g.readRounds, g.readBudget)},
+	}
+	for i, th := range thresholds {
+		if float64(g.readRounds) < float64(th.pct)/100*float64(g.readBudget) {
+			continue
+		}
+		if g.nudged[i] {
+			continue
+		}
+		g.nudged[i] = true
+		out := make(map[string]any, len(result)+1)
+		for k, v := range result {
+			out[k] = v
+		}
+		out[loopGuardNoteKey] = th.msg
+		return out, nil
+	}
+	return nil, nil
+}
+
 // plugin wraps the governor as an ADK plugin attached to the runner.
 func (g *loopGuard) plugin() (*plugin.Plugin, error) {
 	return plugin.New(plugin.Config{
 		Name:               "foreman_loop_guard",
 		BeforeToolCallback: g.beforeTool,
+		AfterToolCallback:  g.afterTool,
 	})
 }
 

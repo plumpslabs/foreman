@@ -24,6 +24,7 @@ func newTestServer(t *testing.T) (*Server, string) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(server.runtime.stopWatchdog)
 	return server, project
 }
 

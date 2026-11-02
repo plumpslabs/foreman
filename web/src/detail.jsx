@@ -418,18 +418,10 @@ export function AgentDetailPage({ agentId, state, notify, refresh, onBack }) {
           <div class="field">
             <label>Spawn authority</label>
             <select value={form.canSpawn} onChange={(e) => set('canSpawn', e.currentTarget.value)}>
-              <option value="">Default (lead only)</option>
+              <option value="">Default (may spawn directly)</option>
               <option value="request">Request (needs lead approval)</option>
-              <option value="limited">Limited (may spawn directly)</option>
             </select>
-            <div class="meta-text">Default keeps hierarchy: only the team lead spawns. "Request" lets this agent ask the lead to spawn. "Limited" lets it spawn teammates directly.</div>
-          </div>
-          <div class="field">
-            <label>Provider</label>
-            <select value={form.providerId} onChange={(e) => set('providerId', e.currentTarget.value)}>
-              <option value="">Auto / workspace default</option>
-              {(state.providers || []).map((p) => <option value={plain(p.id)}>{plain(p.name)}</option>)}
-            </select>
+            <div class="meta-text">Open by default: any team member can spawn a teammate (membership + depth limits still apply). Set "Request" to lock an agent down so it must ask the lead first — useful for reviewers or read-only roles.</div>
           </div>
           <ProviderModelField providerId={form.providerId} providers={state.providers || []}
             model={form.model} onChange={(model) => set('model', model)}

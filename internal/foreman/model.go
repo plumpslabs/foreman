@@ -80,28 +80,38 @@ type MCPServer struct {
 }
 
 type Settings struct {
-	Theme               string  `json:"theme"`
-	EffortMode          string  `json:"effortMode"`
-	DefaultEffort       string  `json:"defaultEffort"`
-	MaxConcurrentRuns   int     `json:"maxConcurrentRuns"`
-	MaxWorkersPerTask   int     `json:"maxWorkersPerTask"`
-	MaxDelegationDepth  int     `json:"maxDelegationDepth"`
-	MaxRetries          int     `json:"maxRetries"`
-	MaxIterations       int     `json:"maxIterations"`
-	ReadOnlyBudget      int     `json:"readOnlyBudget"`
-	MaxExecutionSeconds int     `json:"maxExecutionSeconds"`
-	BudgetUSD           float64 `json:"budgetUsd"`
+	Theme              string `json:"theme"`
+	EffortMode         string `json:"effortMode"`
+	DefaultEffort      string `json:"defaultEffort"`
+	MaxConcurrentRuns  int    `json:"maxConcurrentRuns"`
+	MaxWorkersPerTask  int    `json:"maxWorkersPerTask"`
+	MaxDelegationDepth int    `json:"maxDelegationDepth"`
+	MaxRetries         int    `json:"maxRetries"`
+	MaxIterations      int    `json:"maxIterations"`
+	ReadOnlyBudget     int    `json:"readOnlyBudget"`
+	// CoordinatorReadBudget caps a coordinator's read-only rounds when the
+	// team has teammates to delegate to (supervisor, not explorer). 0 keeps
+	// the native default; per-agent ReadOnlyBudget overrides win when smaller.
+	CoordinatorReadBudget int     `json:"coordinatorReadBudget"`
+	MaxExecutionSeconds   int     `json:"maxExecutionSeconds"`
+	BudgetUSD             float64 `json:"budgetUsd"`
 	// DisableCompaction turns off ADK context compaction (on by default). When
 	// enabled, older conversation events are summarized before a model call
 	// once the prompt exceeds CompactionThreshold tokens, keeping long runs
 	// from re-sending an ever-growing context.
-	DisableCompaction     bool `json:"disableCompaction"`
-	CompactionThreshold   int  `json:"compactionThreshold"`
-	CompactionRetention   int  `json:"compactionRetention"`
-	RequireRunApproval    bool `json:"requireRunApproval"`
-	AllowProjectCommands  bool `json:"allowProjectCommands"`
-	DisableQuickReplies   bool `json:"disableQuickReplies"`
-	RouteIntentsWithModel bool `json:"routeIntentsWithModel"`
+	DisableCompaction   bool `json:"disableCompaction"`
+	CompactionThreshold int  `json:"compactionThreshold"`
+	CompactionRetention int  `json:"compactionRetention"`
+	// DisableSessionPersistence turns off ADK session persistence (on by
+	// default). With persistence, each conversation (room + agent) survives
+	// server restarts in <project>/.foreman/sessions.db, so a follow-up prompt
+	// continues the same thread instead of starting cold. Compaction still
+	// bounds how much of that history is re-sent per model call.
+	DisableSessionPersistence bool `json:"disableSessionPersistence"`
+	RequireRunApproval        bool `json:"requireRunApproval"`
+	AllowProjectCommands      bool `json:"allowProjectCommands"`
+	DisableQuickReplies       bool `json:"disableQuickReplies"`
+	RouteIntentsWithModel     bool `json:"routeIntentsWithModel"`
 }
 
 type ProviderConfig struct {
@@ -240,8 +250,11 @@ type Agent struct {
 	// agent act as an executor when a task is small instead of being forced to
 	// coordinate, and lets any member be designated a reviewer.
 	RoleType string `json:"roleType,omitempty"`
-	// CanSpawn controls spawn authority: "" (default, hierarchy-only),
-	// "request" (must use request_spawn), or "limited" (lead-approved direct).
+	// CanSpawn controls spawn authority: "" (default) lets the agent spawn
+	// teammates directly (membership + depth limits still apply); "request"
+	// forces delegation through request_spawn for lead/human approval;
+	// "limited" is the legacy explicit form of the default and behaves the
+	// same as "".
 	CanSpawn string `json:"canSpawn,omitempty"`
 	// MaxIterations overrides the engine's action-round budget for this agent.
 	// 0 inherits the workspace default. Higher values let a role explore longer;

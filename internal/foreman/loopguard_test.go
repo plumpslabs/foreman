@@ -1,6 +1,9 @@
 package foreman
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestLoopGuardBlocksAfterReadBudget(t *testing.T) {
 	g := newLoopGuard(3, 60)
@@ -55,6 +58,95 @@ func TestLoopGuardUnknownToolCountsAsAction(t *testing.T) {
 	// unknown tool is treated as an action, but a forced guard still blocks it.
 	if g.forcedReason() == "" {
 		t.Fatal("expected a forced reason")
+	}
+}
+
+// nudgeStubTool satisfies tool.Tool with just a name.
+type nudgeStubTool struct{ name string }
+
+func (s nudgeStubTool) Name() string        { return s.name }
+func (s nudgeStubTool) Description() string { return "" }
+func (s nudgeStubTool) IsLongRunning() bool { return false }
+
+func TestLoopGuardNudgesAtSixtyAndNinetyPercent(t *testing.T) {
+	g := newLoopGuard(10, 60)
+	result := func() map[string]any { return map[string]any{"status": "ok"} }
+	name := nudgeStubTool{name: "grep_files"}
+	// Each round: decide() (the beforeTool path) counts the read, then
+	// afterTool may attach the one-time note to the tool's result.
+	round := func() map[string]any {
+		g.decide("grep_files")
+		out, _ := g.afterTool(nil, name, nil, result(), nil)
+		return out
+	}
+	// Rounds 1-5 (below 60%): no nudge.
+	for i := 0; i < 5; i++ {
+		if out := round(); out != nil {
+			t.Fatalf("round %d: unexpected nudge %v", i+1, out)
+		}
+	}
+	// Round 6 crosses 60% exactly once.
+	out := round()
+	if out == nil {
+		t.Fatal("expected the 60% nudge at round 6")
+	}
+	if out["loop_guard_note"] == "" {
+		t.Fatal("nudge note must be present")
+	}
+	if out["status"] != "ok" {
+		t.Fatal("nudge must preserve the original result")
+	}
+	// Round 7 must stay quiet (each threshold fires exactly once).
+	if out2 := round(); out2 != nil {
+		t.Fatal("nudge must fire exactly once per threshold")
+	}
+	// Round 8 (below 90%): still quiet.
+	if out := round(); out != nil {
+		t.Fatal("unexpected nudge before 90%")
+	}
+	// Round 9 crosses 90%.
+	out = round()
+	if out == nil || out["loop_guard_note"] == "" {
+		t.Fatal("expected the 90% nudge")
+	}
+}
+
+func TestLoopGuardNudgeSkipsActionsAndForced(t *testing.T) {
+	name := nudgeStubTool{name: "grep_files"}
+	g := newLoopGuard(2, 60)
+	// Three reads against a budget of two -> the third decision forces.
+	for i := 0; i < 3; i++ {
+		g.decide("grep_files")
+	}
+	if !g.hasForced() {
+		t.Fatal("expected governor to be forced")
+	}
+	// Forced: read calls now get blocked before running; afterTool must not nudge.
+	if out, _ := g.afterTool(nil, name, nil, map[string]any{}, nil); out != nil {
+		t.Fatal("no nudge once forced")
+	}
+	// Write/action tools are never nudged even inside budget.
+	g2 := newLoopGuard(10, 60)
+	g2.decide("create_plan")
+	if out, _ := g2.afterTool(nil, nudgeStubTool{name: "create_plan"}, nil, map[string]any{}, nil); out != nil {
+		t.Fatal("actions must not be nudged")
+	}
+}
+
+func TestLoopGuardRoleDirectiveInBlockMessage(t *testing.T) {
+	directive := "You are the Coordinator: delegate now."
+	g := newLoopGuard(1, 60, directive)
+	g.decide("grep_files")
+	_, msg := g.decide("view_file") // exceeds budget -> forced
+	if !strings.Contains(msg, directive) {
+		t.Errorf("block message must carry the role directive, got %q", msg)
+	}
+	// A guard without a directive keeps the plain message.
+	g2 := newLoopGuard(1, 60)
+	g2.decide("grep_files")
+	_, plain := g2.decide("view_file")
+	if strings.Contains(plain, "You are the Coordinator") {
+		t.Errorf("plain guard must not grow a directive, got %q", plain)
 	}
 }
 

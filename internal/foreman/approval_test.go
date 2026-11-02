@@ -20,6 +20,7 @@ import (
 // approval that CreateApproval had just written — so every approval side
 // effect, including request_spawn, returned early and did nothing.
 func TestGetApprovalReadsDatabase(t *testing.T) {
+	isolateGlobal(t)
 	st, err := OpenStore(t.TempDir())
 	if err != nil {
 		t.Fatal(err)

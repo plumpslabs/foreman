@@ -16,6 +16,7 @@ import (
 // no timeout-pause, activity visible in chat.
 func TestAcceptanceA_QuickScenario(t *testing.T) {
 	tmpDir := t.TempDir()
+	isolateGlobal(t)
 	st, err := OpenStore(tmpDir)
 	if err != nil {
 		t.Fatalf("OpenStore: %v", err)
@@ -155,6 +156,7 @@ func TestAcceptanceA_QuickScenario(t *testing.T) {
 // parallel workers, auto-assigned reviewer, supervisor merges after gates.
 func TestAcceptanceB_EpicScenario(t *testing.T) {
 	tmpDir := t.TempDir()
+	isolateGlobal(t)
 	st, err := OpenStore(tmpDir)
 	if err != nil {
 		t.Fatalf("OpenStore: %v", err)
@@ -273,6 +275,7 @@ func TestAcceptanceB_EpicScenario(t *testing.T) {
 // Kill process mid-run; on restart, interrupted cards are requeued and continue.
 func TestAcceptanceC_CrashRecovery(t *testing.T) {
 	tmpDir := t.TempDir()
+	isolateGlobal(t)
 	st, err := OpenStore(tmpDir)
 	if err != nil {
 		t.Fatalf("OpenStore: %v", err)
@@ -330,6 +333,7 @@ func TestAcceptanceC_CrashRecovery(t *testing.T) {
 // A worker spawns a sub-worker; depth and budget limits are enforced.
 func TestAcceptanceD_SubWorkerLimits(t *testing.T) {
 	tmpDir := t.TempDir()
+	isolateGlobal(t)
 	st, err := OpenStore(tmpDir)
 	if err != nil {
 		t.Fatalf("OpenStore: %v", err)

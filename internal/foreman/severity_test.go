@@ -31,6 +31,7 @@ func TestSeverityRankOrder(t *testing.T) {
 
 func TestApprovalSeverityPersistedAndSorted(t *testing.T) {
 	dir := t.TempDir()
+	isolateGlobal(t)
 	st, err := OpenStore(dir)
 	if err != nil {
 		t.Fatalf("OpenStore: %v", err)

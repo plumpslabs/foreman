@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bufio"
 	"context"
 	"flag"
 	"fmt"
@@ -14,7 +13,6 @@ import (
 	"path/filepath"
 	"runtime"
 	"strconv"
-	"strings"
 	"syscall"
 	"time"
 
@@ -58,12 +56,9 @@ func usage() {
 	fmt.Println("  --project DIR     Project directory (default: current directory)")
 	fmt.Println("  --port PORT       Preferred local port; 0 picks an available one")
 	fmt.Println("  --no-open         Do not open a browser")
-	fmt.Println("  --install-engine   Install the OpenHands SDK at startup if missing")
-	fmt.Println("  --yes             Skip confirmation (with --install-engine)")
 	fmt.Println()
 	fmt.Println("doctor flags:")
 	fmt.Println("  --project DIR     Inspect a workspace (optional)")
-	fmt.Println("  --install         Install the OpenHands SDK if missing")
 	fmt.Println()
 	fmt.Println("Tip: the installer adds a `fm` alias next to `foreman`.")
 }
@@ -73,10 +68,6 @@ func start(args []string) error {
 	projectPath := flags.String("project", ".", "Project directory (default: current directory)")
 	port := flags.Int("port", 0, "Preferred local port; 0 selects an available port")
 	noOpen := flags.Bool("no-open", false, "Do not open a browser")
-	installEngine := flags.Bool("install-engine", false, "Install the OpenHands SDK if missing")
-	autoYes := flags.Bool("yes", false, "Skip confirmation (with --install-engine)")
-	_ = installEngine
-	_ = autoYes
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
@@ -160,45 +151,6 @@ func doctor(args []string) error {
 		fmt.Printf("  Workspace     : %s (not a Foreman workspace yet — create it with `foreman start`)\n", *projectPath)
 	}
 	return nil
-}
-
-func installEngineCLI(engine *foreman.Engine) (string, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
-	defer cancel()
-	return engine.InstallSDK(ctx)
-}
-
-func promptInstallEngine(autoYes bool) (bool, error) {
-	if autoYes {
-		return true, nil
-	}
-	fmt.Print("OpenHands SDK belum terpasang. Install sekarang? [y/N] ")
-	line, err := bufio.NewReader(os.Stdin).ReadString('\n')
-	if err != nil {
-		return false, err
-	}
-	return strings.HasPrefix(strings.ToLower(strings.TrimSpace(line)), "y"), nil
-}
-
-func yesNo(b bool) string {
-	if b {
-		return "yes"
-	}
-	return "no"
-}
-
-func installedStatus(b bool) string {
-	if b {
-		return "installed ✓"
-	}
-	return "missing ✗"
-}
-
-func orDash(s string) string {
-	if strings.TrimSpace(s) == "" {
-		return "—"
-	}
-	return s
 }
 
 func listenLocal(preferred int) (net.Listener, int, error) {

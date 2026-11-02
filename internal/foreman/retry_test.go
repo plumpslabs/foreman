@@ -227,6 +227,7 @@ func TestRuntimeRetryPolicyEndToEnd(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
+			isolateGlobal(t)
 			st, err := OpenStore(t.TempDir())
 			if err != nil {
 				t.Fatal(err)

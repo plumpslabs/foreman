@@ -1,7 +1,9 @@
 package foreman
 
 import (
+	"encoding/json"
 	"fmt"
+	"go/format"
 	"os"
 	"path/filepath"
 	"strings"
@@ -21,6 +23,10 @@ type fileEditorArgs struct {
 	Line      int    `json:"line,omitempty"`
 	Text      string `json:"text,omitempty"`
 	Limit     int    `json:"limit,omitempty"`
+	// WithHashes renders each view_file line with a content-hash anchor
+	// (line#hash) that edit_file consumes. Off by default to keep view
+	// output cheap; agents request it when they intend to edit.
+	WithHashes bool `json:"with_hashes,omitempty"`
 }
 
 func safePath(workspace, p string) (string, error) {
@@ -59,6 +65,14 @@ func lockPath(path string) func() {
 // context has an emit callback. Diffs are cumulative: the first edit of a
 // file records the pre-run content, later edits diff against that origin so
 // the room's Changes tab shows one up-to-date diff per file.
+//
+// After writing, it normalizes the file's formatting when a language-specific
+// formatter is available (Go via go/format, zero-dependency; other languages
+// via an optional external formatter if present). This is the "feedback loop"
+// that makes edits land cleanly: the agent edits a region, and Foreman leaves
+// the file gofmt-clean so the next read (and the build) is not polluted by
+// stray formatting. A format failure never rejects the edit — the original
+// write stands.
 func writeFileWithDiff(tc adkToolContext, workspace, path, content string) (bool, error) {
 	unlock := lockPath(path)
 	defer unlock()
@@ -72,6 +86,11 @@ func writeFileWithDiff(tc adkToolContext, workspace, path, content string) (bool
 	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
 		return false, err
 	}
+	// Normalize formatting in place when possible, best-effort.
+	if formatted, ferr := formatOnWrite(path, content); ferr == nil && formatted != content {
+		_ = os.WriteFile(path, []byte(formatted), 0644)
+		content = formatted
+	}
 	rel := relToWorkspace(workspace, path)
 	var origin string
 	if tc.diff != nil {
@@ -80,7 +99,24 @@ func writeFileWithDiff(tc adkToolContext, workspace, path, content string) (bool
 		origin = old
 	}
 	tc.emitDiff(rel, unifiedDiff(rel, origin, content))
+	// A real modification is the strongest signal the graph learns from.
+	tc.signals.touch(rel, true)
 	return true, nil
+}
+
+// formatOnWrite returns gofmt-normalized Go source, or the input unchanged for
+// other languages (external formatters are intentionally not spawned here to
+// keep the write path dependency-free and fast; diagnose/vet covers them).
+func formatOnWrite(path, content string) (string, error) {
+	if !strings.HasSuffix(path, ".go") {
+		return content, nil
+	}
+	formatted, err := format.Source([]byte(content))
+	if err != nil {
+		// Invalid syntax at this intermediate step — leave the raw write as-is.
+		return content, err
+	}
+	return string(formatted), nil
 }
 
 func relToWorkspace(workspace, path string) string {
@@ -96,7 +132,7 @@ func relToWorkspace(workspace, path string) string {
 func makeViewFileTool(tc adkToolContext) (any, error) {
 	return functiontool.New[fileEditorArgs, map[string]any](functiontool.Config{
 		Name:        "view_file",
-		Description: "View a file's contents, optionally a line range. Large files are capped (default 800 lines per call) — use start_line/limit to page through.",
+		Description: "View a file's contents, optionally a line range. Large files are capped (default 800 lines per call) — use start_line/limit to page through. Set with_hashes=true when you intend to edit: each line is rendered as `line#hash: content`, and those anchors are what edit_file consumes.",
 	}, func(ctx agent.Context, args fileEditorArgs) (map[string]any, error) {
 		path, err := safePath(tc.Workspace, args.Path)
 		if err != nil {
@@ -143,8 +179,13 @@ func makeViewFileTool(tc adkToolContext) (any, error) {
 		}
 		var b strings.Builder
 		for i := start; i <= end && i <= total; i++ {
-			fmt.Fprintf(&b, "%d: %s\n", i, lines[i-1])
+			if args.WithHashes {
+				fmt.Fprintf(&b, "%s\n", hashlineViewLine(lines, i))
+			} else {
+				fmt.Fprintf(&b, "%d: %s\n", i, lines[i-1])
+			}
 		}
+		tc.signals.touch(relToWorkspace(tc.Workspace, path), false)
 		return map[string]any{
 			"content": b.String(), "lines": end - start + 1, "total_lines": total,
 			"truncated": truncated, "offset": start, "limit": limit,
@@ -227,5 +268,39 @@ func makeInsertLinesTool(tc adkToolContext) (any, error) {
 			return nil, err
 		}
 		return map[string]any{"status": "inserted", "path": path, "changed": changed}, nil
+	})
+}
+
+// makeHashlineEditTool adds the anchored multi-edit tool (oh-my-pi style
+// hashline): edits reference line ranges by content hash instead of retyping
+// the old text, so edits land on the first attempt and output tokens collapse.
+// Anchors are validated against the CURRENT content before anything is
+// written; a stale hash is rejected without touching the file.
+func makeHashlineEditTool(tc adkToolContext) (any, error) {
+	return functiontool.New[hashlineArgs, map[string]any](functiontool.Config{
+		Name:        "edit_file",
+		Description: "Edit a file by line-hash anchors (preferred for targeted changes — token-cheap and immune to 'old_str not found'). First view_file with_hashes=true, then send ops_json as a JSON array: [{\"start_line\":42,\"end_line\":45,\"hash\":\"<anchor>\",\"new_text\":\"...\",\"op\":\"replace\"}]. op: replace (default), delete, insert_after. Multiple ops apply atomically — a stale or overlapping anchor rejects the whole batch and nothing is written.",
+	}, func(ctx agent.Context, args hashlineArgs) (map[string]any, error) {
+		path, err := safePath(tc.Workspace, args.Path)
+		if err != nil {
+			return nil, err
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return nil, err
+		}
+		var edits []hashlineEdit
+		if err := json.Unmarshal([]byte(strings.TrimSpace(args.OpsJSON)), &edits); err != nil {
+			return nil, fmt.Errorf("ops_json is not valid JSON: %v", err)
+		}
+		newContent, summaries, err := applyHashlineEdits(string(data), edits)
+		if err != nil {
+			return nil, err
+		}
+		changed, err := writeFileWithDiff(tc, tc.Workspace, path, newContent)
+		if err != nil {
+			return nil, err
+		}
+		return map[string]any{"status": "edited", "path": path, "applied": len(summaries), "changes": summaries, "changed": changed}, nil
 	})
 }

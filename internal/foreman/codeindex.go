@@ -1,6 +1,7 @@
 package foreman
 
 import (
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -185,10 +186,16 @@ func (d *DB) SearchWorkspace(root, query string, limit int) ([]CodeHit, bool, er
 
 // Store wrappers -----------------------------------------------------------------
 
-// IndexWorkspace delegates to the underlying database.
+// IndexWorkspace delegates to the underlying database. It also opportunistically
+// decays stale signal edges so the learned co-usage graph keeps tracking what
+// matters NOW — no background job required.
 func (s *Store) IndexWorkspace(root string) (int, int, error) {
 	if s.db == nil {
 		return 0, 0, nil
+	}
+	if err := s.db.SignalsDecay(); err != nil {
+		// Decay is best-effort; indexing must not fail because of it.
+		slog.Warn("signals decay failed", "err", err)
 	}
 	return s.db.IndexWorkspace(root)
 }

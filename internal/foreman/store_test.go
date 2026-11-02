@@ -25,7 +25,23 @@ func TestMain(m *testing.M) {
 func openStoreForTest(t *testing.T, project string) (*Store, error) {
 	t.Helper()
 	t.Setenv("FOREMAN_GLOBAL_PATH", filepath.Join(t.TempDir(), "global.json"))
-	return OpenStore(project)
+	st, err := OpenStore(project)
+	if err != nil {
+		return nil, err
+	}
+	// Close the SQLite handle so the TempDir cleanup can remove the -wal/-shm
+	// files; leaving it open makes the dir non-empty on repeated runs.
+	t.Cleanup(func() { _ = st.Close() })
+	return st, nil
+}
+
+// isolateGlobal points FOREMAN_GLOBAL_PATH at a scratch dir so a test's
+// writes (settings, providers, agents, teams) never touch the developer's real
+// ~/.foreman/global.json — and never leak into sibling tests that share that
+// file. Every test that opens a store directly must call this first.
+func isolateGlobal(t *testing.T) {
+	t.Helper()
+	t.Setenv("FOREMAN_GLOBAL_PATH", filepath.Join(t.TempDir(), "global.json"))
 }
 
 func TestTeamWithRunningRunsBlocksKick(t *testing.T) {

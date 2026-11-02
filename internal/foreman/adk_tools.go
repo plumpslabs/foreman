@@ -28,6 +28,9 @@ type adkToolContext struct {
 	// diff remembers the pre-run content of each file changed in this run so
 	// emitted diffs stay cumulative (one diff per file, latest state).
 	diff *diffTracker
+	// signals learns which files this run actually read/edited — the co-usage
+	// graph feeding repo_map ranking and the `related` tool.
+	signals *signalTracker
 }
 
 // diffTracker keeps the pre-run ("origin") content of every file an agent has
@@ -117,9 +120,15 @@ type gitOpsArgs struct {
 }
 
 type memoryArgs struct {
-	Action string `json:"action"`
-	Key    string `json:"key"`
-	Value  string `json:"value"`
+	Action string `json:"action"` // set|get|remember|recall|forget
+	Key    string `json:"key,omitempty"`
+	Value  string `json:"value,omitempty"`
+	// remember/recall extras: kind is fact|lesson, query the search text,
+	// id the fact id for forget.
+	Kind  string `json:"kind,omitempty"`
+	Query string `json:"query,omitempty"`
+	Limit int    `json:"limit,omitempty"`
+	ID    string `json:"id,omitempty"`
 }
 
 type askHumanArgs struct {
@@ -180,6 +189,11 @@ type repoMapArgs struct {
 	Path     string `json:"path,omitempty"`
 }
 
+type relatedArgs struct {
+	Path  string `json:"path"`
+	Limit int    `json:"limit,omitempty"`
+}
+
 type searchIndexArgs struct {
 	Query string `json:"query"`
 	Limit int    `json:"limit,omitempty"`
@@ -195,6 +209,54 @@ type deletePlanArgs struct {
 
 type deleteArtifactArgs struct {
 	ArtifactID string `json:"artifact_id"`
+}
+
+type initArgs struct {
+	Path string `json:"path,omitempty"`
+}
+
+type confirmArgs struct {
+	Action string `json:"action"`
+	Impact string `json:"impact,omitempty"`
+}
+
+// drillOptions returns a small set of concrete choices for a high-impact action
+// so the agent can present the human a precise decision instead of guessing.
+// The action verb selects sensible defaults; the list is intentionally short.
+func drillOptions(action, impact string) []map[string]string {
+	a := strings.ToLower(strings.TrimSpace(action))
+	switch {
+	case strings.Contains(a, "commit"), strings.Contains(a, "push"):
+		return []map[string]string{
+			{"option": "commit_only", "consequence": "Commit locally, no push. Reversible via git."},
+			{"option": "commit_and_push", "consequence": "Commit and push to remote. Published to others."},
+			{"option": "abort", "consequence": "Do not commit yet; keep working."},
+		}
+	case strings.Contains(a, "delete"), strings.Contains(a, "drop"), strings.Contains(a, "remove"):
+		return []map[string]string{
+			{"option": "delete_one", "consequence": "Remove only the specified item. Targeted."},
+			{"option": "delete_all", "consequence": "Bulk removal — " + orDefault(impact, "affects multiple items, hard to undo") + "."},
+			{"option": "abort", "consequence": "Keep everything; do not delete."},
+		}
+	case strings.Contains(a, "spawn"), strings.Contains(a, "delegate"):
+		return []map[string]string{
+			{"option": "spawn_scoped", "consequence": "Spawn a teammate with a bounded task + scope. Reversible."},
+			{"option": "do_it_self", "consequence": "Handle inline if small; skip the spawn."},
+			{"option": "abort", "consequence": "Do not delegate; report to coordinator instead."},
+		}
+	default:
+		return []map[string]string{
+			{"option": "proceed", "consequence": orDefault(impact, "Action proceeds as described.")},
+			{"option": "abort", "consequence": "Do not proceed; clarify first."},
+		}
+	}
+}
+
+func orDefault(s, fallback string) string {
+	if strings.TrimSpace(s) == "" {
+		return fallback
+	}
+	return s
 }
 
 func makeADKTools(ctx adkToolContext) []tool.Tool {
@@ -451,6 +513,23 @@ func makeADKTools(ctx adkToolContext) []tool.Tool {
 		_ = ctx.Store.AppendRoomNotice(ctx.RoomID, ctx.AgentName, "task.finished",
 			fmt.Sprintf("✅ Task %s marked %s by @%s — report saved in the Artifacts tab", taskTitle, status, ctx.AgentName))
 
+		// Auto-observe: distill a completed task into the memory bank so later
+		// runs recall what was done and what mattered without re-exploring.
+		// Failure-tolerant by design — memory must never break finishing.
+		if strings.TrimSpace(args.Summary) != "" {
+			lesson := fmt.Sprintf("Task %q completed by @%s (%s): %s", taskTitle, ctx.AgentName, status, clipForMemory(args.Summary))
+			if len(args.ChangedFiles) > 0 {
+				files := args.ChangedFiles
+				if len(files) > 6 {
+					files = append(files[:6], fmt.Sprintf("+%d more", len(args.ChangedFiles)-6))
+				}
+				lesson += " — files: " + strings.Join(files, ", ")
+			}
+			if _, merr := ctx.Store.DB().SaveMemoryFact(ctx.RoomID, ctx.AgentName, "lesson", lesson); merr == nil {
+				_ = ctx.Store.RecordActivity(ctx.RoomID, ctx.AgentName, "memory.retained", "Retained a lesson from the finished task", nil)
+			}
+		}
+
 		// Reviewer requested changes (review task finished as "blocked"):
 		// reopen the original implementer task for rework, bounded by retries.
 		if status == "blocked" && parentID != "" {
@@ -653,22 +732,46 @@ func makeADKTools(ctx adkToolContext) []tool.Tool {
 		return map[string]any{"status": "ok", "output": string(out)}, nil
 	}))
 
-	// memory
+	// memory — key/value notes plus a free-text fact/lesson bank with
+	// full-text recall across runs (the remember/recall pattern).
 	add(functiontool.New[memoryArgs, map[string]any](functiontool.Config{
 		Name:        "memory",
-		Description: "Read or write shared cross-agent memory.",
+		Description: "Shared cross-agent memory. action:set/get for exact key/value notes. action:remember stores a durable note (kind: fact for workspace state, lesson for what worked/failed); action:recall full-text searches the bank (query; limit; empty query = recent) and returns ids you can invalidate with action:forget. Retain decisions and setup knowledge others will need; recall at the start of a task.",
 	}, func(ac agent.Context, args memoryArgs) (map[string]any, error) {
 		if ctx.Store == nil {
 			return nil, fmt.Errorf("store unavailable")
 		}
 		db := ctx.Store.DB()
-		switch args.Action {
+		switch strings.ToLower(strings.TrimSpace(args.Action)) {
 		case "set":
 			err := db.SetMemory(ctx.RoomID, args.Key, args.Value, ctx.AgentName)
 			if err != nil {
 				return nil, err
 			}
 			return map[string]any{"status": "saved"}, nil
+		case "remember":
+			f, err := db.SaveMemoryFact(ctx.RoomID, ctx.AgentName, args.Kind, args.Value)
+			if err != nil {
+				return nil, err
+			}
+			return map[string]any{"status": "saved", "id": f.ID, "kind": f.Kind, "note": "duplicate body was collapsed onto the existing fact"}, nil
+		case "recall":
+			facts, err := db.RecallMemoryFacts(ctx.RoomID, args.Query, args.Limit)
+			if err != nil {
+				return nil, err
+			}
+			ids := make([]string, 0, len(facts))
+			for _, f := range facts {
+				ids = append(ids, f.ID)
+			}
+			db.TouchMemoryFacts(ids)
+			return map[string]any{"count": len(facts), "facts": facts}, nil
+		case "forget":
+			ok, err := db.ForgetMemoryFact(args.ID)
+			if err != nil {
+				return nil, err
+			}
+			return map[string]any{"forgotten": ok}, nil
 		default:
 			val, err := db.GetMemory(ctx.RoomID, args.Key)
 			if err != nil {
@@ -754,18 +857,19 @@ func makeADKTools(ctx adkToolContext) []tool.Tool {
 	// spawn_agent
 	add(functiontool.New[spawnAgentArgs, map[string]any](functiontool.Config{
 		Name:        "spawn_agent",
-		Description: "Delegate work to a teammate agent (by exact team roster name). Creates a Kanban task assigned to that agent, which starts their run when capacity allows. Only the room's lead agent may spawn.",
+		Description: "Delegate work to a teammate agent (by exact team roster name). Creates a Kanban task assigned to that agent, which starts their run when capacity allows. Any team member may spawn by default (membership + depth limits still apply); agents configured with 'request' authority must go through request_spawn instead.",
 	}, func(ac agent.Context, args spawnAgentArgs) (map[string]any, error) {
 		if ctx.Store == nil {
 			return nil, fmt.Errorf("store unavailable")
 		}
-		// Spawn model: hierarchical — only the lead agent may spawn peers by
-		// default. An agent explicitly granted "limited" authority in its
-		// profile may spawn directly too; "request" (or the default) must go
-		// through request_spawn for lead/human approval.
+		// Spawn model: open by default — any room member may spawn a teammate,
+		// because membership is validated (the target must be in an invited
+		// team) and the depth cap limits runaway delegation. The only blocker
+		// is an agent whose profile explicitly sets authority to "request":
+		// that one must go through request_spawn for lead/human approval.
 		if supervisor := ctx.Store.RoomMainAgentName(ctx.RoomID); supervisor != "" && ctx.AgentName != supervisor {
-			if ctx.Store.RoomAgentCanSpawn(ctx.RoomID, ctx.AgentName) != "limited" {
-				return nil, fmt.Errorf("only the lead agent (%s) may spawn teammates; use request_spawn through the lead", supervisor)
+			if ctx.Store.RoomAgentCanSpawn(ctx.RoomID, ctx.AgentName) == "request" {
+				return nil, fmt.Errorf("%s uses request-only spawn authority; use request_spawn instead of spawning directly", ctx.AgentName)
 			}
 		}
 		// Depth cap: walk the parent task chain (default max 2).
@@ -1012,13 +1116,76 @@ func makeADKTools(ctx adkToolContext) []tool.Tool {
 	// repo_map
 	add(functiontool.New[repoMapArgs, map[string]any](functiontool.Config{
 		Name:        "repo_map",
-		Description: "Build a concise map of source files and their key symbols (Aider-style). Use once at the start to orient in an unfamiliar codebase before grepping/reading.",
+		Description: "Build a concise map of source files and their key symbols (Aider-style). Use once at the start to orient in an unfamiliar codebase before grepping/reading. Includes hot_files — files this project's runs actually read/edited most — when the learned-signal graph has data.",
 	}, func(ac agent.Context, args repoMapArgs) (map[string]any, error) {
 		root := ctx.Workspace
 		if args.Path != "" {
 			root = args.Path
 		}
-		return buildRepoMap(root, args.MaxChars), nil
+		result := buildRepoMap(root, args.MaxChars)
+		// Learned ranking rides along for free: files other runs kept touching
+		// (and actually editing) surface without costing the agent a single
+		// extra tool call.
+		if ctx.Store != nil && ctx.Store.DB() != nil {
+			if hot, err := ctx.Store.DB().SignalsTopPaths(8, "co_touch", "edit"); err == nil {
+				out := make([]map[string]any, 0, len(hot))
+				for _, h := range hot {
+					if h.Weight < 0.25 {
+						continue
+					}
+					out = append(out, map[string]any{"path": h.Path, "weight": h.Weight, "hits": h.Hits})
+				}
+				if len(out) > 0 {
+					result["hot_files"] = out
+				}
+			}
+		}
+		return result, nil
+	}))
+
+	// related: the learned co-usage graph neighbors of a path plus retained
+	// memory facts that mention it. One call replaces several exploratory
+	// grep/glob rounds when an cold-starting agent meets an unfamiliar file.
+	add(functiontool.New[relatedArgs, map[string]any](functiontool.Config{
+		Name:        "related",
+		Description: "Given a project file path, return everything this project's runs learned about it: which files were touched/edited together with it (learned co-usage graph), and retained memory facts mentioning it. Call this BEFORE grepping/globbing around a file — it usually answers 'where does this connect' in one call.",
+	}, func(ac agent.Context, args relatedArgs) (map[string]any, error) {
+		if ctx.Store == nil || ctx.Store.DB() == nil {
+			return nil, fmt.Errorf("store unavailable")
+		}
+		if strings.TrimSpace(args.Path) == "" {
+			return nil, fmt.Errorf("path is required")
+		}
+		neighbors, err := ctx.Store.DB().SignalsNeighbors(args.Path, args.Limit)
+		if err != nil {
+			return nil, err
+		}
+		related := make([]map[string]any, 0, len(neighbors))
+		for _, e := range neighbors {
+			other := e.OtherPath
+			if other == "" {
+				other = e.Path
+			}
+			related = append(related, map[string]any{
+				"kind": e.Kind, "path": other, "weight": e.Weight, "hits": e.Hits,
+			})
+		}
+		facts, ferr := ctx.Store.DB().RecallMemoryFacts(ctx.RoomID, args.Path, 5)
+		var factBodies []string
+		if ferr == nil && len(facts) > 0 {
+			ids := make([]string, 0, len(facts))
+			for _, f := range facts {
+				ids = append(ids, f.ID)
+				factBodies = append(factBodies, f.Body)
+			}
+			ctx.Store.DB().TouchMemoryFacts(ids)
+		}
+		return map[string]any{
+			"path":    args.Path,
+			"related": related,
+			"count":   len(related),
+			"memory":  factBodies,
+		}, nil
 	}))
 
 	// search_index: FTS5 full-text search over the workspace with incremental
@@ -1109,6 +1276,62 @@ func makeADKTools(ctx adkToolContext) []tool.Tool {
 		return map[string]any{"status": "deleted"}, nil
 	}))
 
+	// init — orient a fresh workspace: read the project's agent contract
+	// (AGENTS.md / CLAUDE.md / GEMINI.md / README.md) and turn it into durable
+	// memory facts plus a starter orientation task. Native, zero-dependency;
+	// if no contract file exists, it reports that and suggests writing one.
+	add(functiontool.New[initArgs, map[string]any](functiontool.Config{
+		Name:        "init",
+		Description: "Initialize the workspace context: detect the project's agent-contract file (AGENTS.md preferred, else CLAUDE.md/GEMINI.md/README.md), retain its rules as a memory fact, and create a starter orientation task. Call this once when starting in an unfamiliar project that may have no prior Foreman state.",
+	}, func(ac agent.Context, args initArgs) (map[string]any, error) {
+		if ctx.Store == nil {
+			return nil, fmt.Errorf("store unavailable")
+		}
+		root := args.Path
+		if root == "" {
+			root = ctx.Workspace
+		}
+		facts, tasks, err := initProjectFromContract(ctx.Store, ctx.RoomID, root, ctx.AgentName)
+		if err != nil {
+			return nil, err
+		}
+		name, _, ok := detectProjectContract(root)
+		result := map[string]any{
+			"contract_found": ok,
+			"facts_retained": facts,
+			"tasks_created":  tasks,
+		}
+		if ok {
+			result["contract_file"] = name
+		} else {
+			result["note"] = "No AGENTS.md/CLAUDE.md/GEMINI.md/README.md found — consider creating AGENTS.md so future runs inherit the project's conventions."
+		}
+		return result, nil
+	}))
+
+	// confirm — a structured drill-down before an irreversible action. Foreman
+	// does not let an agent guess at the human's intent on destructive ops; the
+	// tool returns the decision framed as explicit options + consequences so the
+	// agent relays a precise question instead of assuming. This keeps the human
+	// in the loop on commits/forced deletes/spawns without blocking benign work.
+	add(functiontool.New[confirmArgs, map[string]any](functiontool.Config{
+		Name:        "confirm",
+		Description: "Before an irreversible or high-impact action (commit, force-push, mass delete, spawn a teammate, drop a plan), call this to frame the decision for the human: it returns the proposed action, its blast radius, and 2-3 concrete options. Relay that to the user via ask_human rather than proceeding on an assumption.",
+	}, func(ac agent.Context, args confirmArgs) (map[string]any, error) {
+		action := strings.TrimSpace(args.Action)
+		if action == "" {
+			return nil, fmt.Errorf("action is required")
+		}
+		opts := drillOptions(action, args.Impact)
+		return map[string]any{
+			"action":       action,
+			"impact":       args.Impact,
+			"blast_radius": args.Impact,
+			"options":      opts,
+			"instruction":  "Do not proceed on assumption. Present these options to the human with ask_human (severity: warning for destructive, blocker for irreversible) and wait for the chosen option before acting.",
+		}, nil
+	}))
+
 	// file editor tools
 	feTools := []tool.Tool{}
 	if t, err := makeViewFileTool(ctx); err == nil {
@@ -1127,6 +1350,11 @@ func makeADKTools(ctx adkToolContext) []tool.Tool {
 		}
 	}
 	if t, err := makeInsertLinesTool(ctx); err == nil {
+		if tt, ok := t.(tool.Tool); ok {
+			feTools = append(feTools, tt)
+		}
+	}
+	if t, err := makeHashlineEditTool(ctx); err == nil {
 		if tt, ok := t.(tool.Tool); ok {
 			feTools = append(feTools, tt)
 		}

@@ -11,13 +11,16 @@ import (
 	"log/slog"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"google.golang.org/genai"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
+	sqlitedialect "github.com/plumpslabs/foreman/internal/foreman/sqlitedialect"
 
 	"google.golang.org/adk/v2/agent"
 	"google.golang.org/adk/v2/agent/llmagent"
@@ -28,6 +31,7 @@ import (
 	"google.golang.org/adk/v2/runner"
 	"google.golang.org/adk/v2/session"
 	"google.golang.org/adk/v2/session/compaction"
+	"google.golang.org/adk/v2/session/database"
 	"google.golang.org/adk/v2/tool"
 	"google.golang.org/adk/v2/tool/mcptoolset"
 	"google.golang.org/adk/v2/tool/toolutils"
@@ -35,6 +39,20 @@ import (
 
 type ADKEngine struct {
 	store *Store
+
+	// sessMu guards lazy construction of the persistent session service. A
+	// failure to open or migrate the database is cached too, so we only try
+	// once per process instead of per run.
+	sessMu  sync.Mutex
+	sessSvc session.Service
+	sessErr error
+
+	// lockMu guards the per-conversation lock map. Two runs sharing one
+	// conversation (same room + agent) are serialized so the persistent
+	// session service never sees concurrent appends to a single session — its
+	// stale-session guard would reject the later writer.
+	lockMu   sync.Mutex
+	sessLock map[string]*sync.Mutex
 }
 
 func allowedADKToolNames(allowed []string) map[string]bool {
@@ -48,13 +66,13 @@ func allowedADKToolNames(allowed []string) map[string]bool {
 		}
 	}
 	// core tools always available
-	add("finish_task", "list_tasks", "send_message", "ask_human", "escalate", "memory", "repo_map", "request_spawn")
+	add("finish_task", "list_tasks", "send_message", "ask_human", "escalate", "memory", "repo_map", "request_spawn", "related", "init", "confirm")
 	for _, raw := range allowed {
 		switch raw {
 		case "file_editor", "read", "edit", "write_tests":
-			add("view_file", "create_file", "replace_string", "insert_lines")
+			add("view_file", "create_file", "replace_string", "insert_lines", "edit_file")
 		case "grep", "glob", "search":
-			add("grep_files", "glob_files", "search_index", "view_file")
+			add("grep_files", "glob_files", "search_index", "view_file", "related")
 		case "terminal", "run_tests", "run_commands":
 			add("run_checks", "diagnose")
 		case "task_tracker", "delegate", "subagents", "synthesize":
@@ -74,6 +92,76 @@ func allowedADKToolNames(allowed []string) map[string]bool {
 
 func NewADKEngine(store *Store) *ADKEngine {
 	return &ADKEngine{store: store}
+}
+
+// sessionService returns the engine-wide persistent ADK session service,
+// created lazily on first use. Sessions live in <project>/.foreman/sessions.db
+// (SQLite via the pure-Go glebarez driver, so the binary stays CGO-free).
+// A failure to open or migrate the database is cached and yields nil; callers
+// then fall back to the in-memory service, so a read-only disk must not break
+// runs.
+func (e *ADKEngine) sessionService() session.Service {
+	e.sessMu.Lock()
+	defer e.sessMu.Unlock()
+	if e.sessSvc != nil || e.sessErr != nil {
+		return e.sessSvc
+	}
+	svc, err := e.openSessionService()
+	if err != nil {
+		e.sessErr = err
+		slog.Warn("persistent session service unavailable; using in-memory", "err", err)
+		return nil
+	}
+	e.sessSvc = svc
+	return svc
+}
+
+func (e *ADKEngine) openSessionService() (session.Service, error) {
+	path := e.store.SessionDBPath()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return nil, fmt.Errorf("create session dir: %w", err)
+	}
+	svc, err := database.NewSessionService(sqlitedialect.Open(path))
+	if err != nil {
+		return nil, fmt.Errorf("open session db: %w", err)
+	}
+	if err := database.AutoMigrate(svc); err != nil {
+		return nil, fmt.Errorf("migrate session db: %w", err)
+	}
+	return svc, nil
+}
+
+// conversationLock returns a release func that serializes runs sharing a
+// conversation (same room + agent). Holding it for the whole run is safe:
+// every run terminates through its iteration cap or timeout, and ask_human
+// never blocks the run loop.
+func (e *ADKEngine) conversationLock(conversationID string) func() {
+	e.lockMu.Lock()
+	if e.sessLock == nil {
+		e.sessLock = map[string]*sync.Mutex{}
+	}
+	mu := e.sessLock[conversationID]
+	if mu == nil {
+		mu = &sync.Mutex{}
+		e.sessLock[conversationID] = mu
+	}
+	e.lockMu.Unlock()
+	mu.Lock()
+	return func() { mu.Unlock() }
+}
+
+// pickSessionService chooses the session backend for one run: persistent by
+// default (settings opt-out), falling back to in-memory when the persistent
+// store is unavailable, and always serializing same-conversation runs.
+func (e *ADKEngine) pickSessionService(conversationID string) (session.Service, func()) {
+	sessSvc := session.InMemoryService()
+	if !e.store.Settings().DisableSessionPersistence {
+		sessSvc = e.sessionService()
+	}
+	if sessSvc == nil {
+		sessSvc = session.InMemoryService()
+	}
+	return sessSvc, e.conversationLock(conversationID)
 }
 
 // mcpRenamedTool wraps an MCP tool under a stable, namespaced name so tools
@@ -274,7 +362,12 @@ func (e *ADKEngine) RunControlled(ctx context.Context, req EngineRequest, emit f
 		AllowCmds: req.AllowProjectCommands,
 		Emit:      emit,
 		diff:      &diffTracker{},
+		// The signal tracker feeds the per-project co-usage graph; finalize
+		// flushes the learned edges whatever way this run ends (even on
+		// error/pause), so the graph keeps growing.
+		signals: newSignalTracker(req.RoomID),
 	}
+	defer toolCtx.signals.finalize(e.store)
 	adkTools := makeADKTools(toolCtx)
 	allowed := allowedADKToolNames(req.AllowedTools)
 	var tools []tool.Tool
@@ -346,7 +439,9 @@ func (e *ADKEngine) RunControlled(ctx context.Context, req EngineRequest, emit f
 	// The governor is a soft guardrail layered on top of the hard cap: it blocks
 	// further read-only calls once the read budget is spent, so the model is
 	// pushed to act or summarize instead of silently churning until the cap.
-	guard := newLoopGuard(req.ReadOnlyBudget, maxToolRounds)
+	// The role directive (e.g. the coordinator mandate) rides along so native
+	// cut-off messages repeat the same instruction the prompt gave.
+	guard := newLoopGuard(req.ReadOnlyBudget, maxToolRounds, req.RoleDirective)
 	guardCfg, err := guard.pluginConfig()
 	if err != nil {
 		return EngineResult{}, fmt.Errorf("create loop guard: %w", err)
@@ -364,7 +459,21 @@ func (e *ADKEngine) RunControlled(ctx context.Context, req EngineRequest, emit f
 		}
 	}
 
-	sessSvc := session.InMemoryService()
+	sessionID := req.ConversationID
+	if sessionID == "" {
+		sessionID = req.TaskID
+	}
+	if sessionID == "" {
+		sessionID = "session"
+	}
+
+	// Persistent ADK sessions: a conversation (room + agent) survives restarts
+	// in <project>/.foreman/sessions.db, so a follow-up prompt continues the
+	// same thread instead of starting cold. The per-conversation lock
+	// serializes concurrent runs on the same session; it is released on return.
+	sessSvc, unlock := e.pickSessionService(sessionID)
+	defer unlock()
+
 	r, err := runner.New(runner.Config{
 		AppName:           "foreman",
 		Agent:             a,
@@ -375,14 +484,6 @@ func (e *ADKEngine) RunControlled(ctx context.Context, req EngineRequest, emit f
 	})
 	if err != nil {
 		return EngineResult{}, fmt.Errorf("create runner: %w", err)
-	}
-
-	sessionID := req.ConversationID
-	if sessionID == "" {
-		sessionID = req.TaskID
-	}
-	if sessionID == "" {
-		sessionID = "session"
 	}
 
 	paused := false
@@ -563,15 +664,3 @@ func (e *ADKEngine) RunControlled(ctx context.Context, req EngineRequest, emit f
 		Tokens: int(totalPrompt + totalCand), CostUSD: costEstimate(totalPrompt, totalCand),
 	}, nil
 }
-
-// SDKInstalled etc for compatibility
-func (e *ADKEngine) sdkInstalledCached() (bool, string) { return true, "adk go native" }
-func (e *ADKEngine) diagnostics() EngineDiag {
-	return EngineDiag{PythonVersion: "go", PipAvailable: false, Installed: true, ProbeDetail: "adk go native"}
-}
-func (e *ADKEngine) installSDK(ctx context.Context) (string, error) { return "", nil }
-func (e *ADKEngine) pythonVersion() string                          { return "go (adk)" }
-func (e *ADKEngine) SDKInstalled() (bool, string)                   { return true, "adk go native" }
-func (e *ADKEngine) PythonVersion() string                          { return "go (adk)" }
-func (e *ADKEngine) PipAvailable() bool                             { return false }
-func (e *ADKEngine) InstallSDK(ctx context.Context) (string, error) { return "", nil }

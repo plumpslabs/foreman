@@ -320,6 +320,7 @@ function TaskFormFields({ form, set, room, state, task }) {
             onChange={(e) => set('dependencies', Array.from(e.currentTarget.selectedOptions).map((o) => o.value))}>
             {available.map((t) => <option value={plain(t.id)}>{plain(t.title)}</option>)}
           </select>
+          <div class="meta-text">Orders work: a card with dependencies waits for them to finish first. Used by the Plan tab to schedule parallel workers safely. Leave empty to let the agent run immediately.</div>
         </div>
       </div>
     </>

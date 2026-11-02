@@ -19,6 +19,7 @@ func writeFile(t *testing.T, dir, rel, content string) {
 
 func TestCodeIndexIndexAndSearch(t *testing.T) {
 	dir := t.TempDir()
+	isolateGlobal(t)
 	writeFile(t, dir, "main.go", "package main\n\nfunc main() {\n\tprintln(\"hello world\")\n}\n")
 	writeFile(t, dir, "util.go", "package main\n\n// does nothing useful\nfunc helper() {}\n")
 	writeFile(t, dir, "greet.go", "package main\n\nconst greeting = \"hello world\"\n")
@@ -67,6 +68,7 @@ func TestCodeIndexIndexAndSearch(t *testing.T) {
 
 func TestCodeIndexIncremental(t *testing.T) {
 	dir := t.TempDir()
+	isolateGlobal(t)
 	writeFile(t, dir, "a.go", "package a\nfunc one() {}\n")
 
 	st, err := OpenStore(dir)

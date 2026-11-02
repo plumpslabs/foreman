@@ -50,6 +50,7 @@ func TestQuestionOptionsNeverNull(t *testing.T) {
 // bubble, and must not echo the user's own message back as a "started working
 // on" chip (the title of a hidden run is the prompt itself).
 func TestHiddenRunPostsNoPlaceholderOrStartedChip(t *testing.T) {
+	isolateGlobal(t)
 	st, err := OpenStore(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
@@ -89,6 +90,7 @@ func TestHiddenRunPostsNoPlaceholderOrStartedChip(t *testing.T) {
 // A question block in the reply must become exactly one question card — not a
 // card plus a raw code block in the bubble.
 func TestHiddenRunQuestionRendersOnce(t *testing.T) {
+	isolateGlobal(t)
 	st, err := OpenStore(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
@@ -140,6 +142,7 @@ func TestHiddenRunQuestionRendersOnce(t *testing.T) {
 // to stay "running" until the next restart, pinning the live turn bubble in
 // the chat forever and leaving the card stuck mid-flight.
 func TestReapStaleRunsClosesSilentRun(t *testing.T) {
+	isolateGlobal(t)
 	st, err := OpenStore(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
@@ -230,6 +233,7 @@ func TestStallNoticeIsRateLimited(t *testing.T) {
 // (only "user" is accepted), so the tool errored every time and teammates
 // never saw the message.
 func TestSendMessagePostsAgentBubble(t *testing.T) {
+	isolateGlobal(t)
 	st, err := OpenStore(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
@@ -267,6 +271,7 @@ func TestSendMessagePostsAgentBubble(t *testing.T) {
 // An answer must carry a link back to the question it replies to, so the
 // bubble is not a floating user message with no context.
 func TestAnswerToQuestionCarriesMetadata(t *testing.T) {
+	isolateGlobal(t)
 	st, err := OpenStore(t.TempDir())
 	if err != nil {
 		t.Fatal(err)

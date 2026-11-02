@@ -69,8 +69,6 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/providers/test", s.testProvider)
 	mux.HandleFunc("POST /api/providers/discover", s.discoverModels)
 	mux.HandleFunc("DELETE /api/providers/{providerID}", s.deleteProvider)
-	mux.HandleFunc("GET /api/engine/status", s.engineStatus)
-	mux.HandleFunc("POST /api/engine/install", s.engineInstall)
 	mux.HandleFunc("POST /api/global/reset", s.resetGlobal)
 	mux.HandleFunc("PUT /api/settings", s.updateSettings)
 	mux.HandleFunc("POST /api/skills", s.saveSkill)
@@ -87,6 +85,9 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/rooms/{roomID}/memory", s.getRoomMemory)
 	mux.HandleFunc("POST /api/rooms/{roomID}/memory", s.setRoomMemory)
 	mux.HandleFunc("GET /api/mcp", s.listMCP)
+	mux.HandleFunc("GET /api/signals", s.getSignals)
+	mux.HandleFunc("GET /api/contract", s.getContract)
+	mux.HandleFunc("GET /api/providers/detect/opencode", s.detectOpencodeHandler)
 	mux.HandleFunc("POST /api/mcp", s.saveMCP)
 	mux.HandleFunc("PUT /api/mcp/{serverID}", s.updateMCP)
 	mux.HandleFunc("DELETE /api/mcp/{serverID}", s.deleteMCP)
@@ -335,12 +336,6 @@ func (s *Server) deleteRoom(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// RuntimeEngineInstalled lets the CLI prewarm the SDK probe so the dashboard's
-// engine status does not pay the slow first-import cost.
-func (s *Server) RuntimeEngineInstalled() (bool, string) {
-	return s.runtime.EngineInstalled()
-}
-
 // shouldLightReply decides whether a chat message should be answered locally
 // instead of running the agent. It uses the heuristic, or the configured
 // provider model when routeIntentsWithModel is enabled (falling back to the
@@ -365,20 +360,6 @@ func (s *Server) shouldLightReply(content string) bool {
 	return kind == chatLight
 }
 
-func (s *Server) engineStatus(w http.ResponseWriter, r *http.Request) {
-	if err := s.verifyProject(r.URL.Query().Get("project")); err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
-		return
-	}
-	diag := s.runtime.EngineDiagnostics()
-	writeJSON(w, http.StatusOK, map[string]any{
-		"installed":     diag.Installed,
-		"detail":        diag.ProbeDetail,
-		"pythonVersion": diag.PythonVersion,
-		"pipAvailable":  diag.PipAvailable,
-	})
-}
-
 func (s *Server) resetGlobal(w http.ResponseWriter, r *http.Request) {
 	if err := s.verifyProject(r.URL.Query().Get("project")); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
@@ -397,35 +378,6 @@ func (s *Server) resetGlobal(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
-}
-
-func (s *Server) engineInstall(w http.ResponseWriter, r *http.Request) {
-	if err := s.verifyProject(r.URL.Query().Get("project")); err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
-		return
-	}
-	out, err := s.runtime.InstallEngine(context.WithoutCancel(r.Context()))
-	diag := s.runtime.EngineDiagnostics()
-	reason := ""
-	hint := ""
-	if err != nil {
-		reason, hint = classifyInstallError(err, out, diag.PythonVersion)
-		if reason == "" {
-			reason = "Installation failed — see the log below."
-		}
-	}
-	if len(out) > 6000 {
-		out = out[:6000] + "\n… (log dipotong)"
-	}
-	writeJSON(w, http.StatusOK, map[string]any{
-		"ok":            err == nil,
-		"installed":     diag.Installed,
-		"error":         reason,
-		"hint":          hint,
-		"output":        out,
-		"pythonVersion": diag.PythonVersion,
-		"pipAvailable":  diag.PipAvailable,
-	})
 }
 
 func (s *Server) createRoom(w http.ResponseWriter, r *http.Request) {
@@ -1228,6 +1180,20 @@ func (s *Server) registerRoomPanel(w http.ResponseWriter, r *http.Request) {
 	}
 	p.ID = id
 	writeJSON(w, http.StatusCreated, p)
+}
+
+func (s *Server) getSignals(w http.ResponseWriter, r *http.Request) {
+	report, err := s.store.DB().SignalsReport(20)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, report)
+}
+
+func (s *Server) getContract(w http.ResponseWriter, r *http.Request) {
+	name, _, ok := detectProjectContract(s.store.Snapshot().ProjectPath)
+	writeJSON(w, http.StatusOK, map[string]any{"found": ok, "file": name})
 }
 
 func (s *Server) getRoomMemory(w http.ResponseWriter, r *http.Request) {

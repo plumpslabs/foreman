@@ -47,6 +47,17 @@ func OpenDB(projectPath string) (*DB, error) {
 		_ = db.Close()
 		return nil, fmt.Errorf("init code index: %w", err)
 	}
+	// Agent memory bank (facts + lessons) with full-text recall; degrades to a
+	// plain scan the same way the code index does.
+	if err := d.initMemoryIndex(); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("init memory index: %w", err)
+	}
+	// Internal Signals: the learned co-usage graph every agent consumes.
+	if err := d.initSignals(); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("init signals: %w", err)
+	}
 	return d, nil
 }
 

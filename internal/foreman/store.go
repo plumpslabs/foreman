@@ -165,6 +165,22 @@ func (s *Store) resolveGlobalPath(absProject string) string {
 	return filepath.Join(absProject, ".foreman", "global.json")
 }
 
+// Settings returns the current normalized settings without building a full
+// snapshot (which deep-copies the entire workspace state).
+func (s *Store) Settings() Settings {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.state.Settings
+}
+
+// SessionDBPath returns where the persistent ADK session database lives for
+// this project's workspace: <project>/.foreman/sessions.db. It holds every
+// conversation (room + agent) so follow-up prompts continue the same thread
+// across server restarts.
+func (s *Store) SessionDBPath() string {
+	return filepath.Join(filepath.Dir(s.path), "sessions.db")
+}
+
 func (s *Store) profile() GlobalProfile {
 	return GlobalProfile{
 		Templates:  s.state.Templates,
@@ -1277,6 +1293,14 @@ func normalizeSettings(v Settings) Settings {
 	}
 	if v.ReadOnlyBudget > 500 {
 		v.ReadOnlyBudget = 500
+	}
+	// Coordinator read cap: -1 disables the cap, 0 keeps the native default,
+	// anything else clamps into a sane range.
+	if v.CoordinatorReadBudget < -1 {
+		v.CoordinatorReadBudget = -1
+	}
+	if v.CoordinatorReadBudget > 500 {
+		v.CoordinatorReadBudget = 500
 	}
 	if v.MaxExecutionSeconds <= 0 {
 		v.MaxExecutionSeconds = 600

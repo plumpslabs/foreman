@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'preact/hooks';
 import { api, loadWorkspace } from './api.js';
-import { HomePage, RoomsPage, RoomDetailHost, TeamsPage, AgentsPage, SkillsPage, RunsPage, SettingsPage, MCPServersPage } from './pages.jsx';
+import { HomePage, RoomsPage, RoomDetailHost, TeamsPage, AgentsPage, SkillsPage, RunsPage, SettingsPage, MCPServersPage, SignalsPage } from './pages.jsx';
 import { AgentDetailPage, TeamDetailPage, TeamCreatePage, SkillDetailPage } from './detail.jsx';
 import { ModalHost } from './modals.jsx';
 import { Icon } from './icons.jsx';
@@ -12,6 +12,7 @@ const NAV_PRIMARY = [
   ['agents', 'Agent library', 'bot'],
   ['skills', 'Skills', 'puzzle'],
   ['runs', 'Runs & activity', 'activity'],
+  ['signals', 'Signals', 'git-diff'],
 ];
 const NAV_SECONDARY = [['mcp', 'MCP Servers', 'network'], ['settings', 'Settings', 'settings-2']];
 
@@ -56,6 +57,7 @@ const hashToRoute = (hash) => {
     case 'runs': return { page: 'runs', id: '' };
     case 'settings': return { page: 'settings', id: '' };
     case 'mcp': return { page: 'mcp', id: '' };
+    case 'signals': return { page: 'signals', id: '' };
     default: return { page: 'home', id: '' };
   }
 };
@@ -270,6 +272,7 @@ export function App() {
     runs: <RunsPage {...pageProps} />,
     settings: <SettingsPage {...pageProps} />,
     mcp: <MCPServersPage {...pageProps} />,
+    signals: <SignalsPage {...pageProps} />,
   };
 
   const activeRoom = current.rooms.find((room) => room.id === selectedId);
@@ -311,6 +314,8 @@ export function App() {
         );
       case 'mcp':
         return <MCPServersPage {...pageProps} />;
+      case 'signals':
+        return <SignalsPage {...pageProps} />;
       case 'skill-detail':
         return (
           <SkillDetailPage

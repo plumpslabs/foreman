@@ -3,11 +3,10 @@ set -euo pipefail
 
 # Foreman Universal Installer
 # Installs the latest binary release from GitHub to /usr/local/bin or ~/.local/bin
-# and bundles the OpenHands SDK (Python) so `foreman start` is run-ready.
+# (single self-contained binary — Go + embedded dashboard, no runtime deps).
 #
 # Usage:
 #   curl -fsSL https://raw.githubusercontent.com/plumpslabs/foreman/main/scripts/install.sh | sh
-#   # skip SDK auto-install with:  FOREMAN_INSTALL_ENGINE=0 curl ... | sh
 
 REPO="plumpslabs/foreman"
 BINARY_NAME="foreman"
@@ -153,29 +152,8 @@ if [ -w "$INSTALL_DIR" ] && [ ! -e "$INSTALL_DIR/fm" ] && [ -n "${BIN:-}" ]; the
         && echo "🔗 Alias 'fm' dibuat di $INSTALL_DIR/fm"
 fi
 
-# 6. OpenHands SDK — bundled so `foreman start` is run-ready.
-if command -v python3 >/dev/null 2>&1; then
-    PYVER="$(python3 -c 'import sys; print("%d.%d" % sys.version_info[:2])' 2>/dev/null || true)"
-    if python3 -c "import openhands.sdk" >/dev/null 2>&1; then
-        echo "✅ OpenHands SDK sudah tersedia ($(python3 --version 2>&1))"
-    elif [ "${FOREMAN_INSTALL_ENGINE:-1}" = "1" ]; then
-        echo "📦 OpenHands SDK belum terpasang — menginstal otomatis…"
-        PY_OK="$(python3 -c 'import sys; print(1 if sys.version_info >= (3, 12) else 0)' 2>/dev/null || echo 0)"
-        if [ "$PY_OK" != "1" ]; then
-            echo "⚠️ SDK membutuhkan Python >=3.12; kamu punya $PYVER."
-            echo "   Pasang Python 3.12+ lalu jalankan: python3 -m pip install openhands-sdk openhands-tools"
-        elif python3 -m pip install --upgrade openhands-sdk openhands-tools; then
-            echo "✅ OpenHands SDK terpasang ($(python3 --version 2>&1))"
-        elif python3 -m pip install --upgrade --break-system-packages openhands-sdk openhands-tools; then
-            echo "✅ OpenHands SDK terpasang (--break-system-packages) ($(python3 --version 2>&1))"
-        else
-            echo "⚠️ Gagal menginstal SDK otomatis. Jalankan manual:"
-            echo "   python3 -m pip install openhands-sdk openhands-tools"
-        fi
-    else
-        echo "⚠️ OpenHands SDK belum terpasang — jalankan nanti:"
-        echo "   foreman doctor --install"
-    fi
-else
-    echo "⚠️ python3 tidak ditemukan. Agent engine membutuhkan Python 3.12+ dengan OpenHands SDK."
-fi
+# 6. Done — the binary is self-contained (engine + dashboard embedded);
+#    there are no runtime dependencies to install.
+echo "✅ Foreman siap dipakai."
+echo "   Jalankan: foreman start   (atau: fm start)"
+echo "   Bantuan : foreman --help"

@@ -64,12 +64,6 @@ func (f *fakeEngine) RunControlled(ctx context.Context, req EngineRequest, emit 
 	return res, err
 }
 
-func (f *fakeEngine) sdkInstalledCached() (bool, string) { return true, "" }
-func (f *fakeEngine) diagnostics() EngineDiag            { return EngineDiag{} }
-func (f *fakeEngine) installSDK(ctx context.Context) (string, error) {
-	return "", nil
-}
-
 func waitRunFinished(t *testing.T, rt *Runtime, taskID string) {
 	t.Helper()
 	deadline := time.Now().Add(3 * time.Second)
@@ -96,6 +90,7 @@ func ensureFakeProvider(t *testing.T, st *Store) {
 
 func TestRuntimeFakeEngineCompleted(t *testing.T) {
 	defer goleak.VerifyNone(t, goleak.IgnoreTopFunction("database/sql.(*DB).connectionOpener"))
+	isolateGlobal(t)
 	st, err := OpenStore(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
@@ -160,6 +155,7 @@ func TestRuntimeFakeEngineCompleted(t *testing.T) {
 // task looked like it vanished the moment it completed.
 func TestRuntimeDelegatedResultPostedToChat(t *testing.T) {
 	defer goleak.VerifyNone(t, goleak.IgnoreTopFunction("database/sql.(*DB).connectionOpener"))
+	isolateGlobal(t)
 	st, err := OpenStore(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
@@ -230,6 +226,7 @@ func TestRuntimeDelegatedResultPostedToChat(t *testing.T) {
 // posted as if the executor had reported something.
 func TestRuntimeDelegatedPlaceholderNotPosted(t *testing.T) {
 	defer goleak.VerifyNone(t, goleak.IgnoreTopFunction("database/sql.(*DB).connectionOpener"))
+	isolateGlobal(t)
 	st, err := OpenStore(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
@@ -292,6 +289,7 @@ func TestDelegatedResultMessageTruncatesLongReports(t *testing.T) {
 // RoomRecentContext feeds every run prompt, so notices must stay out of it:
 // they used to be attributed to "User" and consume the 10-message window.
 func TestRoomRecentContextSkipsNotices(t *testing.T) {
+	isolateGlobal(t)
 	st, err := OpenStore(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
@@ -327,6 +325,7 @@ func TestRoomRecentContextSkipsNotices(t *testing.T) {
 
 func TestRuntimeFakeEnginePanicMarksFailed(t *testing.T) {
 	defer goleak.VerifyNone(t, goleak.IgnoreTopFunction("database/sql.(*DB).connectionOpener"))
+	isolateGlobal(t)
 	st, err := OpenStore(t.TempDir())
 	if err != nil {
 		t.Fatal(err)

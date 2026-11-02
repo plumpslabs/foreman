@@ -24,9 +24,6 @@ type activeRun struct {
 // deterministically without calling any LLM.
 type RunEngine interface {
 	RunControlled(ctx context.Context, req EngineRequest, emit func(EngineEvent), control *RunControl) (EngineResult, error)
-	sdkInstalledCached() (bool, string)
-	diagnostics() EngineDiag
-	installSDK(ctx context.Context) (string, error)
 }
 
 type Runtime struct {
@@ -37,6 +34,9 @@ type Runtime struct {
 	activeCount int
 	// watchdogStop halts the background heartbeat watchdog.
 	watchdogStop chan struct{}
+	// watchdogDone is closed when the watchdog goroutine has actually exited,
+	// so stopWatchdog can synchronize and keep goroutine-leak checks clean.
+	watchdogDone chan struct{}
 	stopOnce     sync.Once
 	// watchdogNotice rate-limits the chat notice for stalled agents: the
 	// watchdog ticks every 10s and would otherwise spam the room for as long
@@ -51,6 +51,7 @@ func NewRuntime(st *Store) *Runtime {
 		engine:         NewADKEngine(st),
 		active:         map[string]*activeRun{},
 		watchdogStop:   make(chan struct{}),
+		watchdogDone:   make(chan struct{}),
 		watchdogNotice: map[string]time.Time{},
 	}
 	// Wake queued spawned/review tasks the moment they are enqueued, instead of
@@ -64,12 +65,18 @@ func NewRuntime(st *Store) *Runtime {
 
 // stopWatchdog halts the background heartbeat watchdog (used by tests to keep
 // goroutine-leak checks clean; production keeps it running for the process).
+// It waits for the goroutine to exit so a subsequent goroutine-leak check in
+// the same process cannot observe the lingering watchdog.
 func (rt *Runtime) stopWatchdog() {
-	rt.stopOnce.Do(func() { close(rt.watchdogStop) })
+	rt.stopOnce.Do(func() {
+		close(rt.watchdogStop)
+		<-rt.watchdogDone
+	})
 }
 
 func (rt *Runtime) startWatchdog() {
 	go func() {
+		defer close(rt.watchdogDone)
 		ticker := time.NewTicker(10 * time.Second)
 		defer ticker.Stop()
 		for {
@@ -152,21 +159,6 @@ func (rt *Runtime) reapStaleRuns() {
 
 // SetEngine swaps the bridge engine; used by tests to inject a fake engine.
 func (rt *Runtime) SetEngine(e RunEngine) { rt.engine = e }
-
-// EngineInstalled reports whether the OpenHands SDK is importable.
-func (rt *Runtime) EngineInstalled() (bool, string) {
-	return rt.engine.sdkInstalledCached()
-}
-
-// EngineDiagnostics summarizes the engine environment for the dashboard.
-func (rt *Runtime) EngineDiagnostics() EngineDiag {
-	return rt.engine.diagnostics()
-}
-
-// InstallEngine installs the OpenHands SDK into the engine's Python.
-func (rt *Runtime) InstallEngine(ctx context.Context) (string, error) {
-	return rt.engine.installSDK(ctx)
-}
 
 func (rt *Runtime) StartTask(parent context.Context, taskID string) (AgentRun, error) {
 	task, room, team, providerConfig, secret, settings, err := rt.store.PrepareTaskRun(taskID)
@@ -330,8 +322,22 @@ func (rt *Runtime) execute(ctx context.Context, control *RunControl, run AgentRu
 	if settings.DisableCompaction {
 		contextTokenLimit = 0
 	}
+	// Role enforcement: a coordinator with teammates is the supervisor, not the
+	// explorer — the loop guard's read budget is tightened natively and the
+	// mandate (delegate, don't crawl) is stated in the prompt and in guard
+	// messages alike.
+	runRole := "specialist"
+	hasTeammates := team != nil && len(team.Agents) > 1
+	if team != nil {
+		runRole = resolveRoleType(*team, task.AgentName, runAgent)
+	}
+	coordinatorCapped := false
+	maxIterations, readOnlyBudget, coordinatorCapped = applyRoleBudget(maxIterations, readOnlyBudget, coordinatorReadCapFor(settings.CoordinatorReadBudget), runRole, hasTeammates)
 	prompt := buildRunPrompt(room, task, team, skillsContext(team, task, rt.store.Snapshot().Skills), agentToolIDs)
 	prompt += fmt.Sprintf("\n\n## Exploration budget\nYou may spend up to %d read-only tool rounds (view/grep/search/repo_map/list) before you must act on what you found. Do not re-read the same file or region — if a search or view already answered the question, act on it. Before the budget runs out, choose one: create_plan, spawn_agent / create_task, make the code change, ask_human, or finish_task. Once the budget is spent, further read-only tools are blocked automatically; if that happens, reply with a concise summary of findings and your recommendation instead of retrying reads.", readOnlyBudget)
+	if coordinatorCapped {
+		prompt += "\n\n" + coordinatorMandateSection
+	}
 	if mcpServers := rt.store.MCPServersByIDs(room.MCPServerIDs); len(mcpServers) > 0 {
 		names := make([]string, 0, len(mcpServers))
 		for _, srv := range mcpServers {
@@ -345,6 +351,54 @@ func (rt *Runtime) execute(ctx context.Context, control *RunControl, run AgentRu
 	// recent room conversation so the agent keeps context of what was said.
 	if recent := rt.store.RoomRecentContext(room.ID); recent != "" {
 		prompt += "\n\n## Recent room conversation\n\n" + recent
+	}
+	// Team board awareness: every run sees what is open on the room's board —
+	// who owns what, what to claim instead of duplicating.
+	if board := boardSnapshotSection(room.ID, rt.store.Snapshot().Tasks); board != "" {
+		prompt += "\n\n" + board
+	}
+	// Memory recall: facts and lessons retained by earlier runs are injected
+	// here (bounded, rank-ordered) so the run starts from what the workspace
+	// already learned instead of re-exploring it. Best-effort — the engine's
+	// memory store may be unavailable, in which case this section is skipped.
+	if facts, merr := rt.store.DB().RecallMemoryFacts(room.ID, task.Title+" "+task.Description, 8); merr == nil && len(facts) > 0 {
+		var b strings.Builder
+		b.WriteString("\n\n## Project memory (retained from earlier runs on this workspace)\n")
+		for _, f := range facts {
+			fmt.Fprintf(&b, "- [%s] %s\n", f.Kind, clipForMemory(f.Body))
+		}
+		b.WriteString("\nTrust these notes but spot-check anything that looks stale; use the memory tool (remember/recall/forget) to keep them current.")
+		prompt += b.String()
+	}
+	// Learned hot files: the per-project co-usage graph ranks files this
+	// workspace's runs actually touched and edited. Injecting the top of that
+	// ranking (when it has data) lets a cold start begin from "files that
+	// mattered last time" instead of re-discovering the codebase. Best effort.
+	if hot, herr := rt.store.DB().SignalsTopPaths(6, "co_touch", "edit"); herr == nil {
+		var b strings.Builder
+		ranked := 0
+		for _, h := range hot {
+			if h.Weight < 0.25 {
+				continue
+			}
+			if ranked == 0 {
+				b.WriteString("\n\n## Hot files (learned signals — most touched/edited by this project's recent runs)\n")
+				b.WriteString("Start here before broad exploration; verify only what changed.\n")
+			}
+			fmt.Fprintf(&b, "- %s (weight %.1f, %d touches)\n", h.Path, h.Weight, h.Hits)
+			ranked++
+		}
+		if ranked > 0 {
+			b.WriteString("\nUse the `related` tool on any of these to see what else connects, instead of grepping blind.")
+			prompt += b.String()
+		}
+	}
+	// Native project-agent-contract detection (AGENTS.md / CLAUDE.md / GEMINI.md
+	// / README.md): surface the workspace's own rules up front so the agent
+	// honors conventions from the first turn instead of rediscovering them.
+	// Cheap (one Stat per candidate), zero-dependency.
+	if contract := projectContractSection(rt.store.Snapshot().ProjectPath); contract != "" {
+		prompt += contract
 	}
 	// Hidden chat runs get no "started" chip: their title is just the first
 	// lines of the user's own message, so every prompt used to echo itself
@@ -426,6 +480,9 @@ func (rt *Runtime) execute(ctx context.Context, control *RunControl, run AgentRu
 			ContextRetention:     settings.CompactionRetention,
 			BudgetUSD:            settings.BudgetUSD,
 			AllowProjectCommands: settings.AllowProjectCommands,
+		}
+		if coordinatorCapped {
+			req.RoleDirective = coordinatorLoopDirective
 		}
 
 		result, lastErr = rt.engine.RunControlled(ctx, req, func(ev EngineEvent) {
@@ -660,6 +717,7 @@ func buildRunPrompt(room Room, task Task, team *Team, skills string, allowedTool
 		case "coordinator":
 			sections = append(sections, `## Your role: Coordinator (lead agent)
 - You hold delegate authority: create tasks and spawn specialists when that saves time, and decide scope.
+- You are the supervisor, not the explorer: with teammates present, your read-only exploration is capped tighter by the harness (enforced in code) — break work down and delegate with create_task / spawn_agent using exact Team Roster names; deep file trawling is a specialist's job.
 - Prefer delegating substantial work to the right teammate (spawn_agent), but you may do a small task yourself when spinning up a teammate would cost more than it returns.
 - Track the board and enforce gates (review before done). Keep the human informed; escalate decisions you cannot make (ask_human) instead of guessing.`)
 		case "reviewer":
@@ -699,7 +757,7 @@ func buildRunPrompt(room Room, task Task, team *Team, skills string, allowedTool
 		`## Agent contract (summary; full reference in AGENT_CONTRACT.md)
 - Language: reply in the same language as the user's latest message.
 - Tasks: concise title (verb + object, ≤10 words); description includes context + acceptance criteria.
-- Navigation: call repo_map once on unfamiliar codebases before grepping/reading many files.
+- Navigation: call repo_map once on unfamiliar codebases before grepping/reading many files. For any specific file, call the 'related' tool first — it returns co-usage neighbors and retained memory in one shot instead of blind grep/glob.
 - Loop Governor (enforced in code): hard limits (steps/tokens/cost/wall time); repeated tool+args or short cycles stop with a visible reason; no progress → stop and report; always finish with finish_task(result) including summary, changed files, evidence; if stuck, escalate or ask the human.
 - Search: prefer repo_map first, then targeted grep/glob; grep uses RE2; results are capped with a truncated flag — refine the query rather than repeat the same call.
 - Diagnostics: run the diagnose tool (vet/build/test/lint for the detected language) to find bugs and to gather evidence before finishing; it is read-only and needs project-command permission.
@@ -946,6 +1004,99 @@ func effectiveBudgets(agent *Agent, settings Settings) (maxIterations, readOnlyB
 		readOnlyBudget = 40
 	}
 	return maxIterations, readOnlyBudget
+}
+
+// defaultCoordinatorReadCap is the native read cap for a coordinator that has
+// teammates to delegate to — the supervisor, not the explorer. It is a default,
+// not a law: Settings.CoordinatorReadBudget overrides it globally, and a
+// per-agent ReadOnlyBudget profile always wins when it is already tighter.
+const defaultCoordinatorReadCap = 10
+
+// coordinatorReadCapFor resolves the active coordinator cap: an explicit
+// settings value wins; 0/unknown falls back to the native default. A negative
+// value disables the cap entirely (explicitly bespoke teams).
+func coordinatorReadCapFor(coordinatorReadBudget int) int {
+	if coordinatorReadBudget > 0 {
+		return coordinatorReadBudget
+	}
+	if coordinatorReadBudget < 0 {
+		return 0 // cap disabled
+	}
+	return defaultCoordinatorReadCap
+}
+
+// applyRoleBudget tightens budgets for a coordinator that has teammates, and
+// reports whether the read budget was capped (so the prompt can state the
+// enforcement explicitly). Agents with an explicit smaller profile budget keep
+// it; the cap never loosens anything.
+func applyRoleBudget(maxIterations, readOnlyBudget, coordinatorCap int, role string, hasTeammates bool) (int, int, bool) {
+	if role != "coordinator" || !hasTeammates {
+		return maxIterations, readOnlyBudget, false
+	}
+	if coordinatorCap > 0 && readOnlyBudget > coordinatorCap {
+		return maxIterations, coordinatorCap, true
+	}
+	return maxIterations, readOnlyBudget, false
+}
+
+// coordinatorMandateSection is injected into a coordinator's run prompt when
+// the native read cap engaged — the ban on over-exploring is visible to the
+// model, and the loop guard message repeats it when reads are cut off.
+const coordinatorMandateSection = `## Coordinator mandate (enforced in code)
+- You are the supervisor, not the explorer. Your read-only exploration budget was tightened by the harness because your team can carry the work.
+- Convert findings into structured work: break the goal down, create_task with clear title, acceptance criteria and file paths, and spawn_agent the right specialist by exact Team Roster name.
+- Track the board between delegations; push cards through review; finish_task only when every delegated card is resolved or explicitly escalated.
+- One targeted verification read is fine; long chains of view_file/grep/search are a specialist's job.`
+
+// coordinatorLoopDirective is appended to loop-guard messages for a capped
+// coordinator so the "stop exploring" instruction names delegation first.
+const coordinatorLoopDirective = "You are the Coordinator: do not explore deeper yourself — delegate now via spawn_agent (exact teammate name) or create_task with acceptance criteria, ask_human for a decision, or finish with a summary."
+
+// boardSnapshotSection renders a short live view of the room's open cards so
+// every agent starts knowing: what is on the board, who owns what, and where
+// their own mandate sits relative to the team. Capped; list_tasks stays the
+// authoritative source.
+func boardSnapshotSection(roomID string, tasks []Task) string {
+	open := make([]Task, 0, len(tasks))
+	for _, t := range tasks {
+		if t.RoomID != roomID || t.Hidden {
+			continue
+		}
+		switch t.Status {
+		case "done", "blocked", "cancelled":
+			continue
+		}
+		open = append(open, t)
+	}
+	if len(open) == 0 {
+		return ""
+	}
+	const boardCap = 12
+	truncated := false
+	if len(open) > boardCap {
+		open = open[:boardCap]
+		truncated = true
+	}
+	var b strings.Builder
+	b.WriteString("## Team board (snapshot at run start)\n")
+	for _, t := range open {
+		owner := t.AgentName
+		if owner == "" {
+			owner = "(unassigned)"
+		}
+		sev := ""
+		if t.Severity == "blocker" {
+			sev = " 🔴"
+		} else if t.Severity == "warning" {
+			sev = " 🟡"
+		}
+		fmt.Fprintf(&b, "- [%s]%s %s — @%s\n", t.Status, sev, t.Title, owner)
+	}
+	if truncated {
+		b.WriteString(fmt.Sprintf("… (%d more; call list_tasks for the full board)\n", len(tasks)))
+	}
+	b.WriteString("Do not duplicate existing cards: claim or update them. Breakdowns belong to the coordinator.")
+	return b.String()
 }
 
 func resultOrError(message string, err error) string {
@@ -1241,8 +1392,10 @@ var autonomousToolDocs = []struct{ name, doc string }{
 	{"run_checks", "run test/lint commands (only available when project commands are allowed)."},
 	{"diagnose", "run read-only vet/build/test/lint for the detected language."},
 	{"git_ops", "inspect git diff/status, or commit changes (a commit is a request: it only runs after a human approves it in the Approvals Inbox, and the result is posted in the room)."},
-	{"memory", "read/write shared cross-agent memory."},
+	{"memory", "shared cross-agent memory: set/get for exact key-value notes, remember (kind: fact|lesson) to retain durable notes, recall (query, limit) to full-text search them across runs, forget (id) to invalidate stale ones."},
+	{"edit_file", "preferred editor: multi-op edits by line-hash anchors from view_file(with_hashes=true) — token-cheap, atomic, catches stale files before writing."},
 	{"repo_map", "get a compact repository topology before exploring unfamiliar code."},
+	{"related", "given a file path, return what this project's runs learned: files touched/edited together (co-usage) and retained memory facts mentioning it. Call BEFORE greping/globbing around a file — usually answers 'where does this connect' in one call."},
 	{"search_index", "full-text search across indexed source files."},
 	{"register_panel", "register custom UI panels (table, markdown, chart, kanban, diagram)."},
 }

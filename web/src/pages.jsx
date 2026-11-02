@@ -7,6 +7,16 @@ import { PlanGraph } from './plan.jsx';
 import { AgentAvatar, findAgent } from './avatar.jsx';
 
 const plain = (s) => String(s ?? '');
+// Slash commands offered in the chat input. Each maps to a native agent tool,
+// so picking one inserts a command the agent understands directly.
+const CHAT_COMMANDS = [
+  { id: 'init', label: '/init', hint: 'Orient on the project contract (AGENTS.md) + starter task' },
+  { id: 'plan', label: '/plan', hint: 'Break the request into a tracked plan with dependencies' },
+  { id: 'spawn', label: '/spawn', hint: 'Delegate work to a teammate agent' },
+  { id: 'fix', label: '/fix', hint: 'Diagnose and fix the latest failing check' },
+  { id: 'confirm', label: '/confirm', hint: 'Drill down before an irreversible action' },
+  { id: 'ask', label: '/ask', hint: 'Ask the human a clarifying question' },
+];
 // Priority is a canonical P0..P3 scale; legacy names are mapped so old cards
 // still render. Lower rank sorts first.
 const PRIORITY_RANK = { p0: 0, p1: 1, p2: 2, p3: 3 };
@@ -133,11 +143,13 @@ function RoomRow({ room, onOpen, runs, onDelete, mcpServers }) {
 function TemplateCard({ template, onUse, state }) {
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState('');
+  const alreadyImported = (state?.teams || []).some((t) => t.templateId === template.id);
   return (
     <article class="team-card template-card">
       <div class="team-card-top">
         <div class="team-icon"><Icon name="users" size={19} /></div>
         <span class="tag">{template.agents.length} agents</span>
+        {alreadyImported && <span class="tag green">Imported</span>}
       </div>
       <div class="team-name">{plain(template.name)}</div>
       <div class="team-desc">{plain(template.purpose)}</div>
@@ -152,7 +164,7 @@ function TemplateCard({ template, onUse, state }) {
           </span>
         ))}
       </div>
-      <button class="btn" style="width:100%;margin-top:auto" disabled={busy}
+      <button class="btn" style="width:100%;margin-top:auto" disabled={busy || alreadyImported}
         onClick={async () => {
           if (!onUse) {
             setErr('Handler import belum terpasang.');
@@ -169,8 +181,8 @@ function TemplateCard({ template, onUse, state }) {
             setBusy(false);
           }
         }}>
-        {busy ? <span class="btn-spin"><Icon name="refresh" size={14} /></span> : <Icon name="plus" size={14} />}
-        {busy ? 'Mengimpor…' : 'Use this template'}
+        {busy ? <span class="btn-spin"><Icon name="refresh" size={14} /></span> : <Icon name={alreadyImported ? 'check-circle' : 'plus'} size={14} />}
+        {busy ? 'Mengimpor…' : alreadyImported ? 'Already imported' : 'Use this template'}
       </button>
       {err ? <div class="template-err" style="color:var(--red);font-size:11px;margin-top:6px">{plain(err)}</div> : null}
     </article>
@@ -253,7 +265,7 @@ export function RoomsPage({ state, openRoom, setModal, deleteRoom }) {
         </div>
         <button class="btn primary" onClick={() => setModal({ kind: 'room' })}><Icon name="plus" />New room</button>
       </div>
-      <div class="list">
+      <div class="grid-list">
         {rooms.length
           ? rooms.map((r) => <RoomRow key={r.id} room={r} onOpen={openRoom} runs={state.runs} onDelete={deleteRoom} mcpServers={state.mcpServers || []} />)
           : <div class="empty">No rooms yet. Create one to define a goal and invite teams.</div>}
@@ -294,6 +306,9 @@ export function RoomDetailHost({ room, state, notify, setModal, runTask, refresh
   const [mentionOpen, setMentionOpen] = useState(false);
   const [mentionQuery, setMentionQuery] = useState('');
   const [mentionIdx, setMentionIdx] = useState(0);
+  const [cmdOpen, setCmdOpen] = useState(false);
+  const [cmdQuery, setCmdQuery] = useState('');
+  const [cmdIdx, setCmdIdx] = useState(0);
 
   const addMention = (item) => {
     setMentions((prev) => {
@@ -305,31 +320,7 @@ export function RoomDetailHost({ room, state, notify, setModal, runTask, refresh
     setMentions((prev) => prev.filter((m) => !(m.name.toLowerCase() === name.toLowerCase() && (!type || m.type === type))));
   };
   const clearMentions = () => setMentions([]);
-  const setMentionAgent = (name) => {
-    if (!name) {
-      setMentions((prev) => prev.filter((m) => m.type !== 'agent'));
-    } else {
-      addMention({ type: 'agent', name });
-    }
-  };
-  const mentionAgent = mentions.find((m) => m.type === 'agent')?.name || '';
-  const [sdkHintDismissed, setSdkHintDismissed] = useState(false);
-  const [engineBusy, setEngineBusy] = useState(false);
-  const [engineReason, setEngineReason] = useState('');
-  const [engineHint, setEngineHint] = useState('');
-  const [engineLog, setEngineLog] = useState('');
-  const [engineStatus, setEngineStatus] = useState(null);
   const [kickBlock, setKickBlock] = useState(null);
-
-  const loadEngineStatus = async () => {
-    try {
-      const d = await api('/api/engine/status');
-      setEngineStatus(d);
-    } catch {
-      setEngineStatus(null);
-    }
-  };
-  useEffect(() => { loadEngineStatus(); }, [room.id]);
 
   useEffect(() => { setInvited(room.teamIds || []); }, [room.id, room.teamIds.join(',')]);
 
@@ -385,7 +376,6 @@ export function RoomDetailHost({ room, state, notify, setModal, runTask, refresh
     }
   }
 
-  const composeAgents = roomAgentsList.map((a) => [a.name, a.teamName]);
   const allRoomTasks = tasks.filter((t) => t.roomId === room.id);
   const roomTasks = allRoomTasks.filter((t) => !t.hidden);
   const roomRuns = (runs || []).filter((r) => r.roomId === room.id);
@@ -520,19 +510,30 @@ export function RoomDetailHost({ room, state, notify, setModal, runTask, refresh
 
   const mentionCandidates = (() => {
     const q = mentionQuery.toLowerCase();
-    if (mentionTrigger === '#') {
-      return teams
-        .filter((t) => t.name.toLowerCase().includes(q) || t.id.toLowerCase().includes(q))
-        .map((t) => ({ type: 'team', name: t.name, sub: `Team lead: ${t.mainAgent}` }));
-    }
-    const agentCands = composeAgents
-      .filter(([name]) => name.toLowerCase().includes(q))
-      .map(([name, teamName]) => ({ type: 'agent', name, sub: teamName }));
-    const teamCands = teams
-      .filter((t) => t.name.toLowerCase().includes(q))
+    // Team mentions only (# or @): the main agent is already the default
+    // target for every message, so suggesting individual agents is redundant
+    // noise — routing to a specific agent happens server-side if the message
+    // carries an explicit @ prefix, but the picker no longer offers it.
+    return teams
+      .filter((t) => t.name.toLowerCase().includes(q) || t.id.toLowerCase().includes(q))
       .map((t) => ({ type: 'team', name: t.name, sub: `Team lead: ${t.mainAgent}` }));
-    return [...agentCands, ...teamCands];
   })();
+
+  // Slash commands: typing "/" opens the picker; choosing one replaces the
+  // partial token with the full command so the agent sees an explicit
+  // instruction (e.g. "/init") it can act on with its native tools.
+  const cmdCandidates = (() => {
+    const q = cmdQuery.toLowerCase();
+    if (!q) return CHAT_COMMANDS;
+    return CHAT_COMMANDS.filter((c) => c.id.includes(q) || c.label.includes(q));
+  })();
+
+  const pickCommand = (cmd) => {
+    if (!cmd) return;
+    setDraft((d) => d.replace(/(?:^|\s)\/[^\s]*\s*$/, ` ${cmd.label} `).replace(/^ /, ''));
+    setCmdOpen(false);
+    setCmdQuery('');
+  };
 
   const pickMention = (cand) => {
     if (!cand) return;
@@ -545,32 +546,6 @@ export function RoomDetailHost({ room, state, notify, setModal, runTask, refresh
   };
 
   const clearMention = () => clearMentions();
-
-  const installEngine = async () => {
-    setEngineBusy(true);
-    setEngineReason('');
-    setEngineHint('');
-    setEngineLog('');
-    try {
-      const data = await api('/api/engine/install', { method: 'POST', body: '{}' });
-      setEngineStatus({ installed: data && data.installed, pythonVersion: data && data.pythonVersion, pipAvailable: data && data.pipAvailable });
-      if (data && data.ok && data.installed) {
-        notify('OpenHands engine installed — send a message again');
-        setSdkHintDismissed(true);
-        await refresh();
-      } else {
-        setEngineReason((data && data.error) || 'Installation failed — see the log below.');
-        setEngineHint((data && data.hint) || '');
-        setEngineLog((data && data.output) || '');
-        notify('Engine install tidak berhasil');
-      }
-    } catch (error) {
-      setEngineReason(error.message);
-      notify(error.message);
-    } finally {
-      setEngineBusy(false);
-    }
-  };
 
   const flushSendQueue = async () => {
     if (sendingRef.current) return;
@@ -608,6 +583,7 @@ export function RoomDetailHost({ room, state, notify, setModal, runTask, refresh
     setDraft('');
     setMentions([]);
     setMentionOpen(false);
+    setCmdOpen(false);
     sendQueueRef.current.push(finalContent);
     flushSendQueue();
   };
@@ -615,18 +591,49 @@ export function RoomDetailHost({ room, state, notify, setModal, runTask, refresh
   const onComposeInput = (e) => {
     const value = e.currentTarget.value;
     setDraft(value);
-    const m = value.match(/(?:^|\s)([@#])([^\s]*)\s*$/);
+    const m = value.match(/(?:^|\s)([@#/])([^\s]*)\s*$/);
     if (m) {
-      setMentionTrigger(m[1]);
-      setMentionQuery(m[2]);
-      setMentionIdx(0);
-      setMentionOpen(true);
+      if (m[1] === '/') {
+        setCmdQuery(m[2]);
+        setCmdIdx(0);
+        setCmdOpen(true);
+        setMentionOpen(false);
+      } else {
+        setMentionTrigger(m[1]);
+        setMentionQuery(m[2]);
+        setMentionIdx(0);
+        setMentionOpen(true);
+        setCmdOpen(false);
+      }
     } else {
       setMentionOpen(false);
+      setCmdOpen(false);
     }
   };
 
   const onComposeKeyDown = (e) => {
+    if (cmdOpen && cmdCandidates.length) {
+      if (e.key === 'ArrowDown') {
+        e.preventDefault();
+        setCmdIdx((i) => (i + 1) % cmdCandidates.length);
+        return;
+      }
+      if (e.key === 'ArrowUp') {
+        e.preventDefault();
+        setCmdIdx((i) => (i - 1 + cmdCandidates.length) % cmdCandidates.length);
+        return;
+      }
+      if (e.key === 'Enter' || e.key === 'Tab') {
+        e.preventDefault();
+        pickCommand(cmdCandidates[cmdIdx]);
+        return;
+      }
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        setCmdOpen(false);
+        return;
+      }
+    }
     if (mentionOpen && mentionCandidates.length) {
       if (e.key === 'ArrowDown') {
         e.preventDefault();
@@ -722,6 +729,12 @@ export function RoomDetailHost({ room, state, notify, setModal, runTask, refresh
 
   const toggleInvite = (id) => setInvited((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
   const roomMcpNames = (state.mcpServers || []).filter((s) => (room.mcpServerIds || []).includes(s.id)).map((s) => s.name);
+  const [contractFile, setContractFile] = useState('');
+  useEffect(() => {
+    let alive = true;
+    api('/api/contract').then((d) => { if (alive && d?.found) setContractFile(d.file || ''); }).catch(() => {});
+    return () => { alive = false; };
+  }, [room.id]);
 
   return (
     <>
@@ -732,11 +745,10 @@ export function RoomDetailHost({ room, state, notify, setModal, runTask, refresh
             <div style="min-width:0;flex:1">
               <div class="room-title-large">{plain(room.name)}</div>
               <div class="room-desc-small">{plain(room.goal || 'No goal provided.')}</div>
-              {roomMcpNames.length ? (
-                <div style="display:flex;gap:5px;flex-wrap:wrap;margin-top:6px">
-                  {roomMcpNames.map((n) => <span class="tag blue" key={n}>MCP · {plain(n)}</span>)}
-                </div>
-              ) : null}
+              <div style="display:flex;gap:5px;flex-wrap:wrap;margin-top:6px">
+                {roomMcpNames.map((n) => <span class="tag blue" key={n}>MCP · {plain(n)}</span>)}
+                {contractFile ? <span class="tag green">Contract · {plain(contractFile)}</span> : null}
+              </div>
             </div>
             <div class={`runtime-pill ${runtime}`}>
               <span class={`runtime-dot ${runtime}`} />
@@ -929,39 +941,6 @@ export function RoomDetailHost({ room, state, notify, setModal, runTask, refresh
                 ))}
               </div>
 
-              {engineStatus && !engineStatus.installed && !sdkHintDismissed ? (
-                <div class="sdk-hint">
-                  <Icon name="info" size={15} class="icon" />
-                  <div class="sdk-hint-body">
-                    <b>OpenHands engine belum terpasang di Python environment.</b>
-                    {!engineReason ? (
-                      <>
-                        <span>Klik Install — Foreman menjalankan:</span>
-                        <code>python3 -m pip install openhands-sdk openhands-tools</code>
-                      </>
-                    ) : (
-                      <>
-                        <div class="sdk-hint-reason">{plain(engineReason)}</div>
-                        {engineHint ? <div class="sdk-hint-hint">{plain(engineHint)}</div> : null}
-                        {engineLog ? (
-                          <details class="sdk-log">
-                            <summary>Lihat log instalasi</summary>
-                            <pre>{plain(engineLog)}</pre>
-                          </details>
-                        ) : null}
-                      </>
-                    )}
-                  </div>
-                  <div class="sdk-hint-actions">
-                    <button type="button" class="btn small primary" disabled={engineBusy} onClick={installEngine}>
-                      {engineBusy ? <span class="btn-spin"><Icon name="refresh" size={13} /></span> : <Icon name="refresh" size={13} />}
-                      {engineBusy ? 'Installing…' : engineReason ? 'Retry' : 'Install engine'}
-                    </button>
-                    <button type="button" class="btn small" onClick={() => setSdkHintDismissed(true)}>Hide</button>
-                  </div>
-                </div>
-              ) : null}
-
               {runningRuns.length ? (
                 <div class="live-agents">
                   <span class="live-label"><Icon name="activity" size={12} />Working</span>
@@ -1005,12 +984,27 @@ export function RoomDetailHost({ room, state, notify, setModal, runTask, refresh
                     )}
                     <textarea
                       rows="2"
-                      placeholder={mentions.length ? "Tulis prompt atau instruksi..." : teams.length > 1 ? "Ask an agent or team… (ketik @ untuk agent, # untuk team)" : "Ask an agent… (type @ for suggestions)"}
+                      placeholder={mentions.length ? "Tulis prompt atau instruksi..." : teams.length > 1 ? "Ask a team... (ketik # untuk mention team)" : "Ask the team..."}
                       value={draft}
                       onInput={onComposeInput}
                       onKeyDown={onComposeKeyDown}
                     />
                   </div>
+
+                  {cmdOpen && cmdCandidates.length ? (
+                    <div class="mention-suggest">
+                      {cmdCandidates.map((cmd, i) => (
+                        <button type="button" class={`mention-option ${i === cmdIdx ? 'on' : ''}`}
+                          key={cmd.id}
+                          onMouseDown={(e) => e.preventDefault()}
+                          onClick={() => pickCommand(cmd)}>
+                          <span class="agent-avatar green" style="border-radius:5px;width:20px;height:20px;font-size:9px"><Icon name="bot" size={11} /></span>
+                          <span class="mention-name">{plain(cmd.label)}</span>
+                          <span class="mention-team">{plain(cmd.hint)}</span>
+                        </button>
+                      ))}
+                    </div>
+                  ) : null}
 
                   {mentionOpen && mentionCandidates.length ? (
                     <div class="mention-suggest">
@@ -1043,7 +1037,7 @@ export function RoomDetailHost({ room, state, notify, setModal, runTask, refresh
                       <Icon name="bot" size={12} />
                       {mentions.length
                         ? `Target: ${mentions.map((m) => (m.type === 'team' ? `#${m.name}` : `@${m.name}`)).join(', ')}`
-                        : 'Default: main agent · @ agent · # team'}
+                        : 'Default: main agent · @ agent · # team · / command'}
                     </span>
                     <button class="send-btn" type="submit" disabled={sending} aria-label="Send message">
                       <Icon name="arrow-up" />
@@ -1250,9 +1244,9 @@ export function RoomDetailHost({ room, state, notify, setModal, runTask, refresh
                     class={`rail-agent-row compact ${isRunning ? 'active' : ''}`}
                     key={agent.name}
                     onClick={() => {
-                      addMention({ type: 'agent', name: agent.name });
+                      if (agent.teamName) addMention({ type: 'team', name: agent.teamName });
                     }}
-                    title={isRunning ? `@${plain(agent.name)} is ${action}` : `Click to mention @${plain(agent.name)}`}
+                    title={isRunning ? `@${plain(agent.name)} is ${action}` : `Click to mention team #${plain(agent.teamName || '')}`}
                   >
                     <AgentAvatar agent={findAgent(state, agent.name)} name={agent.name} tone={agent.isMain ? 'green' : 'blue'} size={22} radius={5} style="font-size:9.5px" />
                     <div class="agent-info">
@@ -1473,7 +1467,7 @@ export function TeamsPage({ state, openTeam, onTeamCreate, onUseTemplate, openTe
         </div>
         <span class="tag">{teams.length}</span>
       </div>
-      <div class="list">
+      <div class="grid-list">
         {teams.length
           ? teams.map((t) => (
             <article class="room-row clickable" role="button" tabindex="0"
@@ -1527,35 +1521,34 @@ export function AgentsPage({ state, openAgent, deleteAgent }) {
         </div>
         <button class="btn primary" onClick={() => openAgent('')}><Icon name="plus" />Create agent</button>
       </div>
-      <div class="list">
-        {agents.length
-          ? agents.map((a) => (
-            <article class="room-row clickable" role="button" tabindex="0"
+      {agents.length ? (
+        <div class="agent-grid">
+          {agents.map((a) => (
+            <article class="agent-card clickable" role="button" tabindex="0"
               onClick={() => openAgent(a.id)}
               onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); openAgent(a.id); } }}>
-              <AgentAvatar agent={a} name={a.name} tone={a.requireReview ? 'orange' : 'green'} radius={6} />
-              <div class="room-main">
-                <div class="room-title">
-                  {plain(a.name)}
-                  {a.requireReview ? <span class="tag orange">Requires review</span> : <span class="tag">Profile</span>}
+              <div class="agent-card-head">
+                <AgentAvatar agent={a} name={a.name} tone={a.requireReview ? 'orange' : 'green'} radius={6} />
+                <div class="agent-card-title">
+                  <div class="room-title">{plain(a.name)}</div>
+                  <div class="room-sub">{plain(a.role)}</div>
                 </div>
-                <div class="room-sub">{plain(a.role)}</div>
-                <div class="room-foot">
-                  <span class="meta-text">{(a.tools || []).length} tools · {(a.skills || []).length} skills · {plain(a.model || 'auto model')}</span>
-                </div>
+                {deleteAgent && (
+                  <button class="icon-btn row-delete" title="Hapus agent" aria-label={`Hapus agent ${a.name}`}
+                    onClick={(e) => { e.stopPropagation(); deleteAgent(a); }}
+                    onKeyDown={(e) => e.stopPropagation()}>
+                    <Icon name="trash" size={14} />
+                  </button>
+                )}
               </div>
-              {deleteAgent && (
-                <button class="icon-btn row-delete" title="Hapus agent" aria-label={`Hapus agent ${a.name}`}
-                  onClick={(e) => { e.stopPropagation(); deleteAgent(a); }}
-                  onKeyDown={(e) => e.stopPropagation()}>
-                  <Icon name="trash" size={14} />
-                </button>
-              )}
-              <span class="row-action"><Icon name="chevron-right" size={14} />Open</span>
+              <div class="agent-card-foot">
+                <span class="tag">{a.requireReview ? 'Requires review' : 'Profile'}</span>
+                <span class="meta-text">{(a.tools || []).length} tools · {(a.skills || []).length} skills · {plain(a.model || 'auto model')}</span>
+              </div>
             </article>
-          ))
-          : <div class="empty">No agent profiles yet. Create one to get started.</div>}
-      </div>
+          ))}
+        </div>
+      ) : <div class="empty">No agent profiles yet. Create one to get started.</div>}
     </>
   );
 }
@@ -1586,7 +1579,7 @@ export function SkillsPage({ state, setModal, openSkill }) {
         <StatCard label="Passive" icon="archive" num={skills.length - active} sub="Reference only" />
       </div>
 
-      <div class="list">
+      <div class="grid-list skills-grid">
         {skills.length
           ? skills.map((s) => (
             <article class="skill-row folder-row" role="button" tabindex="0"
@@ -1605,12 +1598,11 @@ export function SkillsPage({ state, setModal, openSkill }) {
               <span class="row-action"><Icon name="chevron-right" size={14} />Open</span>
             </article>
           ))
-          : <div class="empty">No skills yet. Import a folder of markdown or create a skill.</div>}
+          : <div class="empty" style="grid-column:1/-1">No skills yet. Import a folder of markdown or create a skill.</div>}
       </div>
     </>
   );
 }
-
 
 export function RunsPage({ state, cancelRun, runTask }) {
   const { runs, tasks } = state;
@@ -1689,6 +1681,12 @@ const PROVIDER_PRESETS = [
     note: '1M-context coding models, OpenAI-compatible.',
   },
   {
+    id: 'zro', name: 'Zro (MoonMath)', protocol: 'openai-compatible',
+    baseUrl: 'https://zro.moonmath.ai/v1',
+    models: ['deepseek-v4.1-flash', 'glm-5.3-flash', 'glm-5.3', 'dolly1-security', 'auto'],
+    note: 'Fast multi-region inference for open coding models. OpenAI-compatible.',
+  },
+  {
     id: 'anthropic', name: 'Anthropic (Claude)', protocol: 'anthropic',
     baseUrl: 'https://api.anthropic.com',
     models: ['claude-sonnet-5', 'claude-opus-5', 'claude-haiku-4-5'],
@@ -1726,24 +1724,38 @@ function PresetCard({ preset, configured, onOpen }) {
       <div class="preset-top">
         <span class="preset-mark">{providerInitials(preset.name)}</span>
         <span class="preset-name">{plain(preset.name)}</span>
-        {configured ? <span class="tag green">Configured</span> : <span class="tag">Available</span>}
+        {configured ? <span class="tag green">Configured</span>
+          : preset.detected ? <span class="tag green">opencode · {preset.detected.count} models</span>
+            : <span class="tag">Available</span>}
       </div>
       <div class="preset-note">{plain(preset.note)}</div>
       <div class="preset-url">{plain(preset.baseUrl || 'Custom endpoint')}</div>
-      <div class="chip-row">
-        {preset.models.slice(0, 3).map((model) => <span class="chip">{plain(model)}</span>)}
-        {preset.models.length > 3 ? <span class="chip">+{preset.models.length - 3}</span> : null}
-      </div>
+      {configured ? (
+        <div class="chip-row">
+          {preset.models.slice(0, 3).map((model) => <span class="chip">{plain(model)}</span>)}
+          {preset.models.length > 3 ? <span class="chip">+{preset.models.length - 3}</span> : null}
+        </div>
+      ) : (
+        <div class="meta-text" style="margin-top:8px">
+          {preset.detected
+            ? `${preset.detected.count} free models detected from your local opencode — pick to configure the key.`
+            : 'Models appear after this provider is configured.'}
+        </div>
+      )}
     </article>
   );
 }
 
 function ProviderModal({ initial, isNew, onClose, notify, refresh }) {
-  const hasSavedModels = !isNew && (initial?.models || []).length > 0;
-  const ordered = hasSavedModels
-    ? [initial.defaultModel, ...(initial.models || []).filter((m) => m !== initial.defaultModel)]
+  // Pre-fill the model list whenever the opener supplies models (a saved
+  // provider, or a preset whose detected OpenCode Zen free models were merged
+  // in) — the default is the first entry. New presets must land in the editor
+  // directly, not behind a "Suggested" chip row.
+  const prefill = (initial?.models || []).filter(Boolean);
+  const def = initial?.defaultModel || prefill[0] || '';
+  const ordered = prefill.length
+    ? [def, ...prefill.filter((m) => m !== def)]
     : [];
-  const suggestions = isNew ? (initial?.models || []) : [];
   const [form, setForm] = useState({
     id: initial?.id || '',
     name: initial?.name || '',
@@ -1760,10 +1772,6 @@ function ProviderModal({ initial, isNew, onClose, notify, refresh }) {
   const set = (field, value) => setForm((prev) => ({ ...prev, [field]: value }));
   const models = modelsText.split(/[\n,]+/).map((m) => m.trim()).filter(Boolean);
   const defaultModel = models[0] || '';
-  const addModel = (model) => {
-    if (models.includes(model)) return;
-    setModelsText([...models, model].join('\n'));
-  };
 
   const config = () => ({
     id: (form.id || slugify(form.name)).trim(),
@@ -1875,22 +1883,11 @@ function ProviderModal({ initial, isNew, onClose, notify, refresh }) {
                 <Icon name="refresh" size={13} />{discovering ? 'Fetching…' : 'Discover models'}
               </button>
             </div>
-            {suggestions.length ? (
-              <div class="chip-row" style="margin-bottom:8px">
-                <span class="meta-text" style="margin-right:2px">Suggested:</span>
-                {suggestions.map((model) => (
-                  <button type="button" class={`chip chip-add ${models.includes(model) ? 'on' : ''}`}
-                    onClick={() => addModel(model)}>
-                    <Icon name="plus" size={11} />{plain(model)}
-                  </button>
-                ))}
-              </div>
-            ) : null}
             <textarea class="code-area" style="min-height:130px"
-              placeholder={'One model id per line, e.g.\ndeepseek-v4.1-flash:free\nclaude-sonnet-5'}
+              placeholder={'One model id per line, e.g.\ngateway/opencode/glm-5.3-flash-free\nclaude-sonnet-5'}
               value={modelsText} onInput={(e) => setModelsText(e.currentTarget.value)} />
             <div class="md-hint">
-              {defaultModel ? `Default model: ${defaultModel}` : 'Add models or pick a suggestion, then save.'}
+              {defaultModel ? `Default model: ${defaultModel}` : 'Add at least one model id, then save.'}
             </div>
           </div>
 
@@ -1919,8 +1916,44 @@ function ProviderModal({ initial, isNew, onClose, notify, refresh }) {
   );
 }
 
-function ProvidersTab({ state, onPreset, onEdit, onDelete, onToggle }) {
+function ProvidersTab({ state, notify, onPreset, onEdit, onDelete, onToggle }) {
+  const [detected, setDetected] = useState(null);
+  const [detecting, setDetecting] = useState(false);
+  const runDetect = async () => {
+    if (detecting) return;
+    setDetecting(true);
+    try {
+      const r = await api('/api/providers/detect/opencode');
+      if (r && r.installed && (r.models || []).length) {
+        setDetected({ count: r.count || (r.models || []).length, models: r.models || [] });
+      } else {
+        setDetected(null);
+      }
+    } catch {
+      setDetected(null);
+    } finally {
+      setDetecting(false);
+    }
+  };
+  // Native auto-detect: one probe on mount (the local opencode CLI's Zen/free
+  // models), no blocking, no per-visit network churn. The result feeds the
+  // OpenCode Zen preset — there is no separate "detected" provider.
+  useEffect(() => { runDetect(); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, []);
+  const mergeModels = (base, extra) => {
+    const out = [];
+    const seen = new Set();
+    for (const m of [...(extra || []), ...(base || [])]) {
+      if (m && !seen.has(m)) { seen.add(m); out.push(m); }
+    }
+    return out;
+  };
   const configured = new Set((state.providers || []).map((p) => p.id));
+  const presets = PROVIDER_PRESETS.map((preset) => {
+    if (preset.id === 'opencode-zen' && detected) {
+      return { ...preset, models: mergeModels(preset.models, detected.models), detected };
+    }
+    return preset;
+  });
   return (
     <div class="settings-stack">
       <div class="settings-card">
@@ -1929,9 +1962,12 @@ function ProvidersTab({ state, onPreset, onEdit, onDelete, onToggle }) {
             <h3>Connect a provider</h3>
             <p>Pick a preset or add a custom endpoint. The first model in the list becomes the default.</p>
           </div>
+          <button class="btn small" disabled={detecting} onClick={runDetect}>
+            {detecting ? 'Detecting...' : detected ? 'Re-detect OpenCode' : 'Detect OpenCode'}
+          </button>
         </div>
         <div class="preset-grid">
-          {PROVIDER_PRESETS.map((preset) => (
+          {presets.map((preset) => (
             <PresetCard key={preset.id} preset={preset} configured={configured.has(preset.id)} onOpen={() => onPreset(preset)} />
           ))}
         </div>
@@ -1947,7 +1983,7 @@ function ProvidersTab({ state, onPreset, onEdit, onDelete, onToggle }) {
         </div>
         <div class="list">
           {(state.providers || []).length
-            ? state.providers.map((provider) => (
+            ? (state.providers || []).filter((p, i, arr) => arr.findIndex((x) => x.id === p.id) === i).map((provider) => (
               <article class="provider-row">
                 <span class="preset-mark">{providerInitials(provider.name)}</span>
                 <div class="provider-main">
@@ -1979,75 +2015,6 @@ function ProvidersTab({ state, onPreset, onEdit, onDelete, onToggle }) {
             : <div class="empty">No providers yet. Configure one above to enable runs.</div>}
         </div>
       </div>
-    </div>
-  );
-}
-
-function EngineCard({ notify }) {  const [status, setStatus] = useState(null);
-  const [busy, setBusy] = useState(false);
-  const [reason, setReason] = useState('');
-  const [log, setLog] = useState('');
-
-  const load = async () => {
-    try {
-      const d = await api('/api/engine/status');
-      setStatus(d);
-    } catch {
-      setStatus(null);
-    }
-  };
-  useEffect(() => { load(); }, []);
-
-  const install = async () => {
-    setBusy(true);
-    setReason('');
-    setLog('');
-    try {
-      const d = await api('/api/engine/install', { method: 'POST', body: '{}' });
-      setStatus({ installed: d.installed, pythonVersion: d.pythonVersion, pipAvailable: d.pipAvailable });
-      if (d.ok && d.installed) {
-        notify('OpenHands engine installed — send a message again');
-      } else {
-        setReason(d.error || 'Installation failed — see the log below.');
-        setLog(d.output || '');
-      }
-    } catch (error) {
-      setReason(error.message);
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  return (
-    <div class="settings-card">
-      <div class="settings-card-head">
-        <div>
-          <h3>Agent engine</h3>
-          <p>
-            {status
-              ? `Python ${plain(status.pythonVersion || '?')} · pip ${status.pipAvailable ? 'tersedia' : 'tidak tersedia'}`
-              : 'Memeriksa environment…'}
-          </p>
-        </div>
-        <span class={`tag ${status?.installed ? 'green' : 'orange'}`}>
-          {status?.installed ? 'SDK terpasang' : 'SDK belum terpasang'}
-        </span>
-      </div>
-      {!status?.installed && status !== null && (
-        <div style="margin-top:10px">
-          <button class="btn primary small" disabled={busy} onClick={install}>
-            {busy ? <span class="btn-spin"><Icon name="refresh" size={13} /></span> : <Icon name="refresh" size={13} />}
-            {busy ? 'Installing…' : reason ? 'Retry' : 'Install runtime'}
-          </button>
-          {reason ? <div class="md-hint" style="color:#ffce9e;margin-top:8px">{plain(reason)}</div> : null}
-          {log ? (
-            <details class="sdk-log">
-              <summary>Lihat log instalasi</summary>
-              <pre>{plain(log)}</pre>
-            </details>
-          ) : null}
-        </div>
-      )}
     </div>
   );
 }
@@ -2099,23 +2066,41 @@ function RoomMCPModal({ room, servers, onClose, notify, refresh }) {
   const [ids, setIds] = useState(room.mcpServerIds || []);
   const [busy, setBusy] = useState(false);
   const [status, setStatus] = useState({});
+  const mcpCacheKey = (id) => `mcp_status_${id}`;
+  const readCache = (id) => {
+    try {
+      const raw = sessionStorage.getItem(mcpCacheKey(id));
+      if (!raw) return null;
+      const parsed = JSON.parse(raw);
+      if (!parsed || Date.now() - (parsed.t || 0) > 60000) return null;
+      return parsed.v;
+    } catch { return null; }
+  };
+  const writeCache = (id, v) => {
+    try { sessionStorage.setItem(mcpCacheKey(id), JSON.stringify({ t: Date.now(), v })); } catch {}
+  };
   useEffect(() => {
     const run = async () => {
       const next = {};
       for (const srv of servers) {
         if (!srv.enabled) continue;
+        const cached = readCache(srv.id);
+        if (cached) { next[srv.id] = cached; setStatus({ ...next }); continue; }
         next[srv.id] = { state: 'testing' };
         setStatus({ ...next });
         try {
           const r = await api(`/api/mcp/${encodeURIComponent(srv.id)}/test`, { method: 'POST' });
-          next[srv.id] = { state: 'ok', tools: r.tools };
+          const v = { state: 'ok', tools: r.tools };
+          next[srv.id] = v; writeCache(srv.id, v);
         } catch {
-          next[srv.id] = { state: 'error' };
+          const v = { state: 'error' };
+          next[srv.id] = v; writeCache(srv.id, v);
         }
         setStatus({ ...next });
       }
     };
     run();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [servers]);
   const toggle = (id) => setIds((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
   const save = async () => {
@@ -2171,24 +2156,39 @@ function MCPCard({ state, notify, refresh }) {
   const [busy, setBusy] = useState(false);
   const [busyId, setBusyId] = useState(null);
   const [status, setStatus] = useState({});
-  useEffect(() => {
-    const run = async () => {
-      const next = {};
-      for (const srv of servers) {
-        if (!srv.enabled) continue;
-        next[srv.id] = { state: 'testing' };
-        setStatus({ ...next });
-        try {
-          const r = await api(`/api/mcp/${encodeURIComponent(srv.id)}/test`, { method: 'POST' });
-          next[srv.id] = { state: 'ok', tools: r.tools };
-        } catch {
-          next[srv.id] = { state: 'error' };
-        }
-        setStatus({ ...next });
+  const mcpCacheKey = (id) => `mcp_status_${id}`;
+  const readCache = (id) => {
+    try {
+      const raw = sessionStorage.getItem(mcpCacheKey(id));
+      if (!raw) return null;
+      const parsed = JSON.parse(raw);
+      if (!parsed || Date.now() - (parsed.t || 0) > 60000) return null;
+      return parsed.v;
+    } catch { return null; }
+  };
+  const writeCache = (id, v) => {
+    try { sessionStorage.setItem(mcpCacheKey(id), JSON.stringify({ t: Date.now(), v })); } catch {}
+  };
+  const runChecks = async (force = false) => {
+    const next = {};
+    for (const srv of servers) {
+      if (!srv.enabled) { next[srv.id] = { state: 'disabled' }; setStatus({ ...next }); continue; }
+      const cached = !force ? readCache(srv.id) : null;
+      if (cached) { next[srv.id] = cached; setStatus({ ...next }); continue; }
+      next[srv.id] = { state: 'testing' };
+      setStatus({ ...next });
+      try {
+        const r = await api(`/api/mcp/${encodeURIComponent(srv.id)}/test`, { method: 'POST' });
+        const v = { state: 'ok', tools: r.tools };
+        next[srv.id] = v; writeCache(srv.id, v);
+      } catch {
+        const v = { state: 'error' };
+        next[srv.id] = v; writeCache(srv.id, v);
       }
-    };
-    run();
-  }, [servers]);
+      setStatus({ ...next });
+    }
+  };
+  useEffect(() => { runChecks(false); }, [servers]);
 
   const parseKV = (text) => Object.fromEntries(
     String(text || '').split('\n').map((l) => l.split(/[=:]/)).filter((a) => a.length === 2).map(([k, v]) => [k.trim(), v.trim()])
@@ -2247,12 +2247,15 @@ function MCPCard({ state, notify, refresh }) {
           <h3>MCP Servers</h3>
           <p>Global server definitions. Rooms opt in to individual servers.</p>
         </div>
-        <span class="tag">{(servers).length}</span>
-        <button class="btn small" onClick={() => setForm({ type: 'stdio', enabled: true })}>
-          <Icon name="plus" size={13} />Add server
-        </button>
+        <div class="card-actions">
+          <span class="tag">{(servers).length}</span>
+          <button class="btn small" onClick={() => runChecks(true)}>Re-check</button>
+          <button class="btn small" onClick={() => setForm({ type: 'stdio', enabled: true })}>
+            <Icon name="plus" size={13} />Add server
+          </button>
+        </div>
       </div>
-      <div style="margin-top:12px;display:flex;flex-direction:column;gap:10px">
+      <div class="mcp-grid">
         {servers.length ? servers.map((srv) => (
           <article class="provider-row">
             <span class="preset-mark">MCP</span>
@@ -2277,7 +2280,7 @@ function MCPCard({ state, notify, refresh }) {
               <button class="icon-btn" aria-label="Delete" onClick={() => remove(srv)}><Icon name="trash" size={14} /></button>
             </div>
           </article>
-        )) : <div class="empty">No MCP servers yet. Add one above.</div>}
+        )) : <div class="empty" style="grid-column:1/-1">No MCP servers yet. Add one above.</div>}
       </div>
 
       {form && (
@@ -2451,17 +2454,17 @@ export function SettingsPage({ state, notify, refresh }) {
       </div>
 
       {tab === 'providers' && (
-        <>
-          <EngineCard notify={notify} />
+        <div class="settings-stack">
           <GlobalCleanCard notify={notify} refresh={refresh} />
           <ProvidersTab
             state={state}
+            notify={notify}
             onPreset={openPreset}
             onEdit={(provider) => setProviderModal({ initial: provider, isNew: false })}
             onDelete={deleteProvider}
             onToggle={toggleProvider}
           />
-        </>
+        </div>
       )}
 
       {tab === 'execution' && (
@@ -2530,6 +2533,12 @@ export function SettingsPage({ state, notify, refresh }) {
                   onInput={(e) => setField('readOnlyBudget', e.currentTarget.value, true)} />
               </div>
               <div class="field">
+                <label>Coordinator read budget (0 = auto)</label>
+                <input type="number" min="-1" max="500" value={policy.coordinatorReadBudget ?? 0}
+                  onInput={(e) => setField('coordinatorReadBudget', Number(e.currentTarget.value), true)} />
+                <div class="md-hint">Caps a lead agent's read-only rounds when the team has teammates to delegate to. 0 = native default (10), -1 disables the cap.</div>
+              </div>
+              <div class="field">
                 <label>Run timeout (seconds)</label>
                 <input type="number" min="10" max="3600" value={policy.maxExecutionSeconds}
                   onInput={(e) => setField('maxExecutionSeconds', e.currentTarget.value, true)} />
@@ -2546,6 +2555,15 @@ export function SettingsPage({ state, notify, refresh }) {
                     onChange={(e) => setField('disableCompaction', !e.currentTarget.checked)} />
                   <span>Summarize old context on long runs</span>
                 </label>
+              </div>
+              <div class="field">
+                <label>Session persistence</label>
+                <label class="check" style="margin:0">
+                  <input type="checkbox" checked={!policy.disableSessionPersistence}
+                    onChange={(e) => setField('disableSessionPersistence', !e.currentTarget.checked)} />
+                  <span>Keep conversation history across restarts (recommended)</span>
+                </label>
+                <div class="md-hint">Each conversation (room + agent) is stored in .foreman/sessions.db, so follow-up prompts continue the same thread instead of starting cold. Turn off to start every run fresh.</div>
               </div>
               <div class="field">
                 <label>Compaction token threshold</label>
@@ -2628,6 +2646,92 @@ export function SettingsPage({ state, notify, refresh }) {
           notify={notify}
           refresh={refresh}
         />
+      )}
+    </>
+  );
+}
+
+// SignalsPage shows the per-project Internal Signals graph: how it has grown
+// (daily usage) and which files this workspace's runs actually touched and
+// edited. The graph is learned natively at the tool layer, so this page is a
+// read-only window into what the agents have been converging on — no config.
+export function SignalsPage() {
+  const [report, setReport] = useState(null);
+  const [err, setErr] = useState('');
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    let alive = true;
+    api('/api/signals')
+      .then((data) => { if (alive) setReport(data); })
+      .catch((e) => { if (alive) setErr(String(e.message || e)); })
+      .finally(() => { if (alive) setLoading(false); });
+    return () => { alive = false; };
+  }, []);
+
+  const activity = (report?.activity || []).slice().reverse();
+  const maxTouch = activity.reduce((m, a) => Math.max(m, a.touches || 0), 0) || 1;
+
+  return (
+    <>
+      <div class="page-head">
+        <div>
+          <div class="eyebrow">Learned per-project graph</div>
+          <h1 class="page-title">Internal Signals</h1>
+          <div class="page-sub">
+            Foreman learns which files this workspace's runs actually read and edit, and keeps the graph
+            current with decay. Every agent consumes it as hot-files and via the <code>related</code> tool —
+            so cold starts begin from what mattered last time instead of re-exploring.
+          </div>
+        </div>
+      </div>
+
+      {loading && <div class="empty">Loading signals…</div>}
+      {err && <div class="empty error">{plain(err)}</div>}
+      {report && !loading && (
+        <>
+          <div class="stat-row">
+            <div class="stat"><div class="stat-num">{report.files || 0}</div><div class="stat-label">Files in graph</div></div>
+            <div class="stat"><div class="stat-num">{report.edges || 0}</div><div class="stat-label">Connections</div></div>
+            <div class="stat"><div class="stat-num">{report.touches || 0}</div><div class="stat-label">Total touches</div></div>
+          </div>
+
+          <div class="settings-card">
+            <h3 class="card-title">Growth (daily touches)</h3>
+            {activity.length === 0
+              ? <div class="empty">No activity yet — run a task that reads or edits files to grow the graph.</div>
+              : (
+                <div class="sig-chart">
+                  {activity.map((a) => (
+                    <div class="sig-bar-wrap" title={`${a.day}: ${a.touches} touches`}>
+                      <div class="sig-bar" style={{ height: `${Math.max(4, Math.round((a.touches / maxTouch) * 100))}%` }} />
+                      <div class="sig-bar-label">{a.day.slice(5)}</div>
+                    </div>
+                  ))}
+                </div>
+              )}
+          </div>
+
+          <div class="settings-card">
+            <h3 class="card-title">Hot files (most touched / edited)</h3>
+            {!report.top_paths || report.top_paths.length === 0
+              ? <div class="empty">No learned files yet.</div>
+              : (
+                <table class="tbl">
+                  <thead><tr><th>Path</th><th>Weight</th><th>Touches</th></tr></thead>
+                  <tbody>
+                    {report.top_paths.map((p) => (
+                      <tr>
+                        <td class="mono">{plain(p.path)}</td>
+                        <td>{Number(p.weight || 0).toFixed(1)}</td>
+                        <td>{p.hits || 0}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              )}
+          </div>
+        </>
       )}
     </>
   );
