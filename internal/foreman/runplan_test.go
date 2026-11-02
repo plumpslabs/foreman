@@ -3,6 +3,7 @@ package foreman
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -730,5 +731,86 @@ func TestRotationAttemptFloorIsReachable(t *testing.T) {
 	}
 	if floor := rot.attemptFloor(); floor > positions {
 		t.Fatalf("attemptFloor = %d but only %d positions exist", floor, positions)
+	}
+}
+
+// The chain cap is structural, not a retry budget: a chain longer than Max
+// retries + 1 must still be accepted and still be fully walkable, because the
+// runtime's attempt floor grows with the model count.
+func TestModelChainNotLimitedByMaxRetries(t *testing.T) {
+	chain := []string{"m1", "m2", "m3", "m4", "m5", "m6"}
+	if len(chain) > MaxModelChain {
+		t.Fatalf("test chain of %d exceeds MaxModelChain %d", len(chain), MaxModelChain)
+	}
+	rot := newRotation(RunPlan{Stages: []RunStage{{
+		Provider: ProviderConfig{ID: "A", Name: "A", DefaultModel: "m1"},
+		Keys:     []RunKey{{Name: "only", Secret: "s"}},
+		Models:   chain,
+	}}})
+
+	// Max retries 3 gives 4 attempts from the budget alone; the floor must lift
+	// that to cover all six models.
+	floor := rot.attemptFloor()
+	if floor < len(chain) {
+		t.Fatalf("attemptFloor = %d for %d models — later models would be unreachable", floor, len(chain))
+	}
+
+	seen := 0
+	for {
+		_, _, m := rot.current()
+		if m != chain[seen] {
+			t.Fatalf("position %d = %q, want %q", seen, m, chain[seen])
+		}
+		seen++
+		if !rot.nextModel() {
+			break
+		}
+	}
+	if seen != len(chain) {
+		t.Fatalf("walked %d models, want %d", seen, len(chain))
+	}
+}
+
+// splitModelChain drops blanks and duplicates but keeps the user's order.
+func TestSplitModelChain(t *testing.T) {
+	got := splitModelChain(" a , b ,, A , c ")
+	want := []string{"a", "b", "c"}
+	if len(got) != len(want) {
+		t.Fatalf("splitModelChain = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("splitModelChain = %v, want %v", got, want)
+		}
+	}
+	if n := len(splitModelChain("   ")); n != 0 {
+		t.Fatalf("blank chain should be empty, got %d entries", n)
+	}
+}
+
+// A chain over the cap is rejected by SaveAgent with a message naming the limit.
+func TestSaveAgentRejectsOverlongModelChain(t *testing.T) {
+	store, err := openStoreForTest(t, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	models := make([]string, MaxModelChain+1)
+	for i := range models {
+		models[i] = fmt.Sprintf("m%d", i+1)
+	}
+	_, err = store.SaveAgent(Agent{
+		Name: "Overflow", Role: "Tester", Model: strings.Join(models, ","),
+	})
+	if err == nil {
+		t.Fatal("an overlong model chain should be rejected")
+	}
+	if !strings.Contains(err.Error(), "at most") {
+		t.Fatalf("error = %q, want it to name the chain limit", err.Error())
+	}
+	// Exactly at the cap is fine.
+	if _, err := store.SaveAgent(Agent{
+		Name: "AtCap", Role: "Tester", Model: strings.Join(models[:MaxModelChain], ","),
+	}); err != nil {
+		t.Fatalf("a chain of exactly %d models should be accepted: %v", MaxModelChain, err)
 	}
 }

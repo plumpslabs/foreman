@@ -78,27 +78,28 @@ function normalizeTools(tools) {
   return out;
 }
 
-/* Attempt budget for the model chain: Max retries N gives one initial attempt
-   plus N retries, and settings below 1 fall back to 3 retries — this mirrors
-   the runtime loop exactly, so the chain can hold one model per attempt. */
-function attemptBudget(settings) {
-  const retries = Number(settings?.maxRetries ?? 0);
-  return (retries < 1 ? 3 : retries) + 1;
-}
+/* How many models the picker accepts. This is a UI affordance, not a budget:
+   the runtime's attempt floor is Σ(accounts + models − 1) per provider, so
+   every model in the chain is guaranteed at least one attempt no matter how
+   Max retries is set. Tying this cap to Max retries (the old behaviour) meant a
+   4-model chain was impossible with the default settings even though the
+   runtime could reach all four — the chain and the retry budget are separate
+   axes and must not constrain each other. */
+const MAX_CHAIN_MODELS = 8;
 
 /* Model chain picker bound to the connected providers. Picked models render as
    a numbered badge list — badge order is the retry order — and the popover
-   toggles models in and out until the attempt budget is full.
+   toggles models in and out until the chain cap is full.
 
    A chain may span providers: the runtime resolves each model to the provider
    that declares it and sends that attempt to that provider's own endpoint and
    key. Same-named models are kept separate per provider, because the same id on
    two endpoints is two different services. */
-function ProviderModelField({ providerId, providers, model, onChange, onProviderChange, maxAttempts }) {
+function ProviderModelField({ providerId, providers, model, onChange, onProviderChange }) {
   const [open, setOpen] = useState(false);
   const [q, setQ] = useState('');
   const chain = (model || '').split(',').map((s) => s.trim()).filter(Boolean);
-  const cap = Math.max(1, maxAttempts || 1);
+  const cap = MAX_CHAIN_MODELS;
   const full = chain.length >= cap;
   const ql = q.trim().toLowerCase();
 
@@ -155,7 +156,7 @@ function ProviderModelField({ providerId, providers, model, onChange, onProvider
     <div class="field" style="grid-column:1/-1">
       <label style="display:flex;justify-content:space-between">
         <span>Model selection & fallback chain</span>
-        <span class="meta-text" style="font-size:10.5px">{chain.length} / {cap} attempts</span>
+        <span class="meta-text" style="font-size:10.5px">{chain.length} / {cap} models</span>
       </label>
       <div class="model-picker">
         <button type="button" class="model-trigger" onClick={() => setOpen(!open)}>
@@ -217,7 +218,7 @@ function ProviderModelField({ providerId, providers, model, onChange, onProvider
                         <span class="model-opt-src">
                           {on
                             ? (elsewhere ? `in chain — runs on ${plain(servedBy.name)}` : 'in chain — click to remove')
-                            : blocked ? 'attempt budget full' : '+ add to chain'}
+                            : blocked ? 'chain is full' : '+ add to chain'}
                         </span>
                       </div>
                     );
@@ -226,7 +227,7 @@ function ProviderModelField({ providerId, providers, model, onChange, onProvider
                     && !models.some((m) => m.toLowerCase() === ql) && (
                     <button type="button" class="model-option custom" onClick={() => toggle(q.trim())}>
                       <span class="model-opt-name">Add custom “{plain(q.trim())}”</span>
-                      <span class="model-opt-src">{full ? 'attempt budget full' : `+ add to ${plain(p.name)}`}</span>
+                      <span class="model-opt-src">{full ? 'chain is full' : `+ add to ${plain(p.name)}`}</span>
                     </button>
                   )}
                 </div>
@@ -243,8 +244,8 @@ function ProviderModelField({ providerId, providers, model, onChange, onProvider
       <div class="md-hint" style="margin-top:6px">
         {chain.length === 0
           ? <span class="meta-text">Auto — workspace/provider default model, with automatic rotation across the provider's models on failure.</span>
-          : <span class="meta-text"><strong>Fallback chain:</strong> {chain.map(plain).join(' → ')} — tried in order across {cap} attempt{cap === 1 ? '' : 's'} (Max retries: {cap - 1}).</span>}
-        {full ? <span class="meta-text"> Attempt budget full — remove a badge to swap models.</span> : null}
+          : <span class="meta-text"><strong>Fallback chain:</strong> {chain.map(plain).join(' → ')} — tried in order; each model gets at least one attempt, and each account of that model's provider gets one too, whatever Max retries is set to.</span>}
+        {full ? <span class="meta-text"> Chain is full — remove a badge to swap models.</span> : null}
         {spansProviders
           ? <span class="meta-text"> Each model runs on the provider that declares it, with that provider's endpoint and keys — a rejected key there falls back to that provider's next account.</span>
           : <span class="meta-text"> A model from another provider starts a fallback stage on that provider.</span>}
@@ -463,8 +464,7 @@ export function AgentDetailPage({ agentId, state, notify, refresh, onBack }) {
           </div>
           <ProviderModelField providerId={form.providerId} providers={state.providers || []}
             model={form.model} onChange={(model) => set('model', model)}
-            onProviderChange={(id) => set('providerId', id)}
-            maxAttempts={attemptBudget(state.settings)} />
+            onProviderChange={(id) => set('providerId', id)} />
           <div class="field">
             <label>Default effort</label>
             <select value={form.effort} onChange={(e) => set('effort', e.currentTarget.value)}>

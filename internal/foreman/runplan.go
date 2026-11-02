@@ -21,6 +21,28 @@ type RunPlan struct {
 	ModelChain []string
 }
 
+// MaxModelChain is the most models an agent profile may chain. It bounds a
+// runaway API client, not the retry budget: the runtime guarantees one attempt
+// per model regardless of Max retries, so this limit must stay independent of
+// that setting. The UI picker uses the same number.
+const MaxModelChain = 8
+
+// splitModelChain parses a comma-separated model chain, dropping blanks and
+// duplicates (case-insensitively) while preserving order.
+func splitModelChain(model string) []string {
+	var out []string
+	seen := map[string]bool{}
+	for _, part := range strings.Split(model, ",") {
+		part = strings.TrimSpace(part)
+		if part == "" || seen[strings.ToLower(part)] {
+			continue
+		}
+		seen[strings.ToLower(part)] = true
+		out = append(out, part)
+	}
+	return out
+}
+
 // RunStage is one provider and the credentials/models usable against it.
 type RunStage struct {
 	Provider ProviderConfig

@@ -1308,7 +1308,7 @@ func resolveModelChain(config ProviderConfig, team *Team, task Task) (string, []
 	// for agents that picked nothing — otherwise a deliberate 3-model chain
 	// would drown in every model the provider happens to offer.
 	if agentModel != "" {
-		for _, part := range strings.Split(agentModel, ",") {
+		for _, part := range splitModelChain(agentModel) {
 			add(part)
 		}
 		if len(candidates) > 0 {

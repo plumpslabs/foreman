@@ -322,9 +322,9 @@ if (!providerSelect) {
   view = window.document.body.innerHTML;
   if (!view.includes('auto')) failures.push('provider-bound model trigger missing');
   if (!view.includes('Auto — workspace/provider default model')) failures.push('provider-bound model picker hint missing');
-  // Chain capacity mirrors the runtime attempt budget (maxRetries 0 → 3
-  // retries → 4 attempts), shown next to the field label.
-  if (!view.includes('0 / 4 attempts')) failures.push('model chain attempt budget counter missing');
+  // The chain cap is structural (a fixed number of models), not the retry
+  // budget: Max retries must never shrink the chain the user can build.
+  if (!view.includes('0 / 8 models')) failures.push('model chain model counter missing');
 }
 
 // Skill detail page with a directory tree.

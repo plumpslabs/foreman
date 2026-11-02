@@ -1742,6 +1742,13 @@ func (s *Store) SaveAgent(agent Agent) (Agent, error) {
 	if agent.ReadOnlyBudget < 0 || agent.ReadOnlyBudget > 500 {
 		return Agent{}, errors.New("agent read-only budget must be between 0 and 500")
 	}
+	// A model chain is an ordered fallback list, not a retry budget. Cap it so a
+	// runaway API client cannot queue an unbounded number of stages, but keep the
+	// limit well above any real chain — Max retries must never shrink it, because
+	// the runtime guarantees an attempt per model regardless of that setting.
+	if n := len(splitModelChain(agent.Model)); n > MaxModelChain {
+		return Agent{}, fmt.Errorf("a model chain may hold at most %d models (got %d)", MaxModelChain, n)
+	}
 	if agent.ID == "" {
 		agent.ID = uuid.NewString()
 	}
@@ -2558,8 +2565,8 @@ func (s *Store) PrepareTaskRun(taskID string) (Task, Room, *Team, RunPlan, Setti
 	// model name is rejected by every provider, and "auto" must stay a
 	// sentinel rather than a model name.
 	if agentModel != "" {
-		if first := strings.TrimSpace(strings.Split(agentModel, ",")[0]); first != "" && !strings.EqualFold(first, "auto") {
-			config.DefaultModel = first
+		if first := splitModelChain(agentModel); len(first) > 0 && !strings.EqualFold(first[0], "auto") {
+			config.DefaultModel = first[0]
 		}
 	}
 	keys, err := s.runKeysLocked(*config)
@@ -2576,6 +2583,9 @@ func (s *Store) PrepareTaskRun(taskID string) (Task, Room, *Team, RunPlan, Setti
 	modelChain := append([]string{primary}, fallbacks...)
 	if modelChain[0] == "" {
 		modelChain = []string{config.DefaultModel}
+	}
+	if len(modelChain) > MaxModelChain {
+		modelChain = modelChain[:MaxModelChain]
 	}
 	plan, err := s.buildRunPlan(*config, keys, modelChain)
 	if err != nil {
