@@ -1819,10 +1819,63 @@ function ProviderModal({ initial, isNew, onClose, notify, refresh }) {
   const [busy, setBusy] = useState(false);
   const [discovering, setDiscovering] = useState(false);
   const [test, setTest] = useState({ state: 'idle', message: '' });
+  // Named accounts (multiple API keys). Secret is never returned by the API,
+  // so we only track name + enabled here; the key string is entered on add.
+  const [keys, setKeys] = useState(initial?.keys || []);
+  const [newKeyName, setNewKeyName] = useState('');
+  const [newKeySecret, setNewKeySecret] = useState('');
+  const [keyBusy, setKeyBusy] = useState(false);
 
   const set = (field, value) => setForm((prev) => ({ ...prev, [field]: value }));
   const models = modelsText.split(/[\n,]+/).map((m) => m.trim()).filter(Boolean);
   const defaultModel = models[0] || '';
+
+  const saveKey = async (name, secret, enabled) => {
+    setKeyBusy(true);
+    try {
+      await api(`/api/providers/${encodeURIComponent(config().id)}/keys`, {
+        method: 'PUT',
+        body: JSON.stringify({ name, apiKey: secret, enabled }),
+      });
+      const refreshed = await api('/api/providers', { method: 'GET' });
+      const updated = (refreshed || []).find((p) => p.id === config().id);
+      if (updated) setKeys(updated.keys || []);
+      await refresh();
+      return true;
+    } catch (error) {
+      notify(error.message);
+      return false;
+    } finally {
+      setKeyBusy(false);
+    }
+  };
+
+  const toggleKey = (name, enabled) => saveKey(name, '', enabled);
+
+  const deleteKey = async (name) => {
+    setKeyBusy(true);
+    try {
+      await api(`/api/providers/${encodeURIComponent(config().id)}/keys/${encodeURIComponent(name)}`, {
+        method: 'DELETE',
+      });
+      const refreshed = await api('/api/providers', { method: 'GET' });
+      const updated = (refreshed || []).find((p) => p.id === config().id);
+      if (updated) setKeys(updated.keys || []);
+      await refresh();
+    } catch (error) {
+      notify(error.message);
+    } finally {
+      setKeyBusy(false);
+    }
+  };
+
+  const addKey = async () => {
+    const name = newKeyName.trim();
+    if (!name) { notify('Give the account a name (e.g. Key 1)'); return; }
+    if (!newKeySecret.trim()) { notify('Paste the API key for this account'); return; }
+    const ok = await saveKey(name, newKeySecret, true);
+    if (ok) { setNewKeyName(''); setNewKeySecret(''); }
+  };
 
   const config = () => ({
     id: (form.id || slugify(form.name)).trim(),
@@ -1925,6 +1978,39 @@ function ProviderModal({ initial, isNew, onClose, notify, refresh }) {
             <label>API key {initial?.hasApiKey ? '(saved â leave blank to keep)' : ''}</label>
             <input type="password" autocomplete="new-password" placeholder="sk-â¦"
               value={apiKey} onInput={(e) => setApiKey(e.currentTarget.value)} />
+            <div class="md-hint">This is the default key. Add more accounts below to connect several keys (e.g. two Zro/MoonMath accounts) under one provider. At run time Foreman uses the first enabled key; the agent profile handles fallback between keys — there is no auto-rotate in Foreman itself.</div>
+          </div>
+
+          <div class="field">
+            <label>Accounts (named API keys)</label>
+            {keys.length > 0 ? (
+              <div class="key-list">
+                {keys.map((k) => (
+                  <div class="key-row" key={k.name}>
+                    <label class="check" style="margin:0">
+                      <input type="checkbox" checked={k.enabled}
+                        onChange={(e) => toggleKey(k.name, e.currentTarget.checked)} />
+                      <span>{k.name}</span>
+                    </label>
+                    <span class={`tag ${k.enabled ? 'blue' : 'grey'}`}>{k.enabled ? 'On' : 'Off'}</span>
+                    <button type="button" class="btn small danger" disabled={keyBusy} onClick={() => deleteKey(k.name)}>
+                      <Icon name="trash" size={13} />
+                    </button>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <div class="md-hint">No extra accounts yet. Add one below to connect a second key.</div>
+            )}
+            <div class="key-add">
+              <input style="flex:1" maxlength="80" placeholder="Account name (e.g. Key 1)" value={newKeyName}
+                onInput={(e) => setNewKeyName(e.currentTarget.value)} />
+              <input style="flex:2" type="password" autocomplete="new-password" placeholder="sk-…" value={newKeySecret}
+                onInput={(e) => setNewKeySecret(e.currentTarget.value)} />
+              <button type="button" class="btn small primary" disabled={keyBusy} onClick={addKey}>
+                <Icon name="plus" size={13} />Add account
+              </button>
+            </div>
           </div>
 
           <div class="field">

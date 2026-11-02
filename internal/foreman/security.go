@@ -105,7 +105,21 @@ func (s *Store) credentialsPath() string {
 	return filepath.Join(filepath.Dir(s.globalPath), "credentials.json")
 }
 
+// credentialKey maps a provider + named key to its credentials.json entry. The
+// default (legacy) key uses just the provider ID; additional named keys use
+// "providerID|keyName" so multiple accounts can coexist in one file.
+func credentialKey(providerID, keyName string) string {
+	if keyName == "" {
+		return providerID
+	}
+	return providerID + "|" + keyName
+}
+
 func (s *Store) saveProviderCredential(projectPath, providerID, secret string) error {
+	return s.saveProviderKey(projectPath, providerID, "", secret)
+}
+
+func (s *Store) saveProviderKey(projectPath, providerID, keyName, secret string) error {
 	path := s.credentialsPath()
 	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
 		return err
@@ -118,10 +132,11 @@ func (s *Store) saveProviderCredential(projectPath, providerID, secret string) e
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
+	k := credentialKey(providerID, keyName)
 	if secret == "" {
-		delete(credentials, providerID)
+		delete(credentials, k)
 	} else {
-		credentials[providerID] = secret
+		credentials[k] = secret
 	}
 	data, err := json.MarshalIndent(credentials, "", "  ")
 	if err != nil {
@@ -154,10 +169,14 @@ func (s *Store) saveProviderCredential(projectPath, providerID, secret string) e
 }
 
 func (s *Store) deleteProviderCredential(projectPath, providerID string) error {
-	return s.saveProviderCredential(projectPath, providerID, "")
+	return s.saveProviderKey(projectPath, providerID, "", "")
 }
 
 func (s *Store) loadProviderCredential(projectPath, providerID string) (string, error) {
+	return s.loadProviderKey(projectPath, providerID, "")
+}
+
+func (s *Store) loadProviderKey(projectPath, providerID, keyName string) (string, error) {
 	path := s.credentialsPath()
 	data, err := os.ReadFile(path)
 	if errors.Is(err, os.ErrNotExist) {
@@ -175,7 +194,26 @@ func (s *Store) loadProviderCredential(projectPath, providerID string) (string, 
 	if err := json.Unmarshal(data, &credentials); err != nil {
 		return "", fmt.Errorf("read provider credentials: %w", err)
 	}
-	return credentials[providerID], nil
+	return credentials[credentialKey(providerID, keyName)], nil
+}
+
+// ProviderSecretForRun selects the secret to use for a provider at run time:
+// the first enabled named key when the provider has multiple keys, otherwise
+// the default (legacy) credential. Returns "" if nothing usable is stored.
+func (s *Store) ProviderSecretForRun(projectPath string, config ProviderConfig) string {
+	if len(config.Keys) > 0 {
+		for _, k := range config.Keys {
+			if !k.Enabled {
+				continue
+			}
+			if secret, err := s.loadProviderKey(projectPath, config.ID, k.Name); err == nil && secret != "" {
+				return secret
+			}
+		}
+		return ""
+	}
+	secret, _ := s.loadProviderCredential(projectPath, config.ID)
+	return secret
 }
 
 func (s *Store) SaveProvider(config ProviderConfig, secret string) (ProviderConfig, error) {
@@ -245,16 +283,95 @@ func (s *Store) DeleteProvider(id string) error {
 		return err
 	}
 	_ = s.deleteProviderCredential(s.state.ProjectPath, id)
+	// Also purge any named keys stored under "id|keyName".
+	for _, p := range previous {
+		if p.ID != id {
+			continue
+		}
+		for _, k := range p.Keys {
+			_ = s.saveProviderKey(s.state.ProjectPath, id, k.Name, "")
+		}
+	}
 	return nil
 }
 
 func (s *Store) ProvidersForAPI() []ProviderConfig {
 	state := s.Snapshot()
 	for i := range state.Providers {
-		secret, err := s.loadProviderCredential(state.ProjectPath, state.Providers[i].ID)
-		state.Providers[i].HasAPIKey = err == nil && secret != ""
+		state.Providers[i].HasAPIKey = s.ProviderSecretForRun(state.ProjectPath, state.Providers[i]) != ""
 	}
 	return state.Providers
+}
+
+// SaveProviderKey adds or updates a named API key on a provider and stores the
+// secret under "providerID|keyName" in credentials.json. When a provider has at
+// least one named key, its default (legacy) credential is ignored at run time —
+// the engine uses the first enabled named key. This lets a user attach several
+// accounts (e.g. two Zro/MoonMath keys) to one provider entry. Rotation between
+// keys is intentionally NOT handled here: it is the agent profile's job.
+func (s *Store) SaveProviderKey(providerID, keyName, secret string, enabled bool) error {
+	keyName = strings.TrimSpace(keyName)
+	if providerID == "" || keyName == "" {
+		return errors.New("provider id and key name are required")
+	}
+	if secret != "" && (len(secret) > 4096 || strings.ContainsAny(secret, "\r\n")) {
+		return errors.New("provider API key must be a single line under 4096 characters")
+	}
+	if err := s.saveProviderKey(s.Snapshot().ProjectPath, providerID, keyName, secret); err != nil {
+		return err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	found := false
+	for i := range s.state.Providers {
+		if s.state.Providers[i].ID != providerID {
+			continue
+		}
+		found = true
+		keys := make([]ProviderKey, 0, len(s.state.Providers[i].Keys)+1)
+		replaced := false
+		for _, k := range s.state.Providers[i].Keys {
+			if k.Name == keyName {
+				keys = append(keys, ProviderKey{Name: keyName, Enabled: enabled})
+				replaced = true
+			} else {
+				keys = append(keys, k)
+			}
+		}
+		if !replaced {
+			keys = append(keys, ProviderKey{Name: keyName, Enabled: enabled})
+		}
+		s.state.Providers[i].Keys = keys
+	}
+	if !found {
+		return fmt.Errorf("unknown provider id %q", providerID)
+	}
+	return s.save()
+}
+
+// DeleteProviderKey removes a named key from a provider and deletes its secret.
+func (s *Store) DeleteProviderKey(providerID, keyName string) error {
+	if err := s.saveProviderKey(s.Snapshot().ProjectPath, providerID, keyName, ""); err != nil {
+		return err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for i := range s.state.Providers {
+		if s.state.Providers[i].ID != providerID {
+			continue
+		}
+		filtered := make([]ProviderKey, 0, len(s.state.Providers[i].Keys))
+		for _, k := range s.state.Providers[i].Keys {
+			if k.Name != keyName {
+				filtered = append(filtered, k)
+			}
+		}
+		s.state.Providers[i].Keys = filtered
+	}
+	if err := s.save(); err != nil {
+		return err
+	}
+	return nil
 }
 
 func testProvider(ctx context.Context, config ProviderConfig, secret string) error {

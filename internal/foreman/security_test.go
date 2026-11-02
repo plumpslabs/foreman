@@ -76,3 +76,112 @@ func TestProviderTestSurfacesAuthError(t *testing.T) {
 		t.Fatalf("expected a clear auth error, got %q", msg)
 	}
 }
+
+// TestProviderMultiKeySelection verifies that a provider with several named keys
+// uses the first ENABLED key at run time, and falls back to the legacy default
+// when no keys are configured. No rotation logic is exercised here — the agent
+// profile owns fallover.
+func TestProviderMultiKeySelection(t *testing.T) {
+	store, err := openStoreForTest(t, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	config := ProviderConfig{
+		ID: "zro", Name: "Zro (MoonMath)", Protocol: "openai-compatible",
+		BaseURL: "https://zro.moonmath.ai/v1", DefaultModel: "deepseek-v4.1-flash",
+		Enabled: true,
+	}
+	if _, err := store.SaveProvider(config, ""); err != nil {
+		t.Fatal(err)
+	}
+	// Default (legacy) credential works when no named keys exist.
+	if err := store.saveProviderCredential(store.Snapshot().ProjectPath, "zro", "legacy-key"); err != nil {
+		t.Fatal(err)
+	}
+	if got := store.ProviderSecretForRun(store.Snapshot().ProjectPath, config); got != "legacy-key" {
+		t.Fatalf("expected legacy key, got %q", got)
+	}
+
+	// Add two named keys; both enabled, first should win.
+	if err := store.SaveProviderKey("zro", "key 1", "secret-one", true); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SaveProviderKey("zro", "key 2", "secret-two", true); err != nil {
+		t.Fatal(err)
+	}
+	reloaded := store.ProvidersForAPI()
+	if len(reloaded) != 1 || len(reloaded[0].Keys) != 2 {
+		t.Fatalf("expected 2 named keys, got %+v", reloaded)
+	}
+	if got := store.ProviderSecretForRun(store.Snapshot().ProjectPath, reloaded[0]); got != "secret-one" {
+		t.Fatalf("expected first enabled key, got %q", got)
+	}
+
+	// Disable key 1 → engine must pick key 2.
+	if err := store.SaveProviderKey("zro", "key 1", "", false); err != nil {
+		t.Fatal(err)
+	}
+	reloaded = store.ProvidersForAPI()
+	if got := store.ProviderSecretForRun(store.Snapshot().ProjectPath, reloaded[0]); got != "secret-two" {
+		t.Fatalf("expected second key after disabling first, got %q", got)
+	}
+
+	// Disable both → no secret available.
+	if err := store.SaveProviderKey("zro", "key 2", "", false); err != nil {
+		t.Fatal(err)
+	}
+	reloaded = store.ProvidersForAPI()
+	if got := store.ProviderSecretForRun(store.Snapshot().ProjectPath, reloaded[0]); got != "" {
+		t.Fatalf("expected empty secret when all keys disabled, got %q", got)
+	}
+
+	// Deleting a named key removes its credential.
+	if err := store.SaveProviderKey("zro", "key 3", "secret-three", true); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.DeleteProviderKey("zro", "key 3"); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := store.loadProviderKey(store.Snapshot().ProjectPath, "zro", "key 3"); got != "" {
+		t.Fatalf("deleted key credential should be gone, got %q", got)
+	}
+}
+
+// TestProviderSecretForRunHonorsFirstEnabledAcrossProviders checks that
+// FirstEnabledProviderSecret walks providers and picks the first enabled key.
+func TestProviderSecretForRunHonorsFirstEnabledAcrossProviders(t *testing.T) {
+	store, err := openStoreForTest(t, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	p1 := ProviderConfig{ID: "zro-a", Name: "Zro A", Protocol: "openai-compatible",
+		BaseURL: "https://zro.moonmath.ai/v1", DefaultModel: "deepseek-v4.1-flash", Enabled: true}
+	p2 := ProviderConfig{ID: "zro-b", Name: "Zro B", Protocol: "openai-compatible",
+		BaseURL: "https://zro.moonmath.ai/v1", DefaultModel: "glm-5.3", Enabled: true}
+	if _, err := store.SaveProvider(p1, ""); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.SaveProvider(p2, ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SaveProviderKey("zro-a", "key 1", "aaa", true); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SaveProviderKey("zro-b", "key 1", "bbb", true); err != nil {
+		t.Fatal(err)
+	}
+	cfg, secret, ok := store.FirstEnabledProviderSecret()
+	if !ok {
+		t.Fatal("expected an enabled provider with a key")
+	}
+	// The first enabled provider must return its first enabled key's secret.
+	// Insertion order is not guaranteed, so just assert it is one of the two.
+	if secret != "aaa" && secret != "bbb" {
+		t.Fatalf("unexpected secret %q for provider %q", secret, cfg.ID)
+	}
+	// And it must match the secret the provider itself reports.
+	byID := map[string]string{"zro-a": "aaa", "zro-b": "bbb"}
+	if secret != byID[cfg.ID] {
+		t.Fatalf("FirstEnabledProviderSecret returned %q for %q but expected %q", secret, cfg.ID, byID[cfg.ID])
+	}
+}

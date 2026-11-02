@@ -671,3 +671,94 @@ func TestAnswerRoomQuestionReportsRunFailure(t *testing.T) {
 		t.Fatal("no chat notice explains why the answer could not be run")
 	}
 }
+
+func TestProviderKeyEndpoints(t *testing.T) {
+	server, project := newTestServer(t)
+	handler := server.Handler()
+	base := "?project=" + url.QueryEscape(project)
+
+	// Create a provider.
+	provBody := bytes.NewBufferString(`{"config":{"id":"zro","name":"Zro (MoonMath)","protocol":"openai-compatible","baseUrl":"https://zro.moonmath.ai/v1","models":["deepseek-v4.1-flash"],"defaultModel":"deepseek-v4.1-flash","enabled":true},"apiKey":"legacy"}`)
+	provReq := httptest.NewRequest(http.MethodPost, "/api/providers"+base, provBody)
+	provReq.Header.Set("Content-Type", "application/json")
+	provReq.RemoteAddr = "127.0.0.1:1234"
+	provReq.Host = "127.0.0.1:8080"
+	provRes := httptest.NewRecorder()
+	handler.ServeHTTP(provRes, provReq)
+	if provRes.Code != http.StatusCreated {
+		t.Fatalf("create provider status = %d: %s", provRes.Code, provRes.Body.String())
+	}
+
+	// Add two named keys.
+	for _, k := range []string{"key 1", "key 2"} {
+		body := bytes.NewBufferString(fmt.Sprintf(`{"name":%q,"apiKey":"secret-%s","enabled":true}`, k, k))
+		req := httptest.NewRequest(http.MethodPut, "/api/providers/zro/keys"+base, body)
+		req.Header.Set("Content-Type", "application/json")
+		req.RemoteAddr = "127.0.0.1:1234"
+		req.Host = "127.0.0.1:8080"
+		res := httptest.NewRecorder()
+		handler.ServeHTTP(res, req)
+		if res.Code != http.StatusOK {
+			t.Fatalf("save key %q status = %d: %s", k, res.Code, res.Body.String())
+		}
+	}
+
+	// Workspace should report the named keys.
+	wsReq := httptest.NewRequest(http.MethodGet, "/api/workspace"+base, nil)
+	wsReq.RemoteAddr = "127.0.0.1:1234"
+	wsReq.Host = "127.0.0.1:8080"
+	wsRes := httptest.NewRecorder()
+	handler.ServeHTTP(wsRes, wsReq)
+	if wsRes.Code != http.StatusOK {
+		t.Fatalf("workspace status = %d: %s", wsRes.Code, wsRes.Body.String())
+	}
+	var state WorkspaceState
+	if err := json.Unmarshal(wsRes.Body.Bytes(), &state); err != nil {
+		t.Fatal(err)
+	}
+	var zro *ProviderConfig
+	for i := range state.Providers {
+		if state.Providers[i].ID == "zro" {
+			zro = &state.Providers[i]
+		}
+	}
+	if zro == nil || len(zro.Keys) != 2 {
+		t.Fatalf("expected 2 keys, got %+v", zro)
+	}
+
+	// Disable key 1, delete key 2.
+	body := bytes.NewBufferString(`{"name":"key 1","apiKey":"","enabled":false}`)
+	req := httptest.NewRequest(http.MethodPut, "/api/providers/zro/keys"+base, body)
+	req.Header.Set("Content-Type", "application/json")
+	req.RemoteAddr = "127.0.0.1:1234"
+	req.Host = "127.0.0.1:8080"
+	res := httptest.NewRecorder()
+	handler.ServeHTTP(res, req)
+	if res.Code != http.StatusOK {
+		t.Fatalf("disable key status = %d: %s", res.Code, res.Body.String())
+	}
+
+	delReq := httptest.NewRequest(http.MethodDelete, "/api/providers/zro/keys/key%202"+base, nil)
+	delReq.RemoteAddr = "127.0.0.1:1234"
+	delReq.Host = "127.0.0.1:8080"
+	delRes := httptest.NewRecorder()
+	handler.ServeHTTP(delRes, delReq)
+	if delRes.Code != http.StatusNoContent {
+		t.Fatalf("delete key status = %d: %s", delRes.Code, delRes.Body.String())
+	}
+
+	// Reload and confirm only the disabled key 1 remains.
+	reloaded := server.store.ProvidersForAPI()
+	for _, p := range reloaded {
+		if p.ID == "zro" {
+			if len(p.Keys) != 1 || p.Keys[0].Name != "key 1" || p.Keys[0].Enabled {
+				t.Fatalf("unexpected keys after update: %+v", p.Keys)
+			}
+		}
+	}
+	// The run-time secret must now be empty (only key 1, disabled, and legacy
+	// is ignored once named keys exist).
+	if got := server.store.ProviderSecretForRun(project, reloaded[0]); got != "" {
+		t.Fatalf("expected empty secret with all named keys disabled, got %q", got)
+	}
+}

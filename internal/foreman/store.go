@@ -782,7 +782,8 @@ func (s *Store) HasRunningRunForTask(taskID string) bool {
 }
 
 // FirstEnabledProviderSecret returns the first enabled provider that has a saved
-// credential, with its secret. Used by optional model-backed routing.
+// credential, with its secret. Used by optional model-backed routing. Honors
+// named keys: a provider with multiple keys uses its first enabled key.
 func (s *Store) FirstEnabledProviderSecret() (ProviderConfig, string, bool) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -790,7 +791,8 @@ func (s *Store) FirstEnabledProviderSecret() (ProviderConfig, string, bool) {
 		if !p.Enabled {
 			continue
 		}
-		if secret, err := s.loadProviderCredential(s.state.ProjectPath, p.ID); err == nil && secret != "" {
+		secret := s.ProviderSecretForRun(s.state.ProjectPath, p)
+		if secret != "" {
 			return p, secret, true
 		}
 	}
@@ -2517,9 +2519,15 @@ func (s *Store) PrepareTaskRun(taskID string) (Task, Room, *Team, ProviderConfig
 			config.DefaultModel = first
 		}
 	}
-	secret, err := s.loadProviderCredential(s.state.ProjectPath, config.ID)
-	if err != nil {
-		return Task{}, Room{}, nil, ProviderConfig{}, "", Settings{}, err
+	secret := s.ProviderSecretForRun(s.state.ProjectPath, *config)
+	if secret == "" {
+		// Fall back to the legacy default credential (covers providers that
+		// predate named keys).
+		legacy, err := s.loadProviderCredential(s.state.ProjectPath, config.ID)
+		if err != nil {
+			return Task{}, Room{}, nil, ProviderConfig{}, "", Settings{}, err
+		}
+		secret = legacy
 	}
 	if !config.HasAPIKey && secret == "" {
 		return Task{}, Room{}, nil, ProviderConfig{}, "", Settings{}, fmt.Errorf("provider %q has no saved API key", config.ID)

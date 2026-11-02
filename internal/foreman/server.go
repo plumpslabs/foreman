@@ -70,6 +70,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/providers/test", s.testProvider)
 	mux.HandleFunc("POST /api/providers/discover", s.discoverModels)
 	mux.HandleFunc("DELETE /api/providers/{providerID}", s.deleteProvider)
+	mux.HandleFunc("PUT /api/providers/{providerID}/keys", s.saveProviderKey)
+	mux.HandleFunc("DELETE /api/providers/{providerID}/keys/{keyName}", s.deleteProviderKey)
 	mux.HandleFunc("POST /api/global/reset", s.resetGlobal)
 	mux.HandleFunc("PUT /api/settings", s.updateSettings)
 	mux.HandleFunc("POST /api/skills", s.saveSkill)
@@ -748,6 +750,44 @@ func (s *Server) resolveProviderSecret(providerID, typed string) string {
 		return ""
 	}
 	return secret
+}
+
+// saveProviderKey adds or updates a named API key on a provider.
+func (s *Server) saveProviderKey(w http.ResponseWriter, r *http.Request) {
+	if err := s.verifyProject(r.URL.Query().Get("project")); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	providerID, _ := url.PathUnescape(r.PathValue("providerID"))
+	var req struct {
+		Name    string `json:"name"`
+		APIKey  string `json:"apiKey"`
+		Enabled bool   `json:"enabled"`
+	}
+	if err := decodeJSON(w, r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if err := s.store.SaveProviderKey(providerID, req.Name, req.APIKey, req.Enabled); err != nil {
+		writeError(w, http.StatusUnprocessableEntity, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+// deleteProviderKey removes a named API key from a provider.
+func (s *Server) deleteProviderKey(w http.ResponseWriter, r *http.Request) {
+	if err := s.verifyProject(r.URL.Query().Get("project")); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	providerID, _ := url.PathUnescape(r.PathValue("providerID"))
+	keyName, _ := url.PathUnescape(r.PathValue("keyName"))
+	if err := s.store.DeleteProviderKey(providerID, keyName); err != nil {
+		writeError(w, http.StatusUnprocessableEntity, err.Error())
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func (s *Server) updateSettings(w http.ResponseWriter, r *http.Request) {

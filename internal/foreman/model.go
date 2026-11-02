@@ -123,6 +123,22 @@ type ProviderConfig struct {
 	DefaultModel string   `json:"defaultModel"`
 	HasAPIKey    bool     `json:"hasApiKey"`
 	Enabled      bool     `json:"enabled"`
+	// Keys holds one or more named API keys (e.g. "key 1", "key 2") for the same
+	// provider account. At least one enabled key is required for a run; the engine
+	// selects the first enabled key. This lets a user connect multiple accounts
+	// (e.g. two Zro/MoonMath keys) without creating duplicate provider entries.
+	// Each key is stored separately in credentials.json (keyed by provider|name),
+	// never inline. Legacy single-secret providers keep working: when Keys is
+	// empty, the credential stored under the provider ID alone is used.
+	Keys []ProviderKey `json:"keys,omitempty"`
+}
+
+// ProviderKey is one named credential for a provider. Secret is never serialized
+// here — it lives in credentials.json, keyed by "<providerID>|<name>" (or just
+// the provider ID for the default/legacy key).
+type ProviderKey struct {
+	Name    string `json:"name"`
+	Enabled bool   `json:"enabled"`
 }
 
 type Skill struct {

@@ -713,6 +713,12 @@ select { cursor: pointer; }
 }
 .code-area:focus { border-color: var(--accent); outline: none; }
 .md-hint { display: flex; gap: 5px; align-items: center; font-size: 10px; color: var(--muted); margin-top: 4px; }
+.key-list { display: flex; flex-direction: column; gap: 6px; margin-bottom: 8px; }
+.key-row { display: flex; align-items: center; gap: 10px; padding: 7px 10px; border: 1px solid var(--line); border-radius: 7px; background: #15181e; }
+.key-row .check span { font-size: 12px; font-weight: 600; }
+.key-row .tag { font-size: 10px; }
+.key-row .btn { margin-left: auto; }
+.key-add { display: flex; gap: 6px; align-items: center; }
 .tool-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 6px; }
 .tool-check {
   display: flex; align-items: center; gap: 7px; padding: 7px 9px;
