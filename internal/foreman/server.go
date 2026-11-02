@@ -681,6 +681,9 @@ func (s *Server) testProvider(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Config ProviderConfig `json:"config"`
 		APIKey string         `json:"apiKey"`
+		// KeyName, when set, tests that specific named account instead of the
+		// default credential.
+		KeyName string `json:"keyName"`
 	}
 	if err := decodeJSON(w, r, &req); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
@@ -690,7 +693,13 @@ func (s *Server) testProvider(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusUnprocessableEntity, err.Error())
 		return
 	}
-	secret := s.resolveProviderSecret(req.Config.ID, req.APIKey)
+	secret := req.APIKey
+	if strings.TrimSpace(secret) == "" && req.KeyName != "" {
+		// Test one named account (the UI's per-key "Test" button).
+		secret, _ = s.store.loadProviderKey(s.root, req.Config.ID, req.KeyName)
+	} else {
+		secret = s.resolveProviderSecret(req.Config.ID, req.APIKey)
+	}
 	if err := testProvider(r.Context(), req.Config, secret); err != nil {
 		writeError(w, http.StatusBadGateway, err.Error())
 		return

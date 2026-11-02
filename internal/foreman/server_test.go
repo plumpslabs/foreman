@@ -762,3 +762,59 @@ func TestProviderKeyEndpoints(t *testing.T) {
 		t.Fatalf("expected empty secret with all named keys disabled, got %q", got)
 	}
 }
+
+func TestProviderTestWithNamedKey(t *testing.T) {
+	server, project := newTestServer(t)
+	handler := server.Handler()
+	base := "?project=" + url.QueryEscape(project)
+
+	// Fake provider: valid only when the Bearer token equals "good-key".
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer good-key" {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"data":[{"id":"model-a"}]}`))
+	}))
+	defer srv.Close()
+
+	cfgBody := fmt.Sprintf(`{"config":{"id":"probe","name":"Probe","protocol":"openai-compatible","baseUrl":%q,"models":["model-a"],"defaultModel":"model-a","enabled":true},"apiKey":""}`, srv.URL)
+	req := httptest.NewRequest(http.MethodPost, "/api/providers"+base, bytes.NewBufferString(cfgBody))
+	req.Header.Set("Content-Type", "application/json")
+	req.RemoteAddr, req.Host = "127.0.0.1:1234", "127.0.0.1:8080"
+	res := httptest.NewRecorder()
+	handler.ServeHTTP(res, req)
+	if res.Code != http.StatusCreated {
+		t.Fatalf("create provider = %d: %s", res.Code, res.Body.String())
+	}
+
+	// Two named keys: one bad, one good.
+	for _, kv := range []struct{ name, secret string }{{"bad", "wrong-key"}, {"good", "good-key"}} {
+		body := fmt.Sprintf(`{"name":%q,"apiKey":%q,"enabled":true}`, kv.name, kv.secret)
+		kr := httptest.NewRequest(http.MethodPut, "/api/providers/probe/keys"+base, bytes.NewBufferString(body))
+		kr.Header.Set("Content-Type", "application/json")
+		kr.RemoteAddr, kr.Host = "127.0.0.1:1234", "127.0.0.1:8080"
+		kres := httptest.NewRecorder()
+		handler.ServeHTTP(kres, kr)
+		if kres.Code != http.StatusOK {
+			t.Fatalf("save key %q = %d: %s", kv.name, kres.Code, kres.Body.String())
+		}
+	}
+
+	probe := func(keyName string) int {
+		body := fmt.Sprintf(`{"config":{"id":"probe","name":"Probe","protocol":"openai-compatible","baseUrl":%q,"models":["model-a"],"defaultModel":"model-a","enabled":true},"keyName":%q}`, srv.URL, keyName)
+		tr := httptest.NewRequest(http.MethodPost, "/api/providers/test"+base, bytes.NewBufferString(body))
+		tr.Header.Set("Content-Type", "application/json")
+		tr.RemoteAddr, tr.Host = "127.0.0.1:1234", "127.0.0.1:8080"
+		tres := httptest.NewRecorder()
+		handler.ServeHTTP(tres, tr)
+		return tres.Code
+	}
+	if code := probe("good"); code != http.StatusOK {
+		t.Fatalf("valid key should pass, got %d", code)
+	}
+	if code := probe("bad"); code != http.StatusBadGateway {
+		t.Fatalf("invalid key should fail with 502, got %d", code)
+	}
+}

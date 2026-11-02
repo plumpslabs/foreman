@@ -185,3 +185,41 @@ func TestProviderSecretForRunHonorsFirstEnabledAcrossProviders(t *testing.T) {
 		t.Fatalf("FirstEnabledProviderSecret returned %q for %q but expected %q", secret, cfg.ID, byID[cfg.ID])
 	}
 }
+
+// TestSaveProviderPreservesNamedKeys guards a regression where saving or
+// toggling a provider (which omits Keys) wiped every named account.
+func TestSaveProviderPreservesNamedKeys(t *testing.T) {
+	store, err := openStoreForTest(t, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	base := ProviderConfig{
+		ID: "zro", Name: "Zro (MoonMath)", Protocol: "openai-compatible",
+		BaseURL: "https://zro.moonmath.ai/v1", DefaultModel: "deepseek-v4.1-flash",
+		Enabled: true,
+	}
+	if _, err := store.SaveProvider(base, "legacy"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SaveProviderKey("zro", "key 1", "s1", true); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SaveProviderKey("zro", "key 2", "s2", true); err != nil {
+		t.Fatal(err)
+	}
+
+	// A plain save from the UI (no Keys field) must keep both accounts.
+	toggle := base
+	toggle.Enabled = false
+	if _, err := store.SaveProvider(toggle, ""); err != nil {
+		t.Fatal(err)
+	}
+	got := store.ProvidersForAPI()
+	if len(got) != 1 || len(got[0].Keys) != 2 {
+		t.Fatalf("named keys were wiped by a plain save: %+v", got)
+	}
+	// And the run-time secret still resolves from the first enabled key.
+	if secret := store.ProviderSecretForRun(store.Snapshot().ProjectPath, got[0]); secret != "s1" {
+		t.Fatalf("expected first enabled key after save, got %q", secret)
+	}
+}

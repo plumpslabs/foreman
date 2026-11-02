@@ -1933,6 +1933,12 @@ func (s *Store) UpsertProvider(config ProviderConfig) (ProviderConfig, error) {
 	for i := range s.state.Providers {
 		if s.state.Providers[i].ID == config.ID {
 			config.HasAPIKey = s.state.Providers[i].HasAPIKey
+			// Preserve named keys unless the caller explicitly sent a new set.
+			// Saving or toggling a provider from the UI omits Keys, and a plain
+			// assignment here would silently wipe every named account.
+			if config.Keys == nil {
+				config.Keys = s.state.Providers[i].Keys
+			}
 			s.state.Providers[i] = config
 			updated = true
 			break

@@ -18,7 +18,7 @@ const CHAT_COMMANDS = [
   { id: 'ask', label: '/ask', hint: 'Ask the human a clarifying question' },
   // User-facing trigger: writing the session journal is an agent action, not a
   // raw tool. Picking this sends an instruction the main agent understands, and
-  // it uses the journal tool under the hood â surfaced here because the user
+  // it uses the journal tool under the hood — surfaced here because the user
   // explicitly asked for a way to trigger journaling from chat.
   { id: 'journal', label: '/journal', hint: 'Summarize this room\'s recent changes into the session journal' },
 ];
@@ -38,10 +38,10 @@ function normalizePriority(p) {
 const priorityRank = (p) => PRIORITY_RANK[normalizePriority(p)] ?? 2;
 const priorityLabel = (p) => normalizePriority(p).toUpperCase();
 const priorityColor = (p) => PRIORITY_COLOR[normalizePriority(p)] || '';
-const fmtTokens = (n) => (Number(n) > 0 ? Number(n).toLocaleString() : 'â');
+const fmtTokens = (n) => (Number(n) > 0 ? Number(n).toLocaleString() : '—');
 const fmtMoney = (n) => {
   const v = Number(n);
-  if (!v) return 'â';
+  if (!v) return '—';
   return '$' + v.toFixed(2).replace(/\.00$/, '');
 };
 // Room notice types that create a record in the Approvals Inbox (ask_human,
@@ -100,7 +100,7 @@ function RoomRow({ room, onOpen, runs, onDelete, mcpServers }) {
   const teamCount = (room.teamIds || []).length;
   const runtime = roomRuntimeStatus(room, runs);
   const mcpNames = (mcpServers || []).filter((s) => (room.mcpServerIds || []).includes(s.id)).map((s) => s.name);
-  // Unanswered agent questions are invisible from the room list â the row just
+  // Unanswered agent questions are invisible from the room list — the row just
   // said "Idle" while a decision was waiting inside.
   const pendingQuestions = (room.questions || []).filter((q) => !q.answer).length;
   return (
@@ -129,8 +129,8 @@ function RoomRow({ room, onOpen, runs, onDelete, mcpServers }) {
             {runtime === 'running' ? 'Running' : runtime === 'paused' ? 'Paused' : 'Idle'}
           </span>
           <span class={`tag ${statusTag}`}>{plain(room.status)}</span>
-          <span class="meta-text">{teamCount} team{teamCount === 1 ? '' : 's'} Â· {timeAgo(room.createdAt)}</span>
-          {mcpNames.map((n) => <span class="tag blue" key={n}>MCP Â· {plain(n)}</span>)}
+          <span class="meta-text">{teamCount} team{teamCount === 1 ? '' : 's'} · {timeAgo(room.createdAt)}</span>
+          {mcpNames.map((n) => <span class="tag blue" key={n}>MCP · {plain(n)}</span>)}
         </div>
       </div>
       {onDelete && (
@@ -179,7 +179,7 @@ function TemplateCard({ template, onUse, state }) {
           setErr('');
           try {
             const ok = await onUse(template);
-            if (!ok) setErr('Import failed â see the notification.');
+            if (!ok) setErr('Import failed — see the notification.');
           } catch (error) {
             setErr(error.message || 'Import failed.');
           } finally {
@@ -187,7 +187,7 @@ function TemplateCard({ template, onUse, state }) {
           }
         }}>
         {busy ? <span class="btn-spin"><Icon name="refresh" size={14} /></span> : <Icon name={alreadyImported ? 'check-circle' : 'plus'} size={14} />}
-        {busy ? 'Mengimporâ¦' : alreadyImported ? 'Already imported' : 'Use this template'}
+        {busy ? 'Mengimpor…' : alreadyImported ? 'Already imported' : 'Use this template'}
       </button>
       {err ? <div class="template-err" style="color:var(--red);font-size:11px;margin-top:6px">{plain(err)}</div> : null}
     </article>
@@ -236,7 +236,7 @@ export function HomePage({ state, openRoom, setModal, onTeamCreate, onUseTemplat
       <div class="section-head">
         <div>
           <div class="section-title">Your rooms</div>
-          <div class="section-note">Task-focused workspaces â each room is a session</div>
+          <div class="section-note">Task-focused workspaces — each room is a session</div>
         </div>
         <button class="btn subtle" onClick={() => navigate('rooms')}>View all <Icon name="arrow-up-right" size={14} /></button>
       </div>
@@ -287,7 +287,7 @@ export function RoomsPage({ state, openRoom, setModal, deleteRoom }) {
 
 export function RoomDetailHost({ room, state, notify, setModal, runTask, refresh, onBack, cancelRun }) {
   const [tab, setTab] = useState('chat');
-  // Right rail visibility â persisted so a collapsed workspace stays collapsed.
+  // Right rail visibility — persisted so a collapsed workspace stays collapsed.
   const [railOpen, setRailOpen] = useState(() => {
     try { return window.localStorage.getItem('foreman.roomRail') !== '0'; } catch { return true; }
   });
@@ -329,7 +329,7 @@ export function RoomDetailHost({ room, state, notify, setModal, runTask, refresh
 
   useEffect(() => { setInvited(room.teamIds || []); }, [room.id, room.teamIds.join(',')]);
 
-  const { teams: allTeams, tasks, skills, runs, settings, agents: allAgents = [] } = state;
+  const { teams: allTeams, tasks, skills, runs, settings } = state;
   const teams = (room.teamIds || [])
     .map((id) => allTeams.find((t) => t.id === id))
     .filter(Boolean);
@@ -367,19 +367,10 @@ export function RoomDetailHost({ room, state, notify, setModal, runTask, refresh
       }
     }
   }
-  if (!roomAgentsList.length && allAgents.length) {
-    for (const a of allAgents) {
-      if (!seenAgentNames.has(a.name)) {
-        seenAgentNames.add(a.name);
-        roomAgentsList.push({
-          name: a.name,
-          teamName: 'Library',
-          isMain: false,
-          role: a.role || 'Agent',
-        });
-      }
-    }
-  }
+  // Live agents come ONLY from the teams actually invited to this room. There
+  // used to be a fallback that listed the whole agent library whenever a room
+  // had no teams, which made kicked agents look like they were still present.
+  // An empty room must show an empty roster.
 
   const allRoomTasks = tasks.filter((t) => t.roomId === room.id);
   const roomTasks = allRoomTasks.filter((t) => !t.hidden);
@@ -405,7 +396,7 @@ export function RoomDetailHost({ room, state, notify, setModal, runTask, refresh
     .filter((q) => !q.answer)
     .slice()
     .sort((a, b) => (Date.parse(a.createdAt) || 0) - (Date.parse(b.createdAt) || 0));
-  // Room.mainAgent does not exist on the model â resolve the lead from the
+  // Room.mainAgent does not exist on the model — resolve the lead from the
   // invited teams instead so unattributed agent lines get a real name.
   const roomLead = (teams || []).map((t) => t.mainAgent).find(Boolean) || 'Main agent';
 
@@ -439,7 +430,7 @@ export function RoomDetailHost({ room, state, notify, setModal, runTask, refresh
           <span class={`notice-chip ${sevClass}`}>
             {who ? <b>{plain(who)}</b> : null}{' '}
             {plain(m.content)}
-            <span class="notice-time"> Â· {timeAgo(m.createdAt)}</span>
+            <span class="notice-time"> · {timeAgo(m.createdAt)}</span>
             {/* Only notices that actually CREATED an inbox record link to it.
                 Must be an exact match: run.model_escalate (model rotation on
                 a failed attempt) contains "escalat" and used to show an
@@ -463,11 +454,11 @@ export function RoomDetailHost({ room, state, notify, setModal, runTask, refresh
         <div class="msg-content">
           <div class="msg-meta">
             <strong>{plain(name)}</strong>
-            <span>Â· {timeAgo(m.createdAt)}</span>
+            <span>· {timeAgo(m.createdAt)}</span>
           </div>
           {m.metadata && m.metadata.question ? (
             <div class="msg-context" title={plain(m.metadata.question)}>
-              â©ï¸ answering: {plain(m.metadata.question)}
+              ↩️ answering: {plain(m.metadata.question)}
             </div>
           ) : null}
           <div class={`bubble ${m.role === 'user' ? 'user-bubble' : ''}`}>
@@ -517,7 +508,7 @@ export function RoomDetailHost({ room, state, notify, setModal, runTask, refresh
     const q = mentionQuery.toLowerCase();
     // Team mentions only (# or @): the main agent is already the default
     // target for every message, so suggesting individual agents is redundant
-    // noise â routing to a specific agent happens server-side if the message
+    // noise — routing to a specific agent happens server-side if the message
     // carries an explicit @ prefix, but the picker no longer offers it.
     return teams
       .filter((t) => t.name.toLowerCase().includes(q) || t.id.toLowerCase().includes(q))
@@ -684,7 +675,7 @@ export function RoomDetailHost({ room, state, notify, setModal, runTask, refresh
       await refresh();
       // The answer starts the asking agent's run; if it could not start, say so
       // instead of pretending the reply went through.
-      notify(res && res.warning ? res.warning : 'Answer sent â the agent is picking it up');
+      notify(res && res.warning ? res.warning : 'Answer sent — the agent is picking it up');
     } catch (error) {
       notify(error.message);
     }
@@ -760,8 +751,8 @@ export function RoomDetailHost({ room, state, notify, setModal, runTask, refresh
               <div class="room-title-large">{plain(room.name)}</div>
               <div class="room-desc-small">{plain(room.goal || 'No goal provided.')}</div>
               <div style="display:flex;gap:5px;flex-wrap:wrap;margin-top:6px">
-                {roomMcpNames.map((n) => <span class="tag blue" key={n}>MCP Â· {plain(n)}</span>)}
-                {contractFile ? <span class="tag green">Contract Â· {plain(contractFile)}</span> : null}
+                {roomMcpNames.map((n) => <span class="tag blue" key={n}>MCP · {plain(n)}</span>)}
+                {contractFile ? <span class="tag green">Contract · {plain(contractFile)}</span> : null}
               </div>
             </div>
             <div class={`runtime-pill ${runtime}`}>
@@ -853,15 +844,15 @@ export function RoomDetailHost({ room, state, notify, setModal, runTask, refresh
                   const lastStep = compactSteps[compactSteps.length - 1];
                   const earlierSteps = compactSteps.slice(-4, compactSteps.length - 1);
                   const lastMsg = statusEvents[statusEvents.length - 1]?.message || '';
-                  const label = lastMsg.includes(' â ') ? 'Running toolsâ¦' : lastMsg.includes('engine:') ? 'Reasoning' : 'Working';
+                  const label = lastMsg.includes(' ') ? 'Running tools…' : lastMsg.includes('engine:') ? 'Reasoning' : 'Working';
                   // The first event is always the runtime-start marker; while the model
                   // is still composing its first turn there are no step events yet.
                   const starting = compactSteps.length <= 1 && /runtime started/i.test(lastStep?.text || '');
                   const currentText = starting
-                    ? 'Starting the agentâ¦'
+                    ? 'Starting the agent…'
                     : lastStep
-                      ? (lastStep.n > 1 ? `${lastStep.text} (Ã${lastStep.n})` : lastStep.text)
-                      : `${aname} is workingâ¦`;
+                      ? (lastStep.n > 1 ? `${lastStep.text} (×${lastStep.n})` : lastStep.text)
+                      : `${aname} is working…`;
                   const elapsed = elapsedLabel(run.startedAt);
                   return (
                     <div class="msg live-agent-turn" key={`live-turn-${run.id}`}>
@@ -882,7 +873,7 @@ export function RoomDetailHost({ room, state, notify, setModal, runTask, refresh
                               {earlierSteps.map((ev, idx) => (
                                 <div class="live-step-item" key={`${idx}-${ev.text}`}>
                                   <span class="live-step-dot" />
-                                  <span class="live-step-msg">{plain(ev.n > 1 ? `${ev.text} (Ã${ev.n})` : ev.text)}</span>
+                                  <span class="live-step-msg">{plain(ev.n > 1 ? `${ev.text} (×${ev.n})` : ev.text)}</span>
                                 </div>
                               ))}
                             </div>
@@ -912,10 +903,10 @@ export function RoomDetailHost({ room, state, notify, setModal, runTask, refresh
                       <div class="msg-content">
                         <div class="msg-meta">
                           <strong>{plain(aname)}</strong>
-                          <span class="live-tag">â¸ Paused</span>
+                          <span class="live-tag">⏸ Paused</span>
                         </div>
                         <div class="bubble live-bubble paused-bubble">
-                          This run paused before finishing â its partial work is saved. Send a message in the chat
+                          This run paused before finishing — its partial work is saved. Send a message in the chat
                           to pick the thread back up.
                         </div>
                       </div>
@@ -930,11 +921,11 @@ export function RoomDetailHost({ room, state, notify, setModal, runTask, refresh
                       Agent needs a decision
                     </div>
                     <div style="font-size:12px;color:var(--orange);margin-top:4px">
-                      â ï¸ Ambiguity confirmation: Agent paused execution to avoid assumption bias.
+                      ⚠️ Ambiguity confirmation: Agent paused execution to avoid assumption bias.
                     </div>
                     <div class="question-prompt" style="margin-top:8px">{plain(question.prompt)}</div>
                     {/* options may be null on questions stored before the
-                        backend normalized them â that used to crash the whole
+                        backend normalized them — that used to crash the whole
                         room view with no error boundary. */}
                     {(question.options || []).length ? (
                       <div class="question-options">
@@ -948,7 +939,7 @@ export function RoomDetailHost({ room, state, notify, setModal, runTask, refresh
                       answerQuestion(question, answerDraft[question.id]);
                     }}>
                       <input
-                        placeholder="Or type your own answerâ¦"
+                        placeholder="Or type your own answer…"
                         value={answerDraft[question.id] || ''}
                         onInput={(e) => setAnswerDraft((prev) => ({ ...prev, [question.id]: e.currentTarget.value }))}
                       />
@@ -968,7 +959,7 @@ export function RoomDetailHost({ room, state, notify, setModal, runTask, refresh
                         : 'working';
                     const aname = agentNameForRun(run);
                     return (
-                      <span class="live-agent live-on" key={run.id} title={`${plain(aname)} Â· ${label}`}>
+                      <span class="live-agent live-on" key={run.id} title={`${plain(aname)} · ${label}`}>
                         <span class="live-dot" />
                         <span class="live-agent-name">{plain(aname)}</span>
                         <em>{label}</em>
@@ -1054,14 +1045,14 @@ export function RoomDetailHost({ room, state, notify, setModal, runTask, refresh
                       <Icon name="bot" size={12} />
                       {mentions.length
                         ? `Target: ${mentions.map((m) => (m.type === 'team' ? `#${m.name}` : `@${m.name}`)).join(', ')}`
-                        : 'Default: main agent Â· @ agent Â· # team Â· / command'}
+                        : 'Default: main agent · @ agent · # team · / command'}
                     </span>
                     <button class="send-btn" type="submit" disabled={sending} aria-label="Send message">
                       <Icon name="arrow-up" />
                     </button>
                   </div>
                 </div>
-                <div class="compose-foot">Sending runs the agent now â the reply lands back here in chat.</div>
+                <div class="compose-foot">Sending runs the agent now — the reply lands back here in chat.</div>
               </form>
             </div>
           )}
@@ -1176,7 +1167,7 @@ export function RoomDetailHost({ room, state, notify, setModal, runTask, refresh
                 <div class="section-title">Session Journal</div>
                 <div class="section-note" style="margin-top:5px">
                   What agents changed and why, written when tasks finish or via <code>/journal</code>.
-                  Shared across rooms â entries from other rooms are shown with their room id because they may still touch the same files.
+                  Shared across rooms — entries from other rooms are shown with their room id because they may still touch the same files.
                 </div>
                 <div style="display:flex;flex-direction:column;gap:12px;margin-top:16px">
                   {roomJournal.length === 0 ? (
@@ -1245,7 +1236,7 @@ export function RoomDetailHost({ room, state, notify, setModal, runTask, refresh
                       <div class="agent-name-row">
                         <span class="agent-name">{plain(t.name)}</span>
                         {idx === 0 ? (
-                          <span class="member-badge main mini-tag" title="Lead Team Â· Default responder for unmentioned chat">Lead</span>
+                          <span class="member-badge main mini-tag" title="Lead Team · Default responder for unmentioned chat">Lead</span>
                         ) : (
                           <span class="member-badge secondary-lead mini-tag" title="Specialist Team">Specialist</span>
                         )}
@@ -1304,12 +1295,12 @@ export function RoomDetailHost({ room, state, notify, setModal, runTask, refresh
                       <div class="agent-name-row">
                         <span class="agent-name">{plain(agent.name)}</span>
                         {agent.isLead ? (
-                          <span class="member-badge main mini-tag" title="Room Lead Â· Primary coordinator">main</span>
+                          <span class="member-badge main mini-tag" title="Room Lead · Primary coordinator">main</span>
                         ) : agent.isMain ? (
                           <span class="member-badge secondary-lead mini-tag" title={`${plain(agent.teamName)} Team Lead`}>lead</span>
                         ) : null}
                       </div>
-                      <div class="agent-role">{plain(agent.role ? `${agent.role} Â· ${agent.teamName}` : agent.teamName)}</div>
+                      <div class="agent-role">{plain(agent.role ? `${agent.role} · ${agent.teamName}` : agent.teamName)}</div>
                     </div>
                     <div class="agent-status-indicator">
                       {isRunning ? (
@@ -1335,7 +1326,7 @@ export function RoomDetailHost({ room, state, notify, setModal, runTask, refresh
             <div class={`rail-status ${runtime}`}>
               <span class={`runtime-dot ${runtime}`} />
               <span>{runtime === 'running' ? 'Agent running'
-                : runtime === 'paused' && lastRun && lastRun.status === 'paused' ? 'Paused â state saved, ready to continue'
+                : runtime === 'paused' && lastRun && lastRun.status === 'paused' ? 'Paused — state saved, ready to continue'
                   : runtime === 'paused' ? 'Paused after a failure'
                     : 'No active run'}</span>
             </div>
@@ -1392,7 +1383,7 @@ export function RoomDetailHost({ room, state, notify, setModal, runTask, refresh
                         <input type="checkbox" checked={invited.includes(t.id)} onChange={() => toggleInvite(t.id)} />
                         <span class="team-pick-body">
                           <span class="team-pick-name">{plain(t.name)}</span>
-                          <span class="team-pick-desc">Main: {plain(t.mainAgent)} Â· {plain(t.purpose)}</span>
+                          <span class="team-pick-desc">Main: {plain(t.mainAgent)} · {plain(t.purpose)}</span>
                         </span>
                       </label>
                     ))
@@ -1428,7 +1419,7 @@ export function RoomDetailHost({ room, state, notify, setModal, runTask, refresh
             <div class="modal-foot">
               <button class="btn" onClick={() => setKickBlock(null)}>Cancel</button>
               {/* Both buttons used to just close the modal while the copy
-                  told the user to "stop the run first" â with no way to do it.
+                  told the user to "stop the run first" — with no way to do it.
                   Stop it right here, then the team can be removed. */}
               <button class="btn primary" onClick={async () => {
                 const run = kickBlock.run;
@@ -1478,7 +1469,7 @@ function Board({ roomId, tasks, runTask, setModal, refresh }) {
                       {t.status === 'review' && <span class="tag blue">Review</span>}
                       {t.status === 'blocked' && <span class="tag orange">Blocked</span>}
                       {t.dependencies && t.dependencies.length > 0 && <span class="tag">deps {t.dependencies.length}</span>}
-                      {t.retryCount > 0 && <span class="tag orange">rework Ã{t.retryCount}</span>}
+                      {t.retryCount > 0 && <span class="tag orange">rework ×{t.retryCount}</span>}
                     </div>
                     {(t.status === 'todo' || t.status === 'backlog') && (
                       <button class="btn primary small" style="margin-top:9px"
@@ -1532,7 +1523,7 @@ export function TeamsPage({ state, openTeam, onTeamCreate, onUseTemplate, openTe
                 </div>
                 <div class="room-sub">{plain(t.purpose)}</div>
                 <div class="room-foot">
-                  <span class="meta-text">Main: {plain(t.mainAgent)} Â· {(t.agents || []).length} agents</span>
+                  <span class="meta-text">Main: {plain(t.mainAgent)} · {(t.agents || []).length} agents</span>
                 </div>
                 <div class="chip-row">
                   {(t.agents || []).map((a) => <span class="chip" key={a.name}>{plain(a.name)}</span>)}
@@ -1594,7 +1585,7 @@ export function AgentsPage({ state, openAgent, deleteAgent }) {
               </div>
               <div class="agent-card-foot">
                 <span class="tag">{a.requireReview ? 'Requires review' : 'Profile'}</span>
-                <span class="meta-text">{(a.tools || []).length} tools Â· {(a.skills || []).length} skills Â· {plain(a.model || 'auto model')}</span>
+                <span class="meta-text">{(a.tools || []).length} tools · {(a.skills || []).length} skills · {plain(a.model || 'auto model')}</span>
               </div>
             </article>
           ))}
@@ -1644,7 +1635,7 @@ export function SkillsPage({ state, setModal, openSkill }) {
                   <span class={`tag ${s.mode === 'active' ? 'green' : 'muted'}`}>{s.mode === 'active' ? 'Active' : 'Passive'}</span>
                 </div>
                 <div class="skill-desc">{plain(s.description || 'No description.')}</div>
-                <div class="skill-meta">{(s.files || []).length} file{(s.files || []).length === 1 ? '' : 's'} Â· {(s.files || []).map((f) => f.path).slice(0, 3).join(', ')}</div>
+                <div class="skill-meta">{(s.files || []).length} file{(s.files || []).length === 1 ? '' : 's'} · {(s.files || []).map((f) => f.path).slice(0, 3).join(', ')}</div>
               </div>
               <span class="row-action"><Icon name="chevron-right" size={14} />Open</span>
             </article>
@@ -1675,11 +1666,11 @@ export function RunsPage({ state, cancelRun, runTask }) {
               <article class="room-row">
                 <div class={avatarClass(tone)} style="border-radius:6px"><Icon name="activity" size={14} /></div>
                 <div class="room-main">
-                  <div class="room-title">{plain(run.status)} Â· {plain(run.model)}{task?.hidden ? ' Â· chat' : ''}</div>
-                  <div class="room-sub">{plain(task ? task.title : 'Unknown task')} Â· {plain(run.result || run.error || 'Run executingâ¦')}</div>
+                  <div class="room-title">{plain(run.status)} · {plain(run.model)}{task?.hidden ? ' · chat' : ''}</div>
+                  <div class="room-sub">{plain(task ? task.title : 'Unknown task')} · {plain(run.result || run.error || 'Run executing…')}</div>
                   <div class="room-foot">
                     <span class="tag">{plain(run.provider)}</span>
-                    <span class="meta-text">Started {new Date(run.startedAt).toLocaleString()} Â· {fmtTokens(run.tokens)} tokens Â· cost {fmtMoney(run.costUsd)}</span>
+                    <span class="meta-text">Started {new Date(run.startedAt).toLocaleString()} · {fmtTokens(run.tokens)} tokens · cost {fmtMoney(run.costUsd)}</span>
                   </div>
                 </div>
                 {run.status === 'running' && (
@@ -1776,7 +1767,7 @@ function PresetCard({ preset, configured, onOpen }) {
         <span class="preset-mark">{providerInitials(preset.name)}</span>
         <span class="preset-name">{plain(preset.name)}</span>
         {configured ? <span class="tag green">Configured</span>
-          : preset.detected ? <span class="tag green">opencode Â· {preset.detected.count} models</span>
+          : preset.detected ? <span class="tag green">opencode · {preset.detected.count} models</span>
             : <span class="tag">Available</span>}
       </div>
       <div class="preset-note">{plain(preset.note)}</div>
@@ -1789,7 +1780,7 @@ function PresetCard({ preset, configured, onOpen }) {
       ) : (
         <div class="meta-text" style="margin-top:8px">
           {preset.detected
-            ? `${preset.detected.count} free models detected from your local opencode â pick to configure the key.`
+            ? `${preset.detected.count} free models detected from your local opencode — pick to configure the key.`
             : 'Models appear after this provider is configured.'}
         </div>
       )}
@@ -1797,10 +1788,10 @@ function PresetCard({ preset, configured, onOpen }) {
   );
 }
 
-function ProviderModal({ initial, isNew, onClose, notify, refresh }) {
+function ProviderModal({ initial, isNew, existingIds = [], onClose, notify, refresh }) {
   // Pre-fill the model list whenever the opener supplies models (a saved
   // provider, or a preset whose detected OpenCode Zen free models were merged
-  // in) â the default is the first entry. New presets must land in the editor
+  // in) — the default is the first entry. New presets must land in the editor
   // directly, not behind a "Suggested" chip row.
   const prefill = (initial?.models || []).filter(Boolean);
   const def = initial?.defaultModel || prefill[0] || '';
@@ -1837,8 +1828,10 @@ function ProviderModal({ initial, isNew, onClose, notify, refresh }) {
         method: 'PUT',
         body: JSON.stringify({ name, apiKey: secret, enabled }),
       });
-      const refreshed = await api('/api/providers', { method: 'GET' });
-      const updated = (refreshed || []).find((p) => p.id === config().id);
+      // A changed key invalidates any previous validity result.
+      setKeyChecks((prev) => { const next = { ...prev }; delete next[name]; return next; });
+      const ws = await api('/api/workspace');
+      const updated = (ws.providers || []).find((p) => p.id === config().id);
       if (updated) setKeys(updated.keys || []);
       await refresh();
       return true;
@@ -1852,14 +1845,31 @@ function ProviderModal({ initial, isNew, onClose, notify, refresh }) {
 
   const toggleKey = (name, enabled) => saveKey(name, '', enabled);
 
+  // Per-key validity check. A key can be enabled but expired/invalid — this
+  // probes the provider with that specific account so the user knows which
+  // one actually works, instead of only seeing ON/OFF.
+  const [keyChecks, setKeyChecks] = useState({});
+  const testKey = async (name) => {
+    setKeyChecks((prev) => ({ ...prev, [name]: { state: 'running', message: 'Testing…' } }));
+    try {
+      await api('/api/providers/test', {
+        method: 'POST',
+        body: JSON.stringify({ config: config(), keyName: name }),
+      });
+      setKeyChecks((prev) => ({ ...prev, [name]: { state: 'ok', message: 'Valid' } }));
+    } catch (error) {
+      setKeyChecks((prev) => ({ ...prev, [name]: { state: 'error', message: error.message } }));
+    }
+  };
+
   const deleteKey = async (name) => {
     setKeyBusy(true);
     try {
       await api(`/api/providers/${encodeURIComponent(config().id)}/keys/${encodeURIComponent(name)}`, {
         method: 'DELETE',
       });
-      const refreshed = await api('/api/providers', { method: 'GET' });
-      const updated = (refreshed || []).find((p) => p.id === config().id);
+      const ws = await api('/api/workspace');
+      const updated = (ws.providers || []).find((p) => p.id === config().id);
       if (updated) setKeys(updated.keys || []);
       await refresh();
     } catch (error) {
@@ -1877,8 +1887,19 @@ function ProviderModal({ initial, isNew, onClose, notify, refresh }) {
     if (ok) { setNewKeyName(''); setNewKeySecret(''); }
   };
 
+  // For a NEW provider, never reuse an id that already exists: a custom endpoint
+  // must create a fresh config, not overwrite an unrelated provider. Saved
+  // providers keep their fixed id (the field is read-only).
+  const uniqueId = () => {
+    const base = (form.id || slugify(form.name)).trim();
+    if (!isNew || !base || !existingIds.includes(base)) return base;
+    let n = 2;
+    while (existingIds.includes(`${base}-${n}`)) n += 1;
+    return `${base}-${n}`;
+  };
+
   const config = () => ({
-    id: (form.id || slugify(form.name)).trim(),
+    id: uniqueId(),
     name: form.name.trim(),
     protocol: form.protocol,
     baseUrl: form.baseUrl.trim(),
@@ -1889,13 +1910,13 @@ function ProviderModal({ initial, isNew, onClose, notify, refresh }) {
 
   const runTest = async () => {
     if (!models.length) { setTest({ state: 'error', message: 'Add at least one model first' }); return; }
-    setTest({ state: 'running', message: 'Testing connectionâ¦' });
+    setTest({ state: 'running', message: 'Testing connection…' });
     try {
       const result = await api('/api/providers/test', {
         method: 'POST',
         body: JSON.stringify({ config: config(), apiKey }),
       });
-      setTest({ state: 'ok', message: `Connected Â· ${result.model}` });
+      setTest({ state: 'ok', message: `Connected · ${result.model}` });
     } catch (error) {
       setTest({ state: 'error', message: error.message });
     }
@@ -1903,7 +1924,7 @@ function ProviderModal({ initial, isNew, onClose, notify, refresh }) {
 
   const discover = async () => {
     setDiscovering(true);
-    setTest({ state: 'running', message: 'Fetching model listâ¦' });
+    setTest({ state: 'running', message: 'Fetching model list…' });
     try {
       const result = await api('/api/providers/discover', {
         method: 'POST',
@@ -1914,7 +1935,7 @@ function ProviderModal({ initial, isNew, onClose, notify, refresh }) {
         setTest({ state: 'error', message: 'The provider returned no models' });
       } else {
         setModelsText(found.join('\n'));
-        setTest({ state: 'ok', message: `Found ${found.length} models Â· first is the default` });
+        setTest({ state: 'ok', message: `Found ${found.length} models · first is the default` });
       }
     } catch (error) {
       setTest({ state: 'error', message: error.message });
@@ -1975,29 +1996,46 @@ function ProviderModal({ initial, isNew, onClose, notify, refresh }) {
           </div>
 
           <div class="field">
-            <label>API key {initial?.hasApiKey ? '(saved â leave blank to keep)' : ''}</label>
-            <input type="password" autocomplete="new-password" placeholder="sk-â¦"
+            <label>API key {initial?.hasApiKey ? '(saved — leave blank to keep)' : ''}</label>
+            <input type="password" autocomplete="new-password" placeholder="sk-…"
               value={apiKey} onInput={(e) => setApiKey(e.currentTarget.value)} />
             <div class="md-hint">This is the default key. Add more accounts below to connect several keys (e.g. two Zro/MoonMath accounts) under one provider. At run time Foreman uses the first enabled key; the agent profile handles fallback between keys — there is no auto-rotate in Foreman itself.</div>
           </div>
 
           <div class="field">
             <label>Accounts (named API keys)</label>
-            {keys.length > 0 ? (
+            {isNew ? (
+              <div class="md-hint">Save this provider first, then reopen it to add extra named accounts (each with its own key + ON/OFF + Test).</div>
+            ) : (
+              <>
+                {keys.length > 0 ? (
               <div class="key-list">
-                {keys.map((k) => (
-                  <div class="key-row" key={k.name}>
-                    <label class="check" style="margin:0">
-                      <input type="checkbox" checked={k.enabled}
-                        onChange={(e) => toggleKey(k.name, e.currentTarget.checked)} />
-                      <span>{k.name}</span>
-                    </label>
-                    <span class={`tag ${k.enabled ? 'blue' : 'grey'}`}>{k.enabled ? 'On' : 'Off'}</span>
-                    <button type="button" class="btn small danger" disabled={keyBusy} onClick={() => deleteKey(k.name)}>
-                      <Icon name="trash" size={13} />
-                    </button>
-                  </div>
-                ))}
+                {keys.map((k) => {
+                  const chk = keyChecks[k.name];
+                  return (
+                    <div class="key-row" key={k.name}>
+                      <label class="check" style="margin:0">
+                        <input type="checkbox" checked={k.enabled}
+                          onChange={(e) => toggleKey(k.name, e.currentTarget.checked)} />
+                        <span>{k.name}</span>
+                      </label>
+                      <span class={`tag ${k.enabled ? 'blue' : 'grey'}`}>{k.enabled ? 'On' : 'Off'}</span>
+                      {chk && chk.state !== 'running' ? (
+                        <span class={`tag ${chk.state === 'ok' ? 'green' : 'orange'}`}
+                          title={plain(chk.message)}>
+                          {chk.state === 'ok' ? '✓ valid' : '✗ invalid'}
+                        </span>
+                      ) : null}
+                      <button type="button" class="btn small" disabled={keyBusy || (chk && chk.state === 'running')}
+                        onClick={() => testKey(k.name)} title="Check whether this key is still valid">
+                        <Icon name="activity" size={13} />{chk && chk.state === 'running' ? 'Testing…' : 'Test'}
+                      </button>
+                      <button type="button" class="btn small danger" disabled={keyBusy} onClick={() => deleteKey(k.name)}>
+                        <Icon name="trash" size={13} />
+                      </button>
+                    </div>
+                  );
+                })}
               </div>
             ) : (
               <div class="md-hint">No extra accounts yet. Add one below to connect a second key.</div>
@@ -2011,13 +2049,15 @@ function ProviderModal({ initial, isNew, onClose, notify, refresh }) {
                 <Icon name="plus" size={13} />Add account
               </button>
             </div>
+              </>
+            )}
           </div>
 
           <div class="field">
             <div class="field-label-row">
-              <label>Models (one per line Â· first is the default)</label>
+              <label>Models (one per line · first is the default)</label>
               <button type="button" class="btn small" disabled={discovering} onClick={discover}>
-                <Icon name="refresh" size={13} />{discovering ? 'Fetchingâ¦' : 'Discover models'}
+                <Icon name="refresh" size={13} />{discovering ? 'Fetching…' : 'Discover models'}
               </button>
             </div>
             <textarea class="code-area" style="min-height:130px"
@@ -2074,7 +2114,7 @@ function ProvidersTab({ state, notify, onPreset, onEdit, onDelete, onToggle }) {
   };
   // Native auto-detect: one probe on mount (the local opencode CLI's Zen/free
   // models), no blocking, no per-visit network churn. The result feeds the
-  // OpenCode Zen preset â there is no separate "detected" provider.
+  // OpenCode Zen preset — there is no separate "detected" provider.
   useEffect(() => { runDetect(); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, []);
   const mergeModels = (base, extra) => {
     const out = [];
@@ -2130,11 +2170,11 @@ function ProvidersTab({ state, notify, onPreset, onEdit, onDelete, onToggle }) {
                     {provider.enabled ? <span class="tag green">Enabled</span> : <span class="tag muted">Disabled</span>}
                     {provider.hasApiKey ? <span class="tag blue">Key saved</span> : <span class="tag orange">No key</span>}
                   </div>
-                  <div class="provider-url">{plain(provider.protocol)} Â· {plain(provider.baseUrl)}</div>
+                  <div class="provider-url">{plain(provider.protocol)} · {plain(provider.baseUrl)}</div>
                   <div class="chip-row">
                     {(provider.models || []).map((model, index) => (
                       <span class={`chip ${index === 0 ? 'chip-default' : ''}`}>
-                        {plain(model)}{index === 0 ? ' Â· default' : ''}
+                        {plain(model)}{index === 0 ? ' · default' : ''}
                       </span>
                     ))}
                   </div>
@@ -2186,10 +2226,10 @@ function GlobalCleanCard({ notify, refresh }) {
       </div>
       <div style="display:flex;gap:8px">
         <button class="btn" disabled={!!busy} onClick={() => clean('agents')}>
-          {busy === 'agents' ? 'Menghapusâ¦' : 'Hapus semua agent'}
+          {busy === 'agents' ? 'Menghapus…' : 'Hapus semua agent'}
         </button>
         <button class="btn" disabled={!!busy} onClick={() => clean('teams')}>
-          {busy === 'teams' ? 'Menghapusâ¦' : 'Hapus semua team'}
+          {busy === 'teams' ? 'Menghapus…' : 'Hapus semua team'}
         </button>
       </div>
       <div class="md-hint" style="margin-top:10px">
@@ -2268,15 +2308,15 @@ function RoomMCPModal({ room, servers, onClose, notify, refresh }) {
                 <span class="team-pick-name">
                   {plain(srv.name)}
                   {!srv.enabled ? <span class="tag muted" style="margin-left:6px">Disabled</span>
-                    : st && st.state === 'ok' ? <span class="tag green" style="margin-left:6px">Connected Â· {st.tools} tools</span>
+                    : st && st.state === 'ok' ? <span class="tag green" style="margin-left:6px">Connected · {st.tools} tools</span>
                     : st && st.state === 'error' ? <span class="tag orange" style="margin-left:6px">Failed</span>
-                    : <span class="tag" style="margin-left:6px">Checkingâ¦</span>}
+                    : <span class="tag" style="margin-left:6px">Checking…</span>}
                 </span>
-                <span class="team-pick-desc">{plain(srv.type)} Â· {plain(srv.type === 'http' ? srv.url : srv.command)}</span>
+                <span class="team-pick-desc">{plain(srv.type)} · {plain(srv.type === 'http' ? srv.url : srv.command)}</span>
               </span>
             </label>
             );
-          }) : <div class="empty">No MCP servers configured. Add them in Settings â MCP Servers.</div>}
+          }) : <div class="empty">No MCP servers configured. Add them in Settings MCP Servers.</div>}
         </div>
         <footer class="modal-foot">
           <button type="button" class="btn" onClick={onClose}>Cancel</button>
@@ -2361,7 +2401,7 @@ function MCPCard({ state, notify, refresh }) {
     try {
       const r = await api(`/api/mcp/${encodeURIComponent(srv.id)}/test`, { method: 'POST' });
       setStatus((prev) => ({ ...prev, [srv.id]: { state: 'ok', tools: r.tools } }));
-      notify(`Connection OK â ${r.tools} tool(s) exposed`);
+      notify(`Connection OK — ${r.tools} tool(s) exposed`);
     } catch (e) {
       setStatus((prev) => ({ ...prev, [srv.id]: { state: 'error' } }));
       notify('Test failed: ' + e.message);
@@ -2401,15 +2441,15 @@ function MCPCard({ state, notify, refresh }) {
                 {plain(srv.name)}
                 <span class="tag">{plain(srv.type)}</span>
                 {!srv.enabled ? <span class="tag muted">Disabled</span>
-                  : status[srv.id] && status[srv.id].state === 'ok' ? <span class="tag green">Connected Â· {status[srv.id].tools} tools</span>
+                  : status[srv.id] && status[srv.id].state === 'ok' ? <span class="tag green">Connected · {status[srv.id].tools} tools</span>
                   : status[srv.id] && status[srv.id].state === 'error' ? <span class="tag orange">Failed</span>
-                  : <span class="tag">Checkingâ¦</span>}
+                  : <span class="tag">Checking…</span>}
               </div>
               <div class="provider-url">{plain(srv.type === 'http' ? srv.url : srv.command + (srv.args && srv.args.length ? ' ' + srv.args.join(' ') : ''))}</div>
             </div>
             <div class="provider-actions">
               <button class="btn small" disabled={busyId === srv.id} onClick={() => test(srv)}>
-                {busyId === srv.id ? 'Testingâ¦' : 'Test'}
+                {busyId === srv.id ? 'Testing…' : 'Test'}
               </button>
               <button class="btn small" onClick={() => setForm({ ...srv, argsText: (srv.args || []).join('\n'), envText: fmtKV(srv.env), headersText: fmtKV(srv.headers) })}>
                 <Icon name="pencil" size={13} />Edit
@@ -2455,14 +2495,14 @@ function MCPCard({ state, notify, refresh }) {
                   </div>
                   <div class="field">
                     <label>Environment (KEY=VALUE per line)</label>
-                    <textarea rows="3" value={form.envText || ''} onInput={(e) => set('envText', e.currentTarget.value)} placeholder="GITHUB_TOKEN=â¦" />
+                    <textarea rows="3" value={form.envText || ''} onInput={(e) => set('envText', e.currentTarget.value)} placeholder="GITHUB_TOKEN=…" />
                   </div>
                 </>
               ) : (
                 <>
                   <div class="field">
                     <label>URL</label>
-                    <input required type="url" value={form.url || ''} onInput={(e) => set('url', e.currentTarget.value)} placeholder="https://â¦/mcp" />
+                    <input required type="url" value={form.url || ''} onInput={(e) => set('url', e.currentTarget.value)} placeholder="https://…/mcp" />
                   </div>
                   <div class="field">
                     <label>Bearer token (optional)</label>
@@ -2527,6 +2567,14 @@ export function SettingsPage({ state, notify, refresh }) {
   };
 
   const openPreset = (preset) => {
+    // The "Custom provider" preset is a template, not a fixed provider: it must
+    // never claim the literal id "custom", or a second custom endpoint would
+    // overwrite the first. Start blank so the id derives from the display name
+    // (and collides are auto-suffixed by ProviderModal).
+    if (preset.id === 'custom') {
+      setProviderModal({ initial: { ...preset, id: '', name: '' }, isNew: true });
+      return;
+    }
     const existing = (state.providers || []).find((p) => p.id === preset.id);
     setProviderModal(existing
       ? { initial: existing, isNew: false }
@@ -2651,11 +2699,11 @@ export function SettingsPage({ state, notify, refresh }) {
                 <div class="md-hint">
                   0 uses the server default (3). A malformed model response is re-sampled on the same
                   model first; rate limits rotate to the next fallback. Attempts = retries + 1, and an
-                  agent profile can chain one model per attempt (N retries â N + 1 model badges).
+                  agent profile can chain one model per attempt (N retries N + 1 model badges).
                 </div>
                 {Number(policy.maxRetries) === 1 ? (
                   <div class="md-hint" style="color:#ffce9e">
-                    Only 1 retry â a second glitch blocks the run. Use 2 or more.
+                    Only 1 retry — a second glitch blocks the run. Use 2 or more.
                   </div>
                 ) : null}
               </div>
@@ -2737,7 +2785,7 @@ export function SettingsPage({ state, notify, refresh }) {
             <label class="check">
               <input type="checkbox" checked={Boolean(policy.routeIntentsWithModel)}
                 onChange={(e) => setField('routeIntentsWithModel', e.currentTarget.checked)} />
-              <span>Routing intent dengan model (opsional â lebih akurat, tambah 1 request kecil per pesan)</span>
+              <span>Routing intent dengan model (opsional — lebih akurat, tambah 1 request kecil per pesan)</span>
             </label>
           </div>
         </div>
@@ -2781,6 +2829,7 @@ export function SettingsPage({ state, notify, refresh }) {
         <ProviderModal
           initial={providerModal.initial}
           isNew={providerModal.isNew}
+          existingIds={(state.providers || []).map((p) => p.id)}
           onClose={() => setProviderModal(null)}
           notify={notify}
           refresh={refresh}
@@ -2793,7 +2842,7 @@ export function SettingsPage({ state, notify, refresh }) {
 // SignalsPage shows the per-project Internal Signals graph: how it has grown
 // (daily usage) and which files this workspace's runs actually touched and
 // edited. The graph is learned natively at the tool layer, so this page is a
-// read-only window into what the agents have been converging on â no config.
+// read-only window into what the agents have been converging on — no config.
 export function SignalsPage() {
   const [report, setReport] = useState(null);
   const [err, setErr] = useState('');
@@ -2819,13 +2868,13 @@ export function SignalsPage() {
           <h1 class="page-title">Internal Signals</h1>
           <div class="page-sub">
             Foreman learns which files this workspace's runs actually read and edit, and keeps the graph
-            current with decay. Every agent consumes it as hot-files and via the <code>related</code> tool â
+            current with decay. Every agent consumes it as hot-files and via the <code>related</code> tool —
             so cold starts begin from what mattered last time instead of re-exploring.
           </div>
         </div>
       </div>
 
-      {loading && <div class="empty">Loading signalsâ¦</div>}
+      {loading && <div class="empty">Loading signals…</div>}
       {err && <div class="empty error">{plain(err)}</div>}
       {report && !loading && (
         <>
@@ -2838,7 +2887,7 @@ export function SignalsPage() {
           <div class="settings-card">
             <h3 class="card-title">Growth (daily touches)</h3>
             {activity.length === 0
-              ? <div class="empty">No activity yet â run a task that reads or edits files to grow the graph.</div>
+              ? <div class="empty">No activity yet — run a task that reads or edits files to grow the graph.</div>
               : (
                 <div class="sig-chart">
                   {activity.map((a) => (
