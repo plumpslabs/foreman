@@ -940,3 +940,58 @@ func TestProviderTestDefaultKeyName(t *testing.T) {
 		t.Fatalf("default key was not used, Authorization = %q", gotAuth)
 	}
 }
+
+// A key pasted into the field must be the one under test, even when the request
+// also names an account. The UI's per-row Test used to send keyName alone, so a
+// freshly pasted key reported the OLD stored key's validity — the "I pasted a
+// new key and it still says 401" trap.
+func TestProviderTestPrefersPastedKeyOverStored(t *testing.T) {
+	server, project := newTestServer(t)
+	handler := server.Handler()
+	base := "?project=" + url.QueryEscape(project)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer fresh-key" {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"data":[{"id":"model-a"}]}`))
+	}))
+	defer srv.Close()
+
+	// The provider has a stale, rejected key on disk.
+	cfgBody := fmt.Sprintf(`{"config":{"id":"probe","name":"Probe","protocol":"openai-compatible","baseUrl":%q,"models":["model-a"],"defaultModel":"model-a","enabled":true},"apiKey":"stale-key"}`, srv.URL)
+	req := httptest.NewRequest(http.MethodPost, "/api/providers"+base, bytes.NewBufferString(cfgBody))
+	req.Header.Set("Content-Type", "application/json")
+	req.RemoteAddr, req.Host = "127.0.0.1:1234", "127.0.0.1:8080"
+	res := httptest.NewRecorder()
+	handler.ServeHTTP(res, req)
+	if res.Code != http.StatusCreated {
+		t.Fatalf("create provider = %d: %s", res.Code, res.Body.String())
+	}
+
+	probe := func(body string) int {
+		tr := httptest.NewRequest(http.MethodPost, "/api/providers/test"+base, bytes.NewBufferString(body))
+		tr.Header.Set("Content-Type", "application/json")
+		tr.RemoteAddr, tr.Host = "127.0.0.1:1234", "127.0.0.1:8080"
+		tres := httptest.NewRecorder()
+		handler.ServeHTTP(tres, tr)
+		return tres.Code
+	}
+
+	cfgJSON := fmt.Sprintf(`{"id":"probe","name":"Probe","protocol":"openai-compatible","baseUrl":%q,"models":["model-a"],"defaultModel":"model-a","enabled":true}`, srv.URL)
+
+	// The stored key alone fails...
+	if code := probe(fmt.Sprintf(`{"config":%s,"keyName":"default"}`, cfgJSON)); code != http.StatusBadGateway {
+		t.Fatalf("stored key should fail with 502, got %d", code)
+	}
+	// ...but the pasted key must win over the stored one.
+	if code := probe(fmt.Sprintf(`{"config":%s,"keyName":"default","apiKey":"fresh-key"}`, cfgJSON)); code != http.StatusOK {
+		t.Fatalf("pasted key should be tested and pass, got %d", code)
+	}
+	// Testing with neither a pasted nor a stored key is a clear 422, not a 401.
+	if code := probe(fmt.Sprintf(`{"config":%s,"keyName":"missing"}`, cfgJSON)); code != http.StatusUnprocessableEntity {
+		t.Fatalf("missing key should be 422, got %d", code)
+	}
+}

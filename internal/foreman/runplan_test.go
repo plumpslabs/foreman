@@ -155,8 +155,12 @@ func TestRotationAttemptFloor(t *testing.T) {
 		{Provider: ProviderConfig{ID: "a"}, Keys: []RunKey{{Name: "1"}, {Name: "2"}}, Models: []string{"m"}},
 		{Provider: ProviderConfig{ID: "b"}, Keys: []RunKey{{Name: "1"}}, Models: []string{"m"}},
 	}})
-	if got := rot.attemptFloor(); got != 4 {
-		t.Fatalf("attemptFloor = %d, want 4 (3 keys + 2 stages - 1)", got)
+	// Stage a: 2 keys + 1 model - 1 = 2 attempts. Stage b: 1 key + 1 model - 1 = 1.
+	// 3 is also the number of distinct (key, model) positions, which is the
+	// ceiling a floor must never exceed — the old "keys + stages - 1" formula
+	// promised 4 and could not deliver it.
+	if got := rot.attemptFloor(); got != 3 {
+		t.Fatalf("attemptFloor = %d, want 3 (2 keys on stage a, 1 on stage b)", got)
 	}
 }
 
@@ -617,5 +621,114 @@ func TestBuildRunPlanGroupsStages(t *testing.T) {
 	}
 	if plan.Stages[2].Provider.ID != "alpha" || plan.Stages[2].Models[0] != "hand-typed" {
 		t.Fatalf("stage 2 = %+v, want alpha with the unknown model", plan.Stages[2])
+	}
+}
+
+// A rejected account must not come back when the model axis advances: another
+// model on the same endpoint would be rejected by the same credential.
+func TestRotationNextModelSkipsRetiredKeys(t *testing.T) {
+	rot := newRotation(RunPlan{Stages: []RunStage{{
+		Provider: ProviderConfig{ID: "A", Name: "A", DefaultModel: "a1"},
+		Keys:     []RunKey{{Name: "k1", Secret: "s1"}, {Name: "k2", Secret: "s2"}},
+		Models:   []string{"a1", "a2"},
+	}}})
+
+	// Retire both accounts while walking the first model.
+	rot.killCurrent()
+	if !rot.nextKeyInStage() {
+		t.Fatal("expected a second account")
+	}
+	rot.killCurrent()
+	if !rot.allKeysRejected() {
+		t.Fatal("both accounts should be retired")
+	}
+
+	// nextModel must not resurrect a dead account for the second model.
+	if rot.nextModel() {
+		st, k, model, _ := rot.position()
+		t.Fatalf("nextModel produced (%s, %s, %s) after every key was retired", st.Provider.ID, k.Name, model)
+	}
+}
+
+// A rate-limited account stays alive, so when the account after it is rejected
+// the walk must come back to it instead of stopping on the neighbour's 401.
+func TestRotationRewindsToLiveKeyAfterRejection(t *testing.T) {
+	rot := newRotation(RunPlan{Stages: []RunStage{{
+		Provider: ProviderConfig{ID: "A", Name: "A", DefaultModel: "m"},
+		Keys:     []RunKey{{Name: "quota", Secret: "s1"}, {Name: "revoked", Secret: "s2"}},
+		Models:   []string{"m"},
+	}}})
+
+	// Attempt 1 hits the quota account; a 429 keeps it alive and moves forward.
+	if !rot.nextKeyInStage() {
+		t.Fatal("expected the second account")
+	}
+	_, k, _, _ := rot.position()
+	if k.Name != "revoked" {
+		t.Fatalf("current key = %q, want revoked", k.Name)
+	}
+
+	// Attempt 2 is rejected: retire it, then rewind to the live account.
+	rot.killCurrent()
+	if rot.allKeysRejected() {
+		t.Fatal("the quota account is still alive, so not every key is rejected")
+	}
+	if !rot.rewindToLiveKey() {
+		t.Fatal("rewindToLiveKey should return to the live account")
+	}
+	_, k, _, ok := rot.position()
+	if !ok || k.Name != "quota" {
+		t.Fatalf("after rewind the position is %q (ok=%v), want quota", k.Name, ok)
+	}
+}
+
+// The attempt budget must leave room for the configured model chain even when
+// a provider has many accounts: four accounts used to consume the whole budget
+// before the second model could ever be reached.
+func TestRotationAttemptFloorLeavesRoomForModels(t *testing.T) {
+	for _, nkeys := range []int{2, 3, 4, 5} {
+		keys := make([]RunKey, nkeys)
+		for i := range keys {
+			keys[i] = RunKey{Name: "k", Secret: "s"}
+		}
+		rot := newRotation(RunPlan{Stages: []RunStage{{
+			Provider: ProviderConfig{ID: "A", Name: "A", DefaultModel: "a1"},
+			Keys:     keys,
+			Models:   []string{"a1", "a2"},
+		}}})
+		floor := rot.attemptFloor()
+		if floor <= nkeys {
+			t.Fatalf("%d keys + 2 models: floor %d leaves no attempt for the second model", nkeys, floor)
+		}
+	}
+}
+
+// Every attempt the floor promises must be walkable: the plan's floor may never
+// exceed the number of distinct (key, model) positions, or the loop would spin
+// on exhausted state.
+func TestRotationAttemptFloorIsReachable(t *testing.T) {
+	rot := newRotation(RunPlan{Stages: []RunStage{
+		{
+			Provider: ProviderConfig{ID: "A", Name: "A", DefaultModel: "a1"},
+			Keys:     []RunKey{{Name: "a1", Secret: "s1"}, {Name: "a2", Secret: "s2"}, {Name: "a3", Secret: "s3"}},
+			Models:   []string{"a1", "a2"},
+		},
+		{
+			Provider: ProviderConfig{ID: "B", Name: "B", DefaultModel: "b1"},
+			Keys:     []RunKey{{Name: "b1", Secret: "sb"}},
+			Models:   []string{"b1"},
+		},
+	}})
+
+	// Walk as a successful run would (never rotating) until the plan is spent.
+	positions := 1
+	for rot.nextKeyInStage() {
+		positions++
+	}
+	for rot.nextModel() {
+		positions++
+	}
+	if floor := rot.attemptFloor(); floor > positions {
+		t.Fatalf("attemptFloor = %d but only %d positions exist", floor, positions)
 	}
 }

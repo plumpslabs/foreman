@@ -515,7 +515,7 @@ attemptLoop:
 					_ = rt.store.AppendRoomNotice(room.ID, task.AgentName, "run.keys_exhausted", "🔑 "+lastErr.Error())
 					break attemptLoop
 				}
-				if !rot.nextKeyInStage() && !rot.nextStage() {
+				if !rot.nextKeyInStage() && !rot.rewindToLiveKey() && !rot.nextStage() {
 					break attemptLoop
 				}
 				keySwitched = true

@@ -1827,6 +1827,11 @@ function ProviderModal({ initial, isNew, existingIds = [], onClose, notify, refr
   // default key uses the "__default" slot).
   const [keyChecks, setKeyChecks] = useState({});
   const [revealed, setRevealed] = useState({});
+  // Inline editing: the account whose secret is being replaced, plus the new
+  // value. Without this the only way to change a stored key was delete + add,
+  // which also lost the account's name and position in the rotation.
+  const [editingKey, setEditingKey] = useState('');
+  const [editSecret, setEditSecret] = useState('');
 
   const set = (field, value) => setForm((prev) => ({ ...prev, [field]: value }));
   const models = modelsText.split(/[\n,]+/).map((m) => m.trim()).filter(Boolean);
@@ -1856,6 +1861,15 @@ function ProviderModal({ initial, isNew, existingIds = [], onClose, notify, refr
 
   const toggleKey = (name, enabled) => saveKey(name, '', enabled);
 
+  // Replace the stored secret of an existing account without touching its name
+  // or its place in the attempt order.
+  const saveEditedKey = async (name) => {
+    const secret = editSecret.trim();
+    if (!secret) { notify('Paste the new API key for this account'); return; }
+    const ok = await saveKey(name, secret, true);
+    if (ok) { setEditingKey(''); setEditSecret(''); notify('API key updated'); }
+  };
+
   // Show/Hide, Copy, and Test act on one stored key. `name` is the key's name
   // in storage ("default" for the legacy credential) and `alias` is the UI slot
   // (the default key renders as "__default").
@@ -1884,13 +1898,17 @@ function ProviderModal({ initial, isNew, existingIds = [], onClose, notify, refr
       notify(error.message || 'Could not copy — reveal it and copy manually');
     }
   };
-  const testKey = async (name, alias) => {
+  const testKey = async (name, alias, secret) => {
     const slot = alias || name;
     setKeyChecks((prev) => ({ ...prev, [slot]: { state: 'running', message: 'Testing…' } }));
     try {
+      // A key typed/pasted into the field is what the user wants checked, so it
+      // is sent along. Without it the server falls back to the stored value and
+      // reports the OLD key's validity — the "I pasted a new key and it still
+      // says 401" trap.
       await api('/api/providers/test', {
         method: 'POST',
-        body: JSON.stringify({ config: config(), keyName: name }),
+        body: JSON.stringify({ config: config(), keyName: name, apiKey: secret || '' }),
       });
       setKeyChecks((prev) => ({ ...prev, [slot]: { state: 'ok', message: 'Valid' } }));
       return 'ok';
@@ -1905,14 +1923,14 @@ function ProviderModal({ initial, isNew, existingIds = [], onClose, notify, refr
   // summary names exactly which accounts need attention.
   const testAllKeys = async () => {
     const targets = [];
-    if (initial?.hasApiKey) targets.push({ name: 'default', slot: '__default', label: 'Default key' });
+    if (initial?.hasApiKey || apiKey) targets.push({ name: 'default', slot: '__default', label: 'Default key', secret: apiKey });
     for (const k of keys) targets.push({ name: k.name, slot: k.name, label: k.name });
     if (!targets.length) { notify('No saved keys to test'); return; }
     setKeyBusy(true);
     const failed = [];
     try {
       for (const t of targets) {
-        if (await testKey(t.name, t.slot) === 'error') failed.push(t.label);
+        if (await testKey(t.name, t.slot, t.secret) === 'error') failed.push(t.label);
       }
     } finally {
       setKeyBusy(false);
@@ -2100,7 +2118,7 @@ function ProviderModal({ initial, isNew, existingIds = [], onClose, notify, refr
                 title="Copy key" aria-label="Copy key" disabled={!initial?.hasApiKey && !apiKey}>
                 <Icon name="copy" size={14} />
               </button>
-              <button type="button" class="key-icon" onClick={() => testKey('default', '__default')}
+              <button type="button" class="key-icon" onClick={() => testKey('default', '__default', apiKey)}
                 title="Test this key" aria-label="Test this key"
                 disabled={keyBusy || defaultKeyTesting || (!initial?.hasApiKey && !apiKey)}>
                 <Icon name={defaultKeyTesting ? 'refresh' : 'activity'} size={14} class={defaultKeyTesting ? 'spin' : ''} />
@@ -2108,8 +2126,9 @@ function ProviderModal({ initial, isNew, existingIds = [], onClose, notify, refr
             </div>
             <div class="field-note">
               <span class="field-note-lead">Fallback account</span>
-              — used when no account below is switched on. A rejected key (401/403) is retired and the next
-              account is tried; a rate-limited key (429) is skipped for the rest of the run.
+              — used when no account below is switched on. A rejected key (401/403) is retired for the rest of
+              the run and the next account is tried; a rate-limited key (429) is skipped for now but stays
+              available, so it can be used again if the run needs another attempt.
             </div>
             {keyChecks.__default && keyChecks.__default.state !== 'running' ? (
               <div class={`key-check ${keyChecks.__default.state}`}>
@@ -2161,25 +2180,51 @@ function ProviderModal({ initial, isNew, existingIds = [], onClose, notify, refr
                             </button>
                           </div>
                           <div class="key-field key-field-compact">
-                            <input type={revealed[k.name] ? 'text' : 'password'} readonly
-                              spellcheck={false} value={revealed[k.name] || k.preview || '••••'} />
-                            <button type="button" class="key-icon" onClick={() => toggleReveal(k.name)}
-                              title={revealed[k.name] ? 'Hide key' : 'Show key'}
-                              aria-label={revealed[k.name] ? 'Hide key' : 'Show key'}>
-                              <Icon name={revealed[k.name] ? 'eye-off' : 'eye'} size={14} />
-                            </button>
-                            <button type="button" class="key-icon" onClick={() => copyKey(k.name)}
-                              title="Copy key" aria-label="Copy key">
-                              <Icon name="copy" size={14} />
-                            </button>
-                            <button type="button" class="key-icon" disabled={keyBusy || testing}
-                              onClick={() => testKey(k.name)} title="Test this key" aria-label="Test this key">
-                              <Icon name={testing ? 'refresh' : 'activity'} size={14} class={testing ? 'spin' : ''} />
-                            </button>
-                            <button type="button" class="key-icon danger" disabled={keyBusy}
-                              onClick={() => deleteKey(k.name)} title="Remove account" aria-label="Remove account">
-                              <Icon name="trash" size={14} />
-                            </button>
+                            {editingKey === k.name ? (
+                              <>
+                                <input type={revealed[k.name] ? 'text' : 'password'} autofocus
+                                  autocomplete="new-password" spellcheck={false}
+                                  placeholder="Paste the new key for this account"
+                                  value={editSecret} onInput={(e) => setEditSecret(e.currentTarget.value)} />
+                                <button type="button" class="key-icon" disabled={keyBusy}
+                                  onClick={() => saveEditedKey(k.name)}
+                                  title="Save this account's key" aria-label="Save this account's key">
+                                  <Icon name={keyBusy ? 'refresh' : 'check'} size={14} class={keyBusy ? 'spin' : ''} />
+                                </button>
+                                <button type="button" class="key-icon" disabled={keyBusy}
+                                  onClick={() => { setEditingKey(''); setEditSecret(''); }}
+                                  title="Cancel" aria-label="Cancel">
+                                  <Icon name="x" size={14} />
+                                </button>
+                              </>
+                            ) : (
+                              <>
+                                <input type={revealed[k.name] ? 'text' : 'password'} readonly
+                                  spellcheck={false} value={revealed[k.name] || k.preview || '••••'} />
+                                <button type="button" class="key-icon" onClick={() => toggleReveal(k.name)}
+                                  title={revealed[k.name] ? 'Hide key' : 'Show key'}
+                                  aria-label={revealed[k.name] ? 'Hide key' : 'Show key'}>
+                                  <Icon name={revealed[k.name] ? 'eye-off' : 'eye'} size={14} />
+                                </button>
+                                <button type="button" class="key-icon" onClick={() => copyKey(k.name)}
+                                  title="Copy key" aria-label="Copy key">
+                                  <Icon name="copy" size={14} />
+                                </button>
+                                <button type="button" class="key-icon" disabled={keyBusy || testing}
+                                  onClick={() => testKey(k.name)} title="Test this key" aria-label="Test this key">
+                                  <Icon name={testing ? 'refresh' : 'activity'} size={14} class={testing ? 'spin' : ''} />
+                                </button>
+                                <button type="button" class="key-icon" disabled={keyBusy}
+                                  onClick={() => { setEditingKey(k.name); setEditSecret(''); setRevealed((prev) => { const next = { ...prev }; delete next[k.name]; return next; }); }}
+                                  title="Replace this account's key" aria-label="Replace this account's key">
+                                  <Icon name="pencil" size={14} />
+                                </button>
+                                <button type="button" class="key-icon danger" disabled={keyBusy}
+                                  onClick={() => deleteKey(k.name)} title="Remove account" aria-label="Remove account">
+                                  <Icon name="trash" size={14} />
+                                </button>
+                              </>
+                            )}
                           </div>
                           {chk && chk.state !== 'running' ? (
                             <div class={`key-check ${chk.state}`}>
@@ -2208,7 +2253,7 @@ function ProviderModal({ initial, isNew, existingIds = [], onClose, notify, refr
                 <div class="field-note">
                   <span class="field-note-lead">Attempt order</span>
                   — Foreman tries accounts top to bottom. When a key is rejected (401/403) it is retired and
-                  the next account is used; a rate-limited key (429) is skipped for the rest of that run.
+                  the next account is used; a rate-limited key (429) is skipped for now but stays available.
                   Model failures (503, overload, missing model) switch <em>models</em> instead and keep the
                   same account. Turn an account off to drop it from the rotation.
                 </div>
@@ -2860,11 +2905,12 @@ export function SettingsPage({ state, notify, refresh }) {
                 <input type="number" min="0" max="5" value={policy.maxRetries}
                   onInput={(e) => setField('maxRetries', e.currentTarget.value, true)} />
                 <div class="md-hint">
-                  0 uses the server default (3). A malformed model response is re-sampled on the same
-                  model first; a rejected key (401/403) rotates to the next account; rate limits try
-                  the next account, then the next model; overloads and missing models rotate the model.
-                  Attempts = retries + 1, raised to the number of accounts so every account is tried
-                  once. An agent profile can chain one model per attempt, across providers.
+                  0 uses the server default (3). This is the retry budget for one run, not a
+                  per-provider switch: attempts = max(retries + 1, accounts + models − 1), so every
+                  account and every model in the chain gets at least one try. A malformed response is
+                  re-sampled on the same model first; a rejected key (401/403) is retired and the next
+                  account is tried; a rate limit (429) tries the next account but keeps the key; an
+                  overload or missing model (503, 529) rotates the model and keeps the account.
                 </div>
                 {Number(policy.maxRetries) === 1 ? (
                   <div class="md-hint" style="color:#ffce9e">

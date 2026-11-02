@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -461,5 +462,45 @@ func TestParseAgentQuestions(t *testing.T) {
 	}
 	if len(questions[0].Options) != 2 || questions[0].Options[1] != "No, stop" {
 		t.Fatalf("options = %#v", questions[0].Options)
+	}
+}
+
+// An out-of-range policy value must name the field and its allowed range
+// instead of answering everything with one opaque message.
+func TestUpdateSettingsNamesTheInvalidField(t *testing.T) {
+	store, err := openStoreForTest(t, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	base := store.Snapshot().Settings
+
+	for _, tc := range []struct {
+		name   string
+		mutate func(*Settings)
+		want   string
+	}{
+		{"max retries", func(s *Settings) { s.MaxRetries = 9 }, "Max retries must be between 0 and 5"},
+		{"action rounds", func(s *Settings) { s.MaxIterations = 999 }, "Action rounds per run must be between 1 and 200"},
+		{"timeout", func(s *Settings) { s.MaxExecutionSeconds = 3 }, "Run timeout (seconds) must be between 10 and 3600"},
+		{"budget", func(s *Settings) { s.BudgetUSD = -1 }, "Budget USD must be zero or a positive number"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			next := base
+			tc.mutate(&next)
+			_, err := store.UpdateSettings(next)
+			if err == nil {
+				t.Fatalf("%s out of range should fail", tc.name)
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("error = %q, want it to mention %q", err.Error(), tc.want)
+			}
+		})
+	}
+
+	// A valid value still saves.
+	ok := base
+	ok.MaxRetries = 2
+	if _, err := store.UpdateSettings(ok); err != nil {
+		t.Fatalf("valid settings should save: %v", err)
 	}
 }

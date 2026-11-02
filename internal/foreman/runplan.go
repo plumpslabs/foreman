@@ -211,15 +211,56 @@ func (r *rotation) nextKeyInStage() bool {
 	return false
 }
 
+// firstLiveKey returns the index of the first credential in a stage that has
+// not been retired, or false when every credential in that stage is dead.
+func (r *rotation) firstLiveKey(stage int) (int, bool) {
+	if stage < 0 || stage >= len(r.stages) {
+		return 0, false
+	}
+	for k := 0; k < len(r.stages[stage].Keys); k++ {
+		if !r.dead[[2]int{stage, k}] {
+			return k, true
+		}
+	}
+	return 0, false
+}
+
+// rewindToLiveKey returns to the first live credential of the current stage.
+//
+// It exists for the case where the walk moved forward onto an account the
+// provider then rejected. The account it left behind was only rate-limited
+// (429), which keeps it alive, so stopping with the neighbour's 401 would tell
+// the user the whole provider is dead when it is not. Rewinding is only used
+// on a credential failure; a quota failure always moves forward, which is what
+// keeps the two from bouncing a run between the same two accounts.
+func (r *rotation) rewindToLiveKey() bool {
+	if r.stage >= len(r.stages) {
+		return false
+	}
+	k, ok := r.firstLiveKey(r.stage)
+	if !ok {
+		return false
+	}
+	r.key = k
+	return true
+}
+
 // nextModel moves to the next model in the current stage, or to the first
 // attempt of the next stage. Reports whether an attempt is available.
+//
+// The account is reset to the first live credential of the stage: a retired
+// credential must never serve a later model, because the provider rejected it
+// and another model on the same endpoint will reject it too.
 func (r *rotation) nextModel() bool {
 	if r.stage >= len(r.stages) {
 		return false
 	}
 	if r.model+1 < len(r.stages[r.stage].Models) {
-		r.model++
-		return true
+		if k, ok := r.firstLiveKey(r.stage); ok {
+			r.model++
+			r.key = k
+			return true
+		}
 	}
 	return r.nextStage()
 }
@@ -260,15 +301,24 @@ func (r *rotation) allKeysRejected() bool {
 }
 
 // attemptFloor is the minimum number of attempts this plan needs so that no
-// account and no stage is left untried: a 3-key provider followed by a second
-// provider must not stop before reaching the second endpoint just because Max
-// retries is low.
+// account, no model and no stage is left untried: a 3-key provider followed by
+// a second provider must not stop before reaching the second endpoint just
+// because Max retries is low, and a provider with 4 accounts and 2 models must
+// still reach the second model.
+//
+// Each stage contributes (keys + models - 1) attempts: every credential once,
+// plus one attempt per additional model. Counting models matters because the
+// per-account floor used to grow with the key count alone, so four or more
+// accounts silently made the configured model chain unreachable.
 func (r *rotation) attemptFloor() int {
-	keys := 0
+	floor := 0
 	for _, s := range r.stages {
-		keys += len(s.Keys)
+		n := len(s.Keys) + len(s.Models) - 1
+		if n < 1 {
+			n = 1
+		}
+		floor += n
 	}
-	floor := keys + len(r.stages) - 1
 	if floor < 1 {
 		floor = 1
 	}

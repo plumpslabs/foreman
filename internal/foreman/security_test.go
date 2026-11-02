@@ -61,11 +61,11 @@ func TestProviderTestSurfacesAuthError(t *testing.T) {
 	defer srv.Close()
 
 	cfg := ProviderConfig{
-		ID:            "zro-test",
-		Name:          "Zro (MoonMath)",
-		Protocol:      "openai-compatible",
-		BaseURL:       srv.URL,
-		DefaultModel:  "deepseek-v4.1-flash",
+		ID:           "zro-test",
+		Name:         "Zro (MoonMath)",
+		Protocol:     "openai-compatible",
+		BaseURL:      srv.URL,
+		DefaultModel: "deepseek-v4.1-flash",
 	}
 	err := testProvider(context.Background(), cfg, "sk-invalid")
 	if err == nil {
@@ -310,5 +310,58 @@ func TestProviderKeyToggleKeepsSecret(t *testing.T) {
 	// creating a key row that can never run.
 	if err := store.SaveProviderKey("zro", "Zro 2", "", true); err == nil {
 		t.Fatal("adding an account without an API key should fail")
+	}
+}
+
+// Replacing an account's key must keep the account's name and its position in
+// the rotation. Delete-then-add used to be the only path, which reordered the
+// account and reset its name.
+func TestProviderKeyReplaceKeepsNameAndOrder(t *testing.T) {
+	store, err := openStoreForTest(t, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := ProviderConfig{
+		ID: "zro", Name: "Zro", Protocol: "openai-compatible",
+		BaseURL: "https://zro.moonmath.ai/v1", DefaultModel: "m", Enabled: true,
+	}
+	if _, err := store.SaveProvider(cfg, ""); err != nil {
+		t.Fatal(err)
+	}
+	for _, kv := range []struct{ name, secret string }{
+		{"first", "secret-one"}, {"second", "secret-two"}, {"third", "secret-three"},
+	} {
+		if err := store.SaveProviderKey("zro", kv.name, kv.secret, true); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// Replace the middle account's secret in place.
+	if err := store.SaveProviderKey("zro", "second", "secret-two-rotated", true); err != nil {
+		t.Fatal(err)
+	}
+
+	saved := store.ProvidersForAPI()[0]
+	var names []string
+	for _, k := range saved.Keys {
+		names = append(names, k.Name)
+	}
+	if len(names) != 3 || names[0] != "first" || names[1] != "second" || names[2] != "third" {
+		t.Fatalf("account order changed after a key replace: %v", names)
+	}
+	if got, _ := store.loadProviderKey(store.Snapshot().ProjectPath, "zro", "second"); got != "secret-two-rotated" {
+		t.Fatalf("stored secret = %q, want the replacement", got)
+	}
+	if got, _ := store.loadProviderKey(store.Snapshot().ProjectPath, "zro", "first"); got != "secret-one" {
+		t.Fatalf("replacing one account must not touch another, got %q", got)
+	}
+
+	// The rotation must still see three distinct accounts in the same order.
+	keys, err := store.runKeysLocked(saved)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(keys) != 3 || keys[1].Secret != "secret-two-rotated" {
+		t.Fatalf("rotation pool = %+v, want the rotated secret in slot 2", keys)
 	}
 }

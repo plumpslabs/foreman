@@ -694,18 +694,28 @@ func (s *Server) testProvider(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusUnprocessableEntity, err.Error())
 		return
 	}
-	secret := req.APIKey
-	if strings.TrimSpace(secret) == "" && req.KeyName != "" {
-		// Test one named account (the UI's per-key "Test" button). The literal
-		// name "default" addresses the legacy/default credential stored under the
-		// provider id alone, so the default key row can be tested too.
+	// A pasted key always wins: the user is testing the value in the field, not
+	// the one already on disk. The per-key Test button sends only keyName, so a
+	// blank apiKey falls back to the stored credential for that account.
+	secret := strings.TrimSpace(req.APIKey)
+	switch {
+	case secret != "":
+		// Testing what the user typed (or pasted) right now.
+	case strings.TrimSpace(req.KeyName) != "":
+		// Test one named account. The literal name "default" addresses the
+		// legacy/default credential stored under the provider id alone, so the
+		// default key row can be tested too.
 		keyName := req.KeyName
 		if keyName == "default" {
 			keyName = ""
 		}
 		secret, _ = s.store.loadProviderKey(s.root, req.Config.ID, keyName)
-	} else {
-		secret = s.resolveProviderSecret(req.Config.ID, req.APIKey)
+	default:
+		secret = s.resolveProviderSecret(req.Config.ID, "")
+	}
+	if strings.TrimSpace(secret) == "" {
+		writeError(w, http.StatusUnprocessableEntity, "no API key to test — paste one first")
+		return
 	}
 	if err := testProvider(r.Context(), req.Config, secret); err != nil {
 		writeError(w, http.StatusBadGateway, err.Error())

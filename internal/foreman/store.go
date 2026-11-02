@@ -1889,8 +1889,31 @@ func (s *Store) UpdateSettings(settings Settings) (Settings, error) {
 	if settings.CompactionRetention == 0 {
 		settings.CompactionRetention = 24
 	}
-	if settings.MaxConcurrentRuns < 1 || settings.MaxConcurrentRuns > 8 || settings.MaxWorkersPerTask < 1 || settings.MaxWorkersPerTask > 8 || settings.MaxDelegationDepth < 0 || settings.MaxDelegationDepth > 5 || settings.MaxRetries < 0 || settings.MaxRetries > 5 || settings.MaxIterations < 1 || settings.MaxIterations > 200 || settings.ReadOnlyBudget < 1 || settings.ReadOnlyBudget > 500 || settings.CompactionThreshold < 1000 || settings.CompactionThreshold > 1000000 || settings.CompactionRetention < 1 || settings.CompactionRetention > 200 || settings.MaxExecutionSeconds < 10 || settings.MaxExecutionSeconds > 3600 || settings.BudgetUSD < 0 || math.IsNaN(settings.BudgetUSD) || math.IsInf(settings.BudgetUSD, 0) {
-		return Settings{}, errors.New("policy values are outside supported limits")
+	// Validate each limit on its own so the error names the field the user has
+	// to fix. One combined condition used to answer every out-of-range value
+	// with the same opaque "policy values are outside supported limits".
+	type limit struct {
+		name     string
+		value    int
+		min, max int
+	}
+	for _, l := range []limit{
+		{"Max concurrent runs", settings.MaxConcurrentRuns, 1, 8},
+		{"Max workers per task", settings.MaxWorkersPerTask, 1, 8},
+		{"Max delegation depth", settings.MaxDelegationDepth, 0, 5},
+		{"Max retries", settings.MaxRetries, 0, 5},
+		{"Action rounds per run", settings.MaxIterations, 1, 200},
+		{"Read-only budget", settings.ReadOnlyBudget, 1, 500},
+		{"Compaction token threshold", settings.CompactionThreshold, 1000, 1000000},
+		{"Compaction retention", settings.CompactionRetention, 1, 200},
+		{"Run timeout (seconds)", settings.MaxExecutionSeconds, 10, 3600},
+	} {
+		if l.value < l.min || l.value > l.max {
+			return Settings{}, fmt.Errorf("%s must be between %d and %d (got %d)", l.name, l.min, l.max, l.value)
+		}
+	}
+	if settings.BudgetUSD < 0 || math.IsNaN(settings.BudgetUSD) || math.IsInf(settings.BudgetUSD, 0) {
+		return Settings{}, fmt.Errorf("Budget USD must be zero or a positive number (got %v)", settings.BudgetUSD)
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
