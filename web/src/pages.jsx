@@ -4,6 +4,7 @@ import { Icon } from './icons.jsx';
 import { Markdown } from './markdown.jsx';
 import { ChangesView, parseDiff, mergeFiles } from './diff.jsx';
 import { PlanGraph } from './plan.jsx';
+import { GitPanel } from './git.jsx';
 import { AgentAvatar, findAgent } from './avatar.jsx';
 
 const plain = (s) => String(s ?? '');
@@ -739,10 +740,11 @@ export function RoomDetailHost({ room, state, notify, setModal, runTask, refresh
     } catch { setRoomJournal([]); }
   };
 
+  // Git tab: <GitPanel> loads the repository snapshot itself on mount.
+
   const toggleInvite = (id) => setInvited((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
   const roomMcpNames = (state.mcpServers || []).filter((s) => (room.mcpServerIds || []).includes(s.id)).map((s) => s.name);
-  const [contractFile, setContractFile] = useState('');
-  useEffect(() => {
+  const [contractFile, setContractFile] = useState('');  useEffect(() => {
     let alive = true;
     api('/api/contract').then((d) => { if (alive && d?.found) setContractFile(d.file || ''); }).catch(() => {});
     return () => { alive = false; };
@@ -783,10 +785,10 @@ export function RoomDetailHost({ room, state, notify, setModal, runTask, refresh
               <Icon name="message-square" />Chat
             </button>
             <button class={`room-tab ${tab === 'board' ? 'active' : ''}`} onClick={() => setTab('board')}>
-              <Icon name="kanban" />Kanban{roomTasks.length ? <span class="tag" style="margin-left:4px">{roomTasks.length}</span> : null}
+              <Icon name="kanban" />Board{roomTasks.length ? <span class="tag" style="margin-left:4px">{roomTasks.length}</span> : null}
             </button>
-            <button class={`room-tab ${tab === 'plan' ? 'active' : ''}`} onClick={() => setTab('plan')}>
-              <Icon name="git-branch" />Plan
+            <button class={`room-tab ${tab === 'git' ? 'active' : ''}`} onClick={() => setTab('git')}>
+              <Icon name="git-branch" />Git
             </button>
             <button class={`room-tab ${tab === 'changes' ? 'active' : ''}`} onClick={() => setTab('changes')}>
               <Icon name="git-diff" />Changes{diffFiles.length ? <span class="tag" style="margin-left:4px">{diffFiles.length}</span> : null}
@@ -1066,47 +1068,34 @@ export function RoomDetailHost({ room, state, notify, setModal, runTask, refresh
 
           {tab === 'board' && (
             <div class="room-view active">
-              <Board roomId={room.id} tasks={roomTasks} runTask={runTask} setModal={setModal} refresh={refresh} />
-            </div>
-          )}
-
-          {tab === 'plan' && (
-            <div class="room-view active">
-              <div class="tab-scroll">
-                <div style="display:flex;justify-content:space-between;align-items:center">
-                  <div>
-                    <div class="section-title">{roomPlan ? plain(roomPlan.title || 'Plan') : 'Task graph'}</div>
-                    <div class="section-note" style="margin-top:5px">
-                      Dependencies determine when workers can be spawned. Parallel work is scheduled only when safe.
-                    </div>
+              <div class="board-page">
+                {/* Plan document + dependency graph live on top of the board:
+                    one place answers "what's the plan, what's blocked, what's
+                    where" without switching tabs. */}
+                {roomPlan?.markdown ? (
+                  <details class="panel board-plan-doc">
+                    <summary>
+                      <Icon name="file" size={14} />
+                      <span>{plain(roomPlan.title || 'Plan')}</span>
+                      {roomPlan.tier && <span class="tag blue" style="text-transform:uppercase">{plain(roomPlan.tier)} tier</span>}
+                    </summary>
+                    <div style="margin-top:10px"><Markdown text={roomPlan.markdown} /></div>
+                  </details>
+                ) : null}
+                {roomTasks.length ? (
+                  <div class="panel plan-graph-panel">
+                    <PlanGraph tasks={roomTasks} onOpenTask={(t) => setModal({ kind: 'task-detail', roomId: room.id, task: t })} />
                   </div>
-                  {roomPlan && roomPlan.tier && (
-                    <span class="tag blue" style="text-transform:uppercase">{plain(roomPlan.tier)} tier</span>
-                  )}
-                </div>
-
-                {roomPlan && roomPlan.markdown && (
-                  <div class="panel" style="margin-top:16px;padding:16px">
-                    <Markdown text={roomPlan.markdown} />
-                  </div>
-                )}
-
-                <div class="panel plan-graph-panel">
-                  {roomTasks.length
-                    ? <PlanGraph tasks={roomTasks} onOpenTask={(t) => setModal({ kind: 'task-detail', roomId: room.id, task: t })} />
-                    : <div class="empty" style="border:0;margin:14px">No tasks yet. Add tasks from the Kanban tab.</div>}
-                </div>
-                <div class="panel" style="margin-top:14px">
-                  <div class="section-title">Scheduling rationale</div>
-                  <p class="section-note" style="line-height:1.8;margin-top:8px">
-                    The main agent handles coordination and final synthesis. Independent read-only analysis can run in
-                    parallel. Code changes wait for findings to reduce conflicts and unnecessary work. An arrow means
-                    the target card waits for the source card to be done.
-                  </p>
-                </div>
+                ) : null}
+                <Board roomId={room.id} tasks={roomTasks} runTask={runTask} setModal={setModal} refresh={refresh} />
               </div>
             </div>
           )}
+
+          {tab === 'git' && (
+            <GitPanel roomId={room.id} notify={notify} refresh={refresh} />
+          )}
+
 
           {tab === 'changes' && (
             <div class="room-view active">

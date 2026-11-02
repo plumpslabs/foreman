@@ -1491,14 +1491,5 @@ func requestCommitApproval(ctx adkToolContext, args gitOpsArgs) (map[string]any,
 // runGitCommit stages the workspace and commits. It is shared by the tool's
 // approval path so the commit a human approved is exactly the commit that runs.
 func runGitCommit(workspace, message string) (string, error) {
-	if strings.TrimSpace(message) == "" {
-		message = "foreman: update"
-	}
-	staged := exec.Command("git", "add", "-A")
-	staged.Dir = workspace
-	_ = staged.Run()
-	cmd := exec.Command("git", "commit", "-m", message)
-	cmd.Dir = workspace
-	out, err := cmd.CombinedOutput()
-	return strings.TrimSpace(string(out)), err
+	return runGitCommitRobust(workspace, message)
 }

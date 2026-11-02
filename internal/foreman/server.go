@@ -77,6 +77,9 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("PUT /api/settings", s.updateSettings)
 	mux.HandleFunc("POST /api/skills", s.saveSkill)
 	mux.HandleFunc("DELETE /api/skills/{skillID}", s.deleteSkill)
+	mux.HandleFunc("GET /api/rooms/{roomID}/git", s.getRoomGit)
+	mux.HandleFunc("GET /api/rooms/{roomID}/git/diff", s.getRoomGitDiff)
+	mux.HandleFunc("POST /api/rooms/{roomID}/git/prepare", s.prepareRoomGit)
 	mux.HandleFunc("GET /api/rooms/{roomID}/plan", s.getRoomPlan)
 	mux.HandleFunc("PUT /api/rooms/{roomID}/plan", s.saveRoomPlan)
 	mux.HandleFunc("GET /api/rooms/{roomID}/artifacts", s.listRoomArtifacts)
@@ -978,6 +981,55 @@ func NewHTTPServer(addr string, handler http.Handler) *http.Server {
 		IdleTimeout:       60 * time.Second,
 		MaxHeaderBytes:    1 << 20,
 	}
+}
+
+// getRoomGit returns a read-only snapshot of the workspace repository so the
+// room's Git panel can show the current branch, HEAD, dirty files, and recent
+// commits without shelling out from the browser.
+func (s *Server) getRoomGit(w http.ResponseWriter, r *http.Request) {
+	if err := s.verifyProject(r.URL.Query().Get("project")); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	snapshot, err := GitSnapshot(s.root)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	// Report the room's dedicated branch even when it is not checked out, so a
+	// user who switches away can always return to this room's work.
+	writeJSON(w, http.StatusOK, snapshot)
+}
+
+// getRoomGitDiff returns the unified diff of the workspace's uncommitted
+// changes so the room's Git panel can show what is about to be committed.
+func (s *Server) getRoomGitDiff(w http.ResponseWriter, r *http.Request) {
+	if err := s.verifyProject(r.URL.Query().Get("project")); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	diff, err := GitDiffWorkingTree(s.root)
+	if err != nil {
+		writeError(w, http.StatusConflict, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, diff)
+}
+
+// prepareRoomGit switches the workspace onto the room's dedicated branch (or
+// creates it) so the room's work stays off the user's main branch. Idempotent.
+func (s *Server) prepareRoomGit(w http.ResponseWriter, r *http.Request) {
+	roomID := r.PathValue("roomID")
+	if err := s.verifyProject(r.URL.Query().Get("project")); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	branch, err := PrepareRoomBranch(s.root, roomID)
+	if err != nil {
+		writeError(w, http.StatusConflict, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"branch": branch})
 }
 
 func (s *Server) getRoomPlan(w http.ResponseWriter, r *http.Request) {
