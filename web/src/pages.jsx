@@ -1700,52 +1700,6 @@ export function RunsPage({ state, cancelRun, runTask }) {
 
 const PROVIDER_PRESETS = [
   {
-    // Self-hosted Bifrost gateway (Tailscale-only). Models are namespaced
-    // <provider>/<model>, so one endpoint fronts CodeBuddy, TokenHarbor,
-    // Cline, OVH, Kilo, LLM7, OpenCode, FreeCode and Mercury.
-    id: 'gateway', name: 'Gateway (Bifrost)', protocol: 'openai-compatible',
-    baseUrl: 'http://100.104.20.32:8080/v1',
-    models: [
-      // CodeBuddy [CB] — server account, fastest tier
-      'codebuddy/glm-5.2', 'codebuddy/glm-5.3', 'codebuddy/glm-5.1', 'codebuddy/glm-5v-turbo',
-      'codebuddy/kimi-k2.7', 'codebuddy/kimi-k2.6', 'codebuddy/kimi-k2.5', 'codebuddy/kimi-k3',
-      'codebuddy/deepseek-v4.1-flash', 'codebuddy/deepseek-v4.1-flash-sg',
-      'codebuddy/hy3', 'codebuddy/hy4-preview',
-      'codebuddy/minimax-m3', 'codebuddy/minimax-m3.1-flash',
-      'codebuddy/fast-model', 'codebuddy/auto',
-      // FreeCode [FC]
-      'freecode/free',
-      // OpenCode free [OC] — keyless, slow (28-59s)
-      'opencode/beam-free', 'opencode/flint-40b-free',
-      'opencode/nemotron-3.5-lightning-free', 'opencode/nemotron-3.5-super-vl-free',
-      'opencode/deepseek-v4.1-flash-free', 'opencode/glm-5.3-flash-free',
-      'opencode/mimo-v2.6-flash-free', 'opencode/big-pickle',
-      // TokenHarbor [TH] — only the :free pool is free
-      'tokenharbor/mimo-v2.6-flash:free', 'tokenharbor/mimo-v2.5:free',
-      'tokenharbor/deepseek-v4.1-flash:free', 'tokenharbor/deepseek-v4-flash:free',
-      // LLM7 [LM] — keyless anon
-      'llm7/gpt-oss:20b', 'llm7/glm-5.3', 'llm7/kimi-k2.7-code',
-      'llm7/mistral-Nemo-Instruct-2407', 'llm7/nemotron-3-nano:30b',
-      'llm7/liquid/lfm-2.5-2.6b:free', 'llm7/nvidia/nemotron-3.5-lightning:free',
-      'llm7/cohere/north-mini-code:free', 'llm7/gpt-6-luna', 'llm7/deepseek-v4.1-flash',
-      // OVHcloud [OVH] — keyless EU
-      'ovh/gpt-oss-20b', 'ovh/gpt-oss-120b', 'ovh/Meta-Llama-3_3-70B-Instruct',
-      'ovh/Mistral-Small-3.2-24B-Instruct-2506', 'ovh/Qwen3.5-9B', 'ovh/Qwen3.8-27B',
-      'ovh/Qwen2.5-VL-72B-Instruct',
-      // Kilo [KL] — keyless
-      'kilo/kilo-auto/free', 'kilo/kilo-auto/efficient', 'kilo/kilo-auto/balanced',
-      'kilo/kilo-auto/small', 'kilo/reflection/beam-free',
-      'kilo/nvidia/nemotron-3.5-lightning:free', 'kilo/upstage/solar-mini4',
-      'kilo/cohere/north-mini-code:free', 'kilo/openrouter/free',
-      // Cline [CL] — server accounts, auto-rotate
-      'cline/reflection/beam-1.0-501b-a23b', 'cline/nvidia/nemotron-3.5-super-vl:free',
-      'cline/nvidia/nemotron-3.5-lightning:free', 'cline/upstage/solar-mini4',
-      // Mercury [MER] — needs its own API key on the server
-      'mercury/mercury-3', 'mercury/mercury-coder', 'mercury/mercury-2',
-    ],
-    note: 'Self-hosted Bifrost gateway over Tailscale. One virtual key fronts every provider. Model ids are <provider>/<model>; /v1/models is empty by design, so ids are explicit.',
-  },
-  {
     id: 'tokenharbor', name: 'TokenHarbor', protocol: 'openai-compatible',
     baseUrl: 'https://tokenharbor.ai/v1',
     models: ['deepseek-v4.1-flash:free', 'claude-sonnet-5', 'gpt-6-astra'],
@@ -2318,7 +2272,7 @@ function ProviderModal({ initial, isNew, existingIds = [], onClose, notify, refr
               </button>
             </div>
             <textarea class="code-area" style="min-height:130px"
-              placeholder={'One model id per line, e.g.\ngateway/opencode/glm-5.3-flash-free\nclaude-sonnet-5'}
+              placeholder={'One model id per line, e.g.\ndeepseek-v4.1-flash\nclaude-sonnet-5'}
               value={modelsText} onInput={(e) => setModelsText(e.currentTarget.value)} />
             <div class="md-hint">
               {defaultModel ? `Default model: ${defaultModel}` : 'Add at least one model id, then save.'}
