@@ -2077,7 +2077,10 @@ function ProviderModal({ initial, isNew, existingIds = [], onClose, notify, refr
       });
       const found = result.models || [];
       if (!found.length) {
-        setTest({ state: 'error', message: 'The provider returned no models' });
+        // An empty list is expected for curated gateways (e.g. self-hosted
+        // Bifrost lists nothing from /v1/models by design) — the model ids the
+        // form already carries are the real source of truth.
+        setTest({ state: 'error', message: 'The endpoint returned no model list — that is normal for gateways that hide discovery (e.g. Bifrost). Keep the pre-filled model ids and just save; "Test connection" verifies the real thing.' });
       } else {
         setModelsText(found.join('\n'));
         setTest({ state: 'ok', message: `Found ${found.length} models · first is the default` });
@@ -2309,7 +2312,7 @@ function ProviderModal({ initial, isNew, existingIds = [], onClose, notify, refr
           <div class="field">
             <div class="field-label-row">
               <label>Models (one per line · first is the default)</label>
-              <button type="button" class="btn small" disabled={discovering} onClick={discover}>
+              <button type="button" class="btn small" title="Optional — some gateways (e.g. self-hosted Bifrost) return an empty /v1/models by design; for those the ids below are already complete" disabled={discovering} onClick={discover}>
                 <Icon name="refresh" size={13} />{discovering ? 'Fetching…' : 'Discover models'}
               </button>
             </div>
