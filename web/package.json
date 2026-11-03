@@ -7,7 +7,9 @@
     "dev": "vite",
     "build": "vite build",
     "smoke": "node smoke.mjs",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "smoke:signals": "node signals-graph.smoke.mjs",
+    "test:layout": "node src/signals-layout.test.mjs"
   },
   "dependencies": {
     "diff2html": "^3.4.56",
