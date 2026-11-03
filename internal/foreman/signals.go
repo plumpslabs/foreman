@@ -315,12 +315,46 @@ type SignalsReport struct {
 	// Kinds counts edges per kind (co_touch, edit, search, import) so the
 	// dashboard can show the structure/usage split without extra queries.
 	Kinds map[string]int `json:"kinds,omitempty"`
+	// Graph is the renderable hot core (nodes + in-set edges) for the
+	// dashboard's Graph tab; omitempty keeps it out when nothing is learned.
+	Graph SignalGraph `json:"graph,omitempty"`
 }
 
 // SignalActivity is one day's usage total for the growth chart.
 type SignalActivity struct {
 	Day     string `json:"day"`
 	Touches int    `json:"touches"`
+}
+
+// SignalGraphNode is one file in the dashboard graph payload.
+type SignalGraphNode struct {
+	Path   string  `json:"path"`
+	Weight float64 `json:"weight"`
+	Hits   int     `json:"hits"`
+	// Degree counts shown in-set edges touching the node — the one-look
+	// importance figure behind the render radius and the detail panel.
+	Degree int `json:"degree"`
+}
+
+// SignalGraphEdge is one drawn connection. Direction follows the stored pair
+// (normalized for symmetric kinds), so the detail panel can say who imports
+// whom without re-querying.
+type SignalGraphEdge struct {
+	From   string  `json:"from"`
+	To     string  `json:"to"`
+	Kind   string  `json:"kind"`
+	Weight float64 `json:"weight"`
+}
+
+// SignalGraph is the renderable subset of the whole graph: the hottest files
+// plus the edges between them. Edges touching files outside the set are not
+// drawn — the render shows the hot core; the agent's related tool still sees
+// full neighborhoods.
+type SignalGraph struct {
+	Nodes []SignalGraphNode `json:"nodes"`
+	Edges []SignalGraphEdge `json:"edges"`
+	// Truncated reports that more files carry weight than are shown.
+	Truncated bool `json:"truncated"`
 }
 
 // SignalsReport assembles the API/dashboard snapshot under one consistent
@@ -358,11 +392,101 @@ func (d *DB) SignalsReport(topN int) (SignalsReport, error) {
 	if rerr != nil && rerr != sql.ErrNoRows {
 		return r, rerr
 	}
+	if r.Graph, err = d.SignalsGraph(signalsGraphLimit); err != nil {
+		return r, err
+	}
 	return r, nil
 }
 
-// SignalKindCounts returns how many edges exist per kind, for the dashboard's
-// structure/usage split.
+// signalsGraphLimit caps the dashboard graph: the hottest files rendered at
+// once. Everything beyond stays in the agent-side graph (the related tool),
+// it is only the SVG that must stay readable.
+const signalsGraphLimit = 48
+
+// SignalsGraph picks the limit hottest files by total weight and returns the
+// edges among them. Self-edges (search self-mentions) are never drawn; edges
+// into files outside the picked set are not either — the render shows the hot
+// core, the agent's related tool still sees full neighborhoods.
+func (d *DB) SignalsGraph(limit int) (SignalGraph, error) {
+	g := SignalGraph{Nodes: []SignalGraphNode{}, Edges: []SignalGraphEdge{}}
+	if limit < 1 {
+		limit = 1
+	}
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+	rows, err := d.db.Query(`
+		SELECT path, SUM(weight) AS weight, SUM(hits) AS hits FROM (
+			SELECT src AS path, weight, hits FROM signals_edges
+			UNION ALL
+			SELECT dst AS path, weight, hits FROM signals_edges
+		) GROUP BY path ORDER BY weight DESC, hits DESC, path LIMIT ?`, limit)
+	if err != nil {
+		return g, err
+	}
+	in := map[string]int{}
+	for rows.Next() {
+		var node SignalGraphNode
+		if err := rows.Scan(&node.Path, &node.Weight, &node.Hits); err == nil {
+			in[node.Path] = len(g.Nodes)
+			g.Nodes = append(g.Nodes, node)
+		}
+	}
+	rows.Close()
+	if rows.Err() != nil {
+		return g, rows.Err()
+	}
+	if len(g.Nodes) == 0 {
+		return g, nil
+	}
+	// Edges restricted to the picked set, strongest first; the render draws at
+	// most signalsGraphEdgeCap of them. Degree counts every in-set edge so a
+	// node cropped out of the drawing still visibly carries connectors.
+	paths := make([]string, 0, len(in))
+	for p := range in {
+		paths = append(paths, p)
+	}
+	ph := strings.TrimSuffix(strings.Repeat("?,", len(paths)), ",")
+	anyPaths := make([]any, 0, 2*len(paths))
+	for _, p := range append(append([]string{}, paths...), paths...) {
+		anyPaths = append(anyPaths, p)
+	}
+	rows, err = d.db.Query(fmt.Sprintf(`
+		SELECT kind, src, dst, weight FROM signals_edges
+		WHERE src != dst AND (src IN (%s) OR dst IN (%s))
+		ORDER BY weight DESC LIMIT 400`, ph, ph),
+		anyPaths...)
+	if err != nil {
+		return g, err
+	}
+	defer rows.Close()
+	drawn := 0
+	for rows.Next() {
+		var e SignalGraphEdge
+		if err := rows.Scan(&e.Kind, &e.From, &e.To, &e.Weight); err != nil {
+			return g, err
+		}
+		srcIdx, okSrc := in[e.From]
+		dstIdx, okDst := in[e.To]
+		if !okSrc || !okDst {
+			continue
+		}
+		drawn++
+		if drawn <= signalsGraphEdgeCap {
+			g.Edges = append(g.Edges, e)
+		}
+		g.Nodes[srcIdx].Degree++
+		g.Nodes[dstIdx].Degree++
+	}
+	g.Truncated = len(g.Nodes) == limit
+	return g, rows.Err()
+}
+
+// signalsGraphEdgeCap bounds the SVG: beyond a few hundred curves the render
+// is unreadable and every dashboard frame pays for them.
+const signalsGraphEdgeCap = 240
+
+// SignalGraph is the renderable subset of the whole graph: the hottest files
+// plus the edges between them (declared once above SignalsGraph's callers).
 func (d *DB) SignalKindCounts() (map[string]int, error) {
 	d.mu.RLock()
 	defer d.mu.RUnlock()

@@ -5,6 +5,90 @@ import (
 	"time"
 )
 
+func TestSignalsGraphPicksHotFilesAndEdges(t *testing.T) {
+	db := openTestSignalsDB(t)
+
+	// Per-file weight (both endpoints count): a=17.5, b=8.5, z=5, c=5, y=1 —
+	// so the top-3 set is {a, b, z}, and edges touching c or y are dropped.
+	edges := []struct {
+		kind, src, dst string
+		w              float64
+	}{
+		{"import", "b.go", "a.go", 5},
+		{"import", "c.go", "a.go", 5},
+		{"edit", "a.go", "b.go", 2},
+		{"edit", "z.go", "a.go", 4},
+		{"search", "z.go", "y.go", 1},
+		{"co_touch", "a.go", "b.go", 1.5},
+		{"edit", "a.go", "a.go", 3}, // self-edge: learned, but never drawn
+	}
+	for _, e := range edges {
+		if err := db.SignalTouch(e.kind, e.src, e.dst, e.w); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	g, err := db.SignalsGraph(3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(g.Nodes) != 3 {
+		t.Fatalf("node limit not honored: got %d nodes", len(g.Nodes))
+	}
+	if g.Nodes[0].Path != "a.go" {
+		t.Fatalf("hot node = %s, want a.go", g.Nodes[0].Path)
+	}
+	saw := map[string]bool{}
+	for _, e := range g.Edges {
+		key := e.Kind + "/" + e.From + "/" + e.To
+		saw[key] = true
+		if e.From == e.To {
+			t.Errorf("self-edge drawn: %q", key)
+		}
+		if _, ok := map[string]bool{"a.go": true, "b.go": true, "z.go": true}[e.From]; !ok {
+			t.Errorf("edge src outside picked set: %q", key)
+		}
+		if _, ok := map[string]bool{"a.go": true, "b.go": true, "z.go": true}[e.To]; !ok {
+			t.Errorf("edge dst outside picked set: %q", key)
+		}
+	}
+	if saw["search/z.go/y.go"] {
+		t.Error("y.go is below the cut — its edge must not render")
+	}
+	if saw["import/c.go/a.go"] {
+		t.Error("c.go is below the cut — its edge must not render")
+	}
+	if !saw["edit/a.go/z.go"] {
+		t.Errorf("expected the in-set edit edge, got edges=%v", g.Edges)
+	}
+	if g.Nodes[0].Degree < 2 {
+		t.Errorf("a.go degree = %d, want >=2 (z->a edit, a->b edit/co_touch)", g.Nodes[0].Degree)
+	}
+	if !g.Truncated {
+		t.Error("expected Truncated=true when the pool exceeds the limit")
+	}
+
+	// The report embeds the graph for the dashboard payload.
+	rep, err := db.SignalsReport(20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rep.Graph.Nodes) == 0 {
+		t.Error("SignalsReport should embed the graph payload")
+	}
+}
+
+func TestSignalsGraphEmpty(t *testing.T) {
+	db := openTestSignalsDB(t)
+	g, err := db.SignalsGraph(48)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(g.Nodes) != 0 || len(g.Edges) != 0 || g.Truncated {
+		t.Fatalf("empty db should give an empty untruncated graph: %+v", g)
+	}
+}
+
 // openTestSignalsDB returns a Store-backed DB for signal tests using the same
 // in-memory project harness other suites rely on (no real .foreman on disk).
 func openTestSignalsDB(t *testing.T) *DB {

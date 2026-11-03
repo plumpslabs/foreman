@@ -4,6 +4,7 @@ import { Icon } from './icons.jsx';
 import { Markdown } from './markdown.jsx';
 import { ChangesView, parseDiff, mergeFiles } from './diff.jsx';
 import { PlanGraph } from './plan.jsx';
+import { SignalsGraph } from './signalsgraph.jsx';
 import { GitPanel } from './git.jsx';
 import { AgentAvatar, findAgent } from './avatar.jsx';
 
@@ -3106,6 +3107,8 @@ export function SignalsPage() {
   const [report, setReport] = useState(null);
   const [err, setErr] = useState('');
   const [loading, setLoading] = useState(true);
+  const [view, setView] = useState('usage');
+  const [picked, setPicked] = useState('');
 
   useEffect(() => {
     let alive = true;
@@ -3145,6 +3148,38 @@ export function SignalsPage() {
             <div class="stat"><div class="stat-num">{report.touches || 0}</div><div class="stat-label">Total touches</div></div>
           </div>
 
+          <div class="settings-tabs">
+            <button class={`settings-tab ${view === 'usage' ? 'active' : ''}`} onClick={() => setView('usage')}>
+              <Icon name="activity" size={15} />Usage
+            </button>
+            <button class={`settings-tab ${view === 'graph' ? 'active' : ''}`} onClick={() => setView('graph')}>
+              <Icon name="git-diff" size={15} />Graph
+            </button>
+          </div>
+
+          {view === 'graph' && (
+            <div class="settings-card">
+              <div class="settings-card-head">
+                <div>
+                  <h3>Hot core</h3>
+                  <p>
+                    The files with the most learned weight, and the edges between them. Node size follows
+                    how many edges touch the file; ring 0 is the hottest. Click a node to pin its detail.
+                  </p>
+                </div>
+              </div>
+              <SignalsGraph graph={report.graph} onPick={setPicked} />
+              {picked && (
+                <div class="md-hint" style="margin-top:10px">
+                  Pinned: <span class="mono">{picked}</span>{' '}
+                  <button class="btn small" onClick={() => setPicked('')}>Clear</button>
+                </div>
+              )}
+            </div>
+          )}
+
+          {view === 'usage' && (
+            <>
           <div class="settings-card">
             <h3 class="card-title">Growth (daily touches)</h3>
             {activity.length === 0
@@ -3194,6 +3229,8 @@ export function SignalsPage() {
                 and <b>search</b> are learned from runs — search edges are deliberately weak.
               </div>
             </div>
+          )}
+            </>
           )}
         </div>
       )}
