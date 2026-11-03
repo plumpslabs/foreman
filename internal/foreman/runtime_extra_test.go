@@ -67,19 +67,24 @@ func TestNormalizePriority(t *testing.T) {
 }
 
 func TestBackoffAndRetryAfter(t *testing.T) {
-	if d := backoffForAttempt(errors.New("boom"), 1); d <= 0 {
+	if d := backoffForAttempt(errors.New("boom"), 1, false); d <= 0 {
 		t.Fatalf("expected positive backoff, got %v", d)
 	}
 	// Exponential growth, capped at 30s.
-	if d := backoffForAttempt(errors.New("boom"), 3); d != 8*time.Second {
+	if d := backoffForAttempt(errors.New("boom"), 3, false); d != 8*time.Second {
 		t.Fatalf("attempt 3 backoff = %v, want 8s", d)
 	}
-	if d := backoffForAttempt(errors.New("boom"), 9); d != 30*time.Second {
+	if d := backoffForAttempt(errors.New("boom"), 9, false); d != 30*time.Second {
 		t.Fatalf("backoff should cap at 30s, got %v", d)
 	}
-	// Retry-After hint wins over exponential backoff.
-	if d := backoffForAttempt(errors.New("rate limited: retry-after: 20"), 1); d != 20*time.Second {
+	// Retry-After hint wins over exponential backoff on a same-target re-sample.
+	if d := backoffForAttempt(errors.New("rate limited: retry-after: 20"), 1, true); d != 20*time.Second {
 		t.Fatalf("retry-after backoff = %v, want 20s", d)
+	}
+	// A rotation to a different key/model ignores the failed target's hint:
+	// sleeping out its quota window before a healthy target is dead latency.
+	if d := backoffForAttempt(errors.New("rate limited: retry-after: 20"), 1, false); d != 2*time.Second {
+		t.Fatalf("rotation backoff = %v, want 2s (hint must not apply)", d)
 	}
 	if secs, ok := parseRetryAfter(errors.New("429 too many requests, retry after 5 seconds")); !ok || secs != 5 {
 		t.Fatalf("parseRetryAfter = (%d, %v), want (5, true)", secs, ok)

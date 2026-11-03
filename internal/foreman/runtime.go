@@ -495,7 +495,13 @@ func (rt *Runtime) execute(ctx context.Context, control *RunControl, run AgentRu
 attemptLoop:
 	for ; attempt < attemptsAllowed; attempt++ {
 		if attempt > 0 {
-			backoff := backoffForAttempt(lastErr, attempt)
+			// A Retry-After hint binds only to the target that failed. A
+			// transient glitch re-samples the same model+key, so the hint
+			// applies; any rotation moves to a different credential or model
+			// whose quota window is its own, and sleeping out the old window
+			// there is pure dead latency.
+			honorHint := isTransientModelError(lastErr)
+			backoff := backoffForAttempt(lastErr, attempt, honorHint)
 			_ = rt.store.RecordActivity(room.ID, task.AgentName, "retry",
 				fmt.Sprintf("⚠️ Run attempt %d failed (%v). Retrying in %v...", attempt, lastErr, backoff),
 				nil)
@@ -1409,9 +1415,17 @@ func conversationID(roomID string, task Task) string {
 	return roomID + ":" + task.AgentName
 }
 
-// backoffForAttempt returns how long to wait before retrying a failed run. It
-// honors a "Retry-After" hint in the provider error when present, otherwise it
-// backs off exponentially (2s, 4s, 8s, ...) capped at 30s.
+// backoffForAttempt returns how long to wait before retrying a failed run.
+// Retry-After is honored only when the retry stays on the same target (a
+// transient re-sample of the same model and key): the hint belongs to the
+// failed target, not to whatever the rotation moves to. When honorRetryAfter
+// is false — every credential/quota/model rotation — the wait falls back to
+// plain exponential growth (2s, 4s, 8s, …) capped at 30s, because sleeping out
+// another provider's 59-second quota window before trying a healthy one just
+// adds dead latency to the run.
+//   - honorRetryAfter: the hint belongs to the exact target that failed, so
+//     it applies only to a same-target re-sample, not to a rotation.
+//
 // transientMarkers flag a *malformed or empty model response*: the model
 // answered, but the payload could not be parsed into a tool call (or contained
 // nothing at all). This is a sampling/streaming glitch on the provider side
@@ -1517,19 +1531,21 @@ func (p *retryPicker) model(attempt int, transient bool) (string, bool) {
 	return p.chain[p.rotations%len(p.chain)], false
 }
 
-func backoffForAttempt(err error, attempt int) time.Duration {
+func backoffForAttempt(err error, attempt int, honorRetryAfter bool) time.Duration {
 	if attempt < 1 {
 		attempt = 1
 	}
-	if secs, ok := parseRetryAfter(err); ok {
-		d := time.Duration(secs) * time.Second
-		if d > 60*time.Second {
-			d = 60 * time.Second
+	if honorRetryAfter {
+		if secs, ok := parseRetryAfter(err); ok {
+			d := time.Duration(secs) * time.Second
+			if d > 60*time.Second {
+				d = 60 * time.Second
+			}
+			if d < time.Second {
+				d = time.Second
+			}
+			return d
 		}
-		if d < time.Second {
-			d = time.Second
-		}
-		return d
 	}
 	d := time.Duration(1<<attempt) * time.Second
 	if d > 30*time.Second {

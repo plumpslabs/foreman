@@ -3135,7 +3135,7 @@ export function SignalsPage() {
       {loading && <div class="empty">Loading signals…</div>}
       {err && <div class="empty error">{plain(err)}</div>}
       {report && !loading && (
-        <>
+        <div class="settings-stack">
           <div class="stat-row">
             <div class="stat"><div class="stat-num">{report.files || 0}</div><div class="stat-label">Files in graph</div></div>
             <div class="stat"><div class="stat-num">{report.edges || 0}</div><div class="stat-label">Connections</div></div>
@@ -3192,7 +3192,7 @@ export function SignalsPage() {
               </div>
             </div>
           )}
-        </>
+        </div>
       )}
     </>
   );
