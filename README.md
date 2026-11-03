@@ -35,7 +35,9 @@ start`.
   execution policy (concurrency, budget, approvals).
 - **Signals** — signals mined from runs, surfaced as an explorable graph. Structural `import`
   edges are derived straight from the source tree at index time, so a freshly opened project
-  already has a useful graph before any agent runs.
+  already has a useful graph before any agent runs. Monorepos are first-class: every `go.mod` /
+  `go.work`, `package.json` workspace name, per-package `tsconfig`/`jsconfig` path alias, and
+  `Cargo.toml` crate is discovered and scoped to the package that declares it.
 - **MCP Servers** — global server definitions (stdio or HTTP); rooms opt in per server, with
   connection testing and per-server status.
 - **Provider presets** — TokenHarbor, OpenCode Zen (with local auto-detection), OpenCode Go,

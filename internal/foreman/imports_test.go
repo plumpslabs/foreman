@@ -35,7 +35,7 @@ import { repo } from "./store";`)
 
 func TestExtractImportsTSRelative(t *testing.T) {
 	root, byRel := importWorkspace(t)
-	got := extractImports(root, "backend/src/services/tickets/mutation.service.ts", "", byRel)
+	got := extractImports(root, "backend/src/services/tickets/mutation.service.ts", &importContext{byRel: byRel})
 	want := map[string]bool{
 		"backend/src/constants/ticket.constants.ts": true,
 		"backend/src/services/tickets/store.ts":     true,
@@ -71,7 +71,7 @@ func TestGoModuleImportResolvesIndependently(t *testing.T) {
 		}
 		return nil
 	})
-	got := extractImports(root, "main.go", "github.com/owner/app", byRel)
+	got := extractImports(root, "main.go", &importContext{byRel: byRel, goModules: []goModule{{Path: "github.com/owner/app"}}})
 	if len(got) != 1 || got[0] != "util/db.go" {
 		t.Fatalf("got %v, want [util/db.go]", got)
 	}

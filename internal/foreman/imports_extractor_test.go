@@ -100,10 +100,11 @@ func importCases() []importCase {
 			fallbackOK: true,
 		},
 		{
-			name: "rust mod declaration",
-			rel:  "src/lib.rs",
-			body: "mod tickets;\n",
-			want: []string{"src/tickets.rs"},
+			name:       "rust mod declaration",
+			rel:        "src/lib.rs",
+			body:       "mod tickets;\n",
+			want:       []string{"src/tickets.rs"},
+			fallbackOK: true, // resolved by the .rs sibling rule, not by regex joining
 		},
 		{
 			name:       "rust use crate path",
@@ -239,7 +240,7 @@ func TestExtractImportsFallsBackOnUnparseableFile(t *testing.T) {
 	write("src/dep.ts", "export const a = 1;\n")
 	byRel := map[string]bool{"src/broken.ts": true, "src/dep.ts": true}
 
-	got := extractImports(root, "src/broken.ts", "", byRel)
+	got := extractImports(root, "src/broken.ts", &importContext{byRel: byRel})
 	if len(got) != 1 || got[0] != "src/dep.ts" {
 		t.Fatalf("got %v, want [src/dep.ts]", got)
 	}
